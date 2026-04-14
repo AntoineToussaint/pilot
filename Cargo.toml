@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+tui-markdown = "0.3"
+
+# Terminal emulation (libghostty-vt via local path in tui-term crate)
+portable-pty = "0.8"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Config
+serde_yaml = "0.9"
+
+# GitHub
+octocrab = "0.44"
+
+# Internal crates
+pilot-auth = { path = "crates/auth" }
+pilot-config = { path = "crates/config" }
+pilot-mcp = { path = "crates/mcp-server" }
+pilot-store = { path = "crates/store" }
+pilot-core = { path = "crates/core" }
+pilot-events = { path = "crates/events" }
+pilot-tui-term = { path = "crates/tui-term" }
+pilot-gh = { path = "crates/gh-provider" }
+pilot-git-ops = { path = "crates/git-ops" }

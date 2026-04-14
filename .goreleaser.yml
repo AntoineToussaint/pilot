@@ -1,0 +1,68 @@
+version: 2
+
+project_name: pilot
+
+builds:
+  - id: pilot
+    builder: rust
+    targets:
+      - aarch64-apple-darwin
+      - x86_64-apple-darwin
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    cargo:
+      package: pilot  # the binary crate in crates/app
+      zigbuild: true
+
+  - id: pilot-mcp-server
+    builder: rust
+    targets:
+      - aarch64-apple-darwin
+      - x86_64-apple-darwin
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    cargo:
+      package: pilot-mcp
+      zigbuild: true
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - run.sh
+
+brews:
+  - name: pilot
+    repository:
+      owner: tensorzero  # change to your GitHub org
+      name: homebrew-tap
+    homepage: "https://github.com/tensorzero/pilot"
+    description: "Reactive PR inbox TUI with embedded Claude Code terminals"
+    license: "MIT"
+    install: |
+      bin.install "pilot"
+      bin.install "pilot-mcp-server"
+    dependencies:
+      - name: zig
+        type: build
+    test: |
+      system "#{bin}/pilot", "--version"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: tensorzero  # change to your GitHub org
+    name: pilot

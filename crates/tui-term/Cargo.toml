@@ -1,0 +1,10 @@
+[package]
+name = "pilot-tui-term"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ratatui = { workspace = true }
+portable-pty = { workspace = true }
+thiserror = { workspace = true }
+libghostty-vt = { path = "/Users/antoine/Development/libghostty-rs/crates/libghostty-vt" }
