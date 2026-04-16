@@ -903,7 +903,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             let owner = parts[0].to_string();
                             let repo = parts[1].to_string();
                             let tx = action_tx.clone();
-                            let session_key = key.clone();
+                            let _session_key = key.clone();
                             let worktrees = WorktreeManager::default_base();
 
                             tokio::spawn(async move {
@@ -1558,13 +1558,18 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
         Action::MergePr => {
             if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get(&key) {
+                // Extract values before borrowing mutably.
+                let pr_info = app.sessions.get(&key).map(|session| {
                     let task = &session.primary_task;
-                    let repo = task.repo.as_deref().unwrap_or("");
+                    let repo = task.repo.clone().unwrap_or_default();
                     let pr_num = task.id.key.rsplit_once('#')
                         .map(|(_, n)| n.to_string())
                         .unwrap_or_default();
+                    let review = format!("{:?}", task.review);
+                    (repo, pr_num, review)
+                });
 
+                if let Some((repo, pr_num, review)) = pr_info {
                     if repo.is_empty() || pr_num.is_empty() {
                         app.status = "Cannot merge: no PR info".into();
                         return;
@@ -1574,10 +1579,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         // Second M — execute merge.
                         app.merge_pending = None;
                         app.status = format!("Merging {repo}#{pr_num}…");
-                        // Return focus to sidebar.
                         app.key_mode = KeyMode::Normal;
+                        // Optimistic update — show as queued/merging immediately.
+                        if let Some(session) = app.sessions.get_mut(&key) {
+                            session.primary_task.in_merge_queue = true;
+                        }
                         let repo = repo.to_string();
                         let pr = pr_num.clone();
+                        let _session_key = key.clone();
                         let tx = action_tx.clone();
                         tokio::spawn(async move {
                             let output = tokio::process::Command::new("gh")
@@ -1594,6 +1603,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 Ok(o) => {
                                     let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
                                     tracing::error!("Merge failed: {err}");
+                                    // Revert optimistic update — send task state back to Open.
                                     let _ = tx.send(Action::StatusMessage(
                                         format!("Error: merge failed — {err}"),
                                     ));
@@ -1607,7 +1617,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             }
                         });
                     } else {
-                        let review = format!("{:?}", task.review);
                         app.merge_pending = Some(key.clone());
                         app.status = format!(
                             "Merge? {repo}#{pr_num} (review: {review}). Press M again to confirm."
@@ -1695,7 +1704,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     let owner = parts[0].to_string();
                                     let repo = parts[1].to_string();
                                     let tx = action_tx.clone();
-                                    let session_key = key.clone();
+                                    let _session_key = key.clone();
                                     let worktrees = WorktreeManager::default_base();
                                     tokio::spawn(async move {
                                         match worktrees.checkout(&owner, &repo, &branch).await {
