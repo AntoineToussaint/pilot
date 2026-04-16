@@ -74,36 +74,94 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
     ]),
 ];
 
-/// Curated short action hints per mode — only the essentials.
+/// Static hints for modes without context.
 pub fn action_bar_for_mode(mode: KeyMode) -> Vec<(&'static str, &'static str)> {
     match mode {
-        KeyMode::Normal => vec![
-            ("j/k", "navigate"),
-            ("Enter", "detail"),
-            ("c", "claude"),
-            ("o", "browser"),
-            ("f", "fix"),
-            ("g", "refresh"),
-            ("?", "help"),
-        ],
-        KeyMode::Detail => vec![
-            ("j/k", "navigate"),
-            ("Space", "read"),
-            ("f", "fix"),
-            ("e", "reply"),
-            ("o", "browser"),
-            ("Esc", "back"),
-            ("?", "help"),
-        ],
-        KeyMode::Terminal => vec![
-            ("Tab", "exit"),
-        ],
-        KeyMode::PanePrefix => vec![
-            ("h/j/k/l", "focus"),
-            ("v/s", "split"),
-            ("z", "fullscreen"),
-        ],
+        KeyMode::Normal | KeyMode::Detail => vec![("?", "help")],
+        KeyMode::Terminal => vec![("Tab", "exit"), ("?", "help")],
+        KeyMode::PanePrefix => vec![("h/j/k/l", "focus"), ("v/s", "split"), ("z", "zoom")],
     }
+}
+
+/// Contextual action hints based on the current PR state.
+/// Shows only what's relevant RIGHT NOW.
+pub fn contextual_hints(
+    mode: KeyMode,
+    ci: pilot_core::CiStatus,
+    _review: pilot_core::ReviewStatus,
+    role: pilot_core::TaskRole,
+    has_conflicts: bool,
+    has_unread: bool,
+    is_ready: bool,
+    has_terminal: bool,
+    needs_reply: bool,
+    in_merge_queue: bool,
+    has_reviewers: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut hints = Vec::with_capacity(8);
+    let is_author = matches!(role, pilot_core::TaskRole::Author);
+
+    match mode {
+        KeyMode::Normal => {
+            // Always: navigation basics.
+            hints.push(("j/k", "navigate"));
+            hints.push(("Enter", "detail"));
+
+            // Contextual actions based on PR state.
+            if is_ready && is_author && !in_merge_queue {
+                hints.push(("M", "MERGE"));
+            }
+            if has_conflicts && is_author {
+                hints.push(("f", "REBASE"));
+            } else if ci == pilot_core::CiStatus::Failure && is_author {
+                hints.push(("f", "FIX CI"));
+            } else if needs_reply && is_author {
+                hints.push(("e", "REPLY"));
+            }
+            if matches!(role, pilot_core::TaskRole::Reviewer) {
+                hints.push(("o", "review"));
+            }
+            if is_author && !has_reviewers {
+                hints.push(("A", "assign"));
+            }
+            if !has_terminal {
+                hints.push(("c", "claude"));
+            }
+            hints.push(("o", "browser"));
+            hints.push(("?", "help"));
+        }
+        KeyMode::Detail => {
+            hints.push(("j/k", "comments"));
+
+            // Contextual for detail.
+            if has_unread {
+                hints.push(("Space", "read"));
+            }
+            if ci == pilot_core::CiStatus::Failure || has_conflicts {
+                hints.push(("f", "FIX"));
+            }
+            if needs_reply {
+                hints.push(("e", "REPLY"));
+            }
+            if is_ready && is_author {
+                hints.push(("M", "MERGE"));
+            }
+            hints.push(("R", "reviewers"));
+            hints.push(("A", "assignees"));
+            hints.push(("Esc", "back"));
+            hints.push(("?", "help"));
+        }
+        KeyMode::Terminal => {
+            hints.push(("Tab", "exit terminal"));
+        }
+        KeyMode::PanePrefix => {
+            hints.push(("h/j/k/l", "focus"));
+            hints.push(("v/s", "split"));
+            hints.push(("z", "zoom"));
+        }
+    }
+
+    hints
 }
 
 /// Get all bindings for the help page.

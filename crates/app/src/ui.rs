@@ -603,8 +603,31 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         list_area,
     );
 
-    // ── Action bar (bottom) ──
-    let hints = crate::keymap::action_bar_for_mode(crate::keys::KeyMode::Normal);
+    // ── Action bar (bottom) — contextual based on selected PR ──
+    let hints = if let Some(key) = app.selected_session_key() {
+        if let Some(session) = app.sessions.get(&key) {
+            let task = &session.primary_task;
+            let ci_ok = matches!(task.ci, CiStatus::Success | CiStatus::None);
+            let review_ok = task.review == ReviewStatus::Approved;
+            crate::keymap::contextual_hints(
+                crate::keys::KeyMode::Normal,
+                task.ci,
+                task.review,
+                task.role,
+                task.has_conflicts,
+                session.unread_count() > 0,
+                ci_ok && review_ok && !task.has_conflicts,
+                app.terminals.contains_key(&key),
+                task.needs_reply,
+                task.in_merge_queue,
+                !task.reviewers.is_empty() || !task.assignees.is_empty(),
+            )
+        } else {
+            crate::keymap::action_bar_for_mode(crate::keys::KeyMode::Normal)
+        }
+    } else {
+        crate::keymap::action_bar_for_mode(crate::keys::KeyMode::Normal)
+    };
     let action_bar = build_action_bar(&hints);
     frame.render_widget(
         Paragraph::new(action_bar).style(Style::default().bg(C_BG_ALT)),
@@ -973,6 +996,25 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
     // ── Action bar ──
     let n_selected = app.selected_comments.len();
 
+    // Contextual action bar for detail pane.
+    let detail_hints = {
+        let ci_ok = matches!(task.ci, CiStatus::Success | CiStatus::None);
+        let review_ok = task.review == ReviewStatus::Approved;
+        crate::keymap::contextual_hints(
+            crate::keys::KeyMode::Detail,
+            task.ci,
+            task.review,
+            task.role,
+            task.has_conflicts,
+            session.unread_count() > 0,
+            ci_ok && review_ok && !task.has_conflicts,
+            app.terminals.contains_key(key),
+            task.needs_reply,
+            task.in_merge_queue,
+            !task.reviewers.is_empty() || !task.assignees.is_empty(),
+        )
+    };
+
     let action_bar = if !is_focused {
         let hints = crate::keymap::action_bar_for_mode(crate::keys::KeyMode::Normal);
         build_action_bar(&hints)
@@ -987,21 +1029,16 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
             ),
             Span::styled(" ", Style::default()),
         ];
-        let hints = crate::keymap::action_bar_for_mode(crate::keys::KeyMode::Detail);
-        for (short, label) in &hints {
-            spans.push(Span::styled(
-                short.to_string(),
-                Style::default().fg(C_ACCENT).bold(),
-            ));
-            spans.push(Span::styled(
-                format!(":{label} "),
-                Style::default().fg(C_TEXT_DIM),
-            ));
-        }
+        // When comments are selected, show fix/reply actions.
+        spans.push(Span::styled("f", Style::default().fg(C_ACCENT).bold()));
+        spans.push(Span::styled(":fix ", Style::default().fg(C_TEXT_DIM)));
+        spans.push(Span::styled("r", Style::default().fg(C_ACCENT).bold()));
+        spans.push(Span::styled(":reply ", Style::default().fg(C_TEXT_DIM)));
+        spans.push(Span::styled("Esc", Style::default().fg(C_ACCENT).bold()));
+        spans.push(Span::styled(":clear ", Style::default().fg(C_TEXT_DIM)));
         Line::from(spans)
     } else {
-        let hints = crate::keymap::action_bar_for_mode(crate::keys::KeyMode::Detail);
-        build_action_bar(&hints)
+        build_action_bar(&detail_hints)
     };
     frame.render_widget(
         Paragraph::new(action_bar).style(Style::default().bg(C_BG_ALT)),
