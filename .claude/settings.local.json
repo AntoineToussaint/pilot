@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(slack --help)",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(otool -L /Users/antoine/Development/gh-pilot/target/debug/build/libghostty-vt-sys-*/out/ghostty-install/lib/libghostty-vt.0.1.0.dylib)",
+      "Bash(otool -L target/debug/pilot)"
     ]
   }
 }
