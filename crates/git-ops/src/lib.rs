@@ -89,7 +89,7 @@ impl WorktreeManager {
             if let Some(parent) = bare_path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            let url = format!("https://github.com/{owner}/{repo}.git");
+            let url = format!("git@github.com:{owner}/{repo}.git");
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
