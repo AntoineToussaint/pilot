@@ -862,30 +862,30 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::SplitVertical => {
             let content = current_detail_content(app);
             app.panes.split_vertical(content);
-            app.key_mode = determine_mode(app);
+            apply_determined_mode(app);
         }
         Action::SplitHorizontal => {
             let content = current_detail_content(app);
             app.panes.split_horizontal(content);
-            app.key_mode = determine_mode(app);
+            apply_determined_mode(app);
         }
         Action::ClosePane => {
             app.panes.close_focused();
-            app.key_mode = determine_mode(app);
+            apply_determined_mode(app);
         }
         Action::FocusPaneNext => {
             // Clear terminal mode so determine_mode re-evaluates from the new pane.
             if app.key_mode == KeyMode::Terminal {
-                app.key_mode = KeyMode::Normal;
+                set_key_mode(app, KeyMode::Normal);
             }
             app.panes.focus_next();
-            app.key_mode = determine_mode(app);
+            apply_determined_mode(app);
         }
         Action::FocusPaneUp | Action::FocusPaneDown
         | Action::FocusPaneLeft | Action::FocusPaneRight => {
             // Clear terminal mode so determine_mode re-evaluates from the new pane.
             if app.key_mode == KeyMode::Terminal {
-                app.key_mode = KeyMode::Normal;
+                set_key_mode(app, KeyMode::Normal);
             }
             let dir = match action {
                 Action::FocusPaneUp => Direction::Up,
@@ -894,7 +894,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 _ => Direction::Right,
             };
             app.panes.focus_direction(dir, ratatui::prelude::Rect::default());
-            app.key_mode = determine_mode(app);
+            apply_determined_mode(app);
         }
         Action::ResizePane(delta) => {
             app.panes.resize_focused(delta);
@@ -908,14 +908,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if !app.tab_order.is_empty() {
                 app.active_tab = (app.active_tab + 1) % app.tab_order.len();
                 sync_selected_to_tab(app);
-                app.key_mode = KeyMode::Terminal;
+                set_key_mode(app, KeyMode::Terminal);
             }
         }
         Action::PrevTab => {
             if !app.tab_order.is_empty() {
                 app.active_tab = (app.active_tab + app.tab_order.len() - 1) % app.tab_order.len();
                 sync_selected_to_tab(app);
-                app.key_mode = KeyMode::Terminal;
+                set_key_mode(app, KeyMode::Terminal);
             }
         }
         Action::GoToTab(n) => {
@@ -923,7 +923,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if idx < app.tab_order.len() {
                 app.active_tab = idx;
                 sync_selected_to_tab(app);
-                app.key_mode = KeyMode::Terminal;
+                set_key_mode(app, KeyMode::Terminal);
             }
         }
         Action::CloseTab => {
@@ -933,7 +933,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 if let Some(session) = app.sessions.get_mut(&key) {
                     session.state = SessionState::Active;
                 }
-                app.key_mode = determine_mode(app);
+                apply_determined_mode(app);
             }
         }
 
@@ -950,9 +950,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 // Re-sort but keep cursor on the same session.
                 let prev_mode = app.key_mode;
+                let prev_input_mode = app.input_mode.clone();
                 resort_sessions(app);
                 // Stay in current mode (don't jump away from detail).
                 app.key_mode = prev_mode;
+                app.input_mode = prev_input_mode;
                 update_detail_pane(app);
                 app.status = "Marked as read".into();
             }
@@ -966,7 +968,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(idx) = app.tab_order.iter().position(|k| k == &key) {
                         app.active_tab = idx;
                     }
-                    app.key_mode = KeyMode::Terminal;
+                    set_key_mode(app, KeyMode::Terminal);
                     return;
                 }
 
@@ -1272,7 +1274,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
                     // Click on sidebar area → select item or toggle repo.
                     if mouse.column < border_col {
-                        app.key_mode = KeyMode::Normal;
+                        set_key_mode(app, KeyMode::Normal);
                         // Map click row to a sidebar item.
                         // Row 0 = title bar, 1 = search, 2+ = items.
                         let click_row = mouse.row.saturating_sub(2) as usize;
@@ -1287,9 +1289,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         let right_area_height = _term_h;
                         let detail_cutoff = right_area_height * 30 / 100; // 30% for detail
                         if has_term && mouse.row > detail_cutoff {
-                            app.key_mode = KeyMode::Terminal;
+                            set_key_mode(app, KeyMode::Terminal);
                         } else {
-                            app.key_mode = KeyMode::Detail;
+                            set_key_mode(app, KeyMode::Detail);
                         }
                         update_detail_pane(app);
                     }
@@ -1704,7 +1706,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         // Second M — execute merge.
                         app.merge_pending = None;
                         app.status = format!("Merging {repo}#{pr_num}…");
-                        app.key_mode = KeyMode::Normal;
+                        set_key_mode(app, KeyMode::Normal);
                         // Optimistic update — show as queued/merging immediately.
                         if let Some(session) = app.sessions.get_mut(&key) {
                             session.primary_task.in_merge_queue = true;
@@ -1944,16 +1946,23 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if let Some(key) = app.selected_session_key() {
                 let cursor = app.detail_cursor;
                 app.quick_reply_input = Some((key, String::new(), cursor));
+                app.input_mode = InputMode::TextInput(TextInputKind::QuickReply);
                 app.status = "Quick reply — type message, Enter to post, Esc to cancel".into();
             }
         }
 
         Action::QuickReplyCancel => {
             app.quick_reply_input = None;
+            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
+                app.input_mode = app.base_input_mode();
+            }
             app.status = String::new();
         }
 
         Action::QuickReplyConfirm { body } => {
+            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
+                app.input_mode = app.base_input_mode();
+            }
             if let Some((session_key, _, comment_idx)) = app.quick_reply_input.take() {
                 if let Some(session) = app.sessions.get(&session_key) {
                     let repo = session.primary_task.repo.clone().unwrap_or_default();
@@ -2201,7 +2210,7 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
                         .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
                 }
             }
-            app.key_mode = KeyMode::Terminal;
+            set_key_mode(app, KeyMode::Terminal);
             app.status = match kind {
                 ShellKind::Claude => format!("Claude Code started in {}", cwd.display()),
                 ShellKind::Shell => format!("Shell started in {}", cwd.display()),
@@ -2406,7 +2415,7 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     if let Some(idx) = app.tab_order.iter().position(|k| k == &session_key) {
         app.active_tab = idx;
     }
-    app.key_mode = KeyMode::Terminal;
+    set_key_mode(app, KeyMode::Terminal);
 
     {
         let n = indices.len();
@@ -2648,6 +2657,28 @@ fn reset_detail_state(app: &mut App) {
     app.detail_cursor = 0;
     app.selected_comments.clear();
     update_detail_pane(app);
+}
+
+/// Set key_mode and keep input_mode in sync.
+/// When no overlay is active, input_mode mirrors key_mode.
+/// When an overlay IS active (Help, McpConfirm, TextInput, Picker),
+/// input_mode is left alone -- the overlay owns it.
+fn set_key_mode(app: &mut App, mode: KeyMode) {
+    app.key_mode = mode;
+    let overlay_active = matches!(
+        app.input_mode,
+        InputMode::Help | InputMode::McpConfirm
+        | InputMode::TextInput(_) | InputMode::Picker
+    );
+    if !overlay_active {
+        app.input_mode = InputMode::from_key_mode(mode);
+    }
+}
+
+/// Determine the key mode from pane content and apply it via set_key_mode.
+fn apply_determined_mode(app: &mut App) {
+    let mode = determine_mode(app);
+    set_key_mode(app, mode);
 }
 
 /// Determine the key mode based on what the focused pane contains.
