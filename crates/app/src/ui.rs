@@ -456,48 +456,48 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                         | ActionPriority::ApprovedReadyToMerge
                 );
 
-                // ── STATE column (9 chars): what state is the PR in? ──
+                // ── STATE column: composite readiness. Show the WORST blocker. ──
+                let is_author = task.role == TaskRole::Author;
+                let ci_ok = matches!(task.ci, CiStatus::Success | CiStatus::None);
+                let ci_running = matches!(task.ci, CiStatus::Running | CiStatus::Pending);
+                let review_ok = task.review == ReviewStatus::Approved;
+                let no_conflicts = !task.has_conflicts;
+
                 let (state_text, state_color) = match task.state {
                     TaskState::Draft => ("DRAFT", C_TEXT_DIM),
                     TaskState::Merged => ("MERGED", C_MAGENTA),
                     TaskState::Closed => ("CLOSED", C_RED),
-                    _ => {
-                        // Only show QUEUED if approved + in merge queue.
-                        if task.in_merge_queue && task.review == ReviewStatus::Approved {
-                            ("QUEUED", C_MAGENTA)
-                        } else {
-                            match (task.ci, task.review) {
-                                (CiStatus::Failure, _) => ("CI FAIL", C_RED),
-                                (_, ReviewStatus::Approved) => ("APPROVED", C_GREEN),
-                                (_, ReviewStatus::ChangesRequested) => ("CHANGES", C_ORANGE),
-                                (_, ReviewStatus::Pending) => ("REVIEW", C_YELLOW),
-                                (CiStatus::Running | CiStatus::Pending, _) => ("CI...", C_YELLOW),
-                                // CI green, no review yet = waiting for reviewer.
-                                (CiStatus::Success, ReviewStatus::None) => ("WAITING", C_YELLOW),
-                                _ => ("OPEN", C_TEXT_DIM),
-                            }
-                        }
-                    }
+                    _ if task.in_merge_queue && review_ok && ci_ok && no_conflicts => ("QUEUED", C_MAGENTA),
+                    _ if ci_ok && review_ok && no_conflicts => ("READY", C_GREEN),
+                    // Blockers — show the worst one.
+                    _ if task.has_conflicts => ("CONFLICT", C_RED),
+                    _ if task.ci == CiStatus::Failure => ("CI FAIL", C_RED),
+                    _ if task.review == ReviewStatus::ChangesRequested => ("CHANGES", C_ORANGE),
+                    _ if ci_running => ("CI...", C_YELLOW),
+                    _ if task.review == ReviewStatus::Pending => ("REVIEW", C_YELLOW),
+                    _ if ci_ok && task.review == ReviewStatus::None => ("NO REV", C_YELLOW),
+                    _ => ("OPEN", C_TEXT_DIM),
                 };
 
-                // ── ACTION column (8 chars): what should I do? ──
-                // Context-aware: what's the ONE thing I should do right now?
-                let is_author = task.role == TaskRole::Author;
-                let (action_text, action_color) = match priority {
-                    ActionPriority::CiFailed => ("FIX", C_RED),
-                    ActionPriority::NeedsReply => ("RESPOND", C_RED),
-                    ActionPriority::ChangesRequested => ("PUSH", C_ORANGE),
-                    ActionPriority::NeedsYourReview => ("REVIEW", C_YELLOW),
-                    ActionPriority::ApprovedReadyToMerge => ("MERGE", C_GREEN),
-                    _ if is_author
-                        && task.ci == CiStatus::Success
-                        && task.review == ReviewStatus::None
-                        && task.reviewers.is_empty()
-                        && task.assignees.is_empty() => ("ASSIGN", C_YELLOW),
-                    _ if is_author
-                        && task.ci == CiStatus::Success
-                        && matches!(task.review, ReviewStatus::None | ReviewStatus::Pending) => ("NUDGE", C_YELLOW),
-                    _ => ("", C_TEXT_DIM),
+                // ── ACTION column: what's the ONE thing I should do right now? ──
+                let (action_text, action_color) = if task.has_conflicts && is_author {
+                    ("REBASE", C_RED)
+                } else if task.ci == CiStatus::Failure && is_author {
+                    ("FIX", C_RED)
+                } else if task.needs_reply && is_author {
+                    ("RESPOND", C_RED)
+                } else if task.review == ReviewStatus::ChangesRequested && is_author {
+                    ("PUSH", C_ORANGE)
+                } else if task.role == TaskRole::Reviewer {
+                    ("REVIEW", C_YELLOW)
+                } else if ci_ok && review_ok && no_conflicts && is_author {
+                    ("MERGE", C_GREEN)
+                } else if is_author && ci_ok && task.reviewers.is_empty() && task.assignees.is_empty() {
+                    ("ASSIGN", C_YELLOW)
+                } else if is_author && ci_ok && matches!(task.review, ReviewStatus::None | ReviewStatus::Pending) {
+                    ("NUDGE", C_YELLOW)
+                } else {
+                    ("", C_TEXT_DIM)
                 };
 
                 // ── TIME column (5 chars) ──
@@ -694,34 +694,26 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
         ]),
         // Thin separator.
         thin_separator(sep_width),
-        // CI / Review / Role / Branch / Diff stats line.
+        // Status line with clear field labels.
         {
-            let mut ci_line_spans = vec![
+            let mut spans = vec![
+                Span::styled("CI: ", Style::default().fg(C_TEXT_DIM)),
                 ci_span(&task.ci),
-                Span::styled("    ", Style::default().fg(C_BORDER)),
+                Span::styled("   Review: ", Style::default().fg(C_TEXT_DIM)),
                 review_span(&task.review),
-                Span::styled("    ", Style::default().fg(C_BORDER)),
+                Span::styled("   Role: ", Style::default().fg(C_TEXT_DIM)),
                 role_span(&task.role),
-                if let Some(ref branch) = task.branch {
-                    Span::styled(
-                        format!("    {branch}"),
-                        Style::default().fg(C_TEXT_DIM),
-                    )
-                } else {
-                    Span::raw("")
-                },
             ];
-            if task.additions > 0 || task.deletions > 0 {
-                ci_line_spans.push(Span::styled(
-                    format!("  +{}", task.additions),
-                    Style::default().fg(C_GREEN),
-                ));
-                ci_line_spans.push(Span::styled(
-                    format!(" -{}", task.deletions),
-                    Style::default().fg(C_RED),
+            if task.has_conflicts {
+                spans.push(Span::styled("   CONFLICT", Style::default().fg(C_RED).bold()));
+            }
+            if let Some(ref branch) = task.branch {
+                spans.push(Span::styled(
+                    format!("   Branch: {branch}"),
+                    Style::default().fg(C_TEXT_DIM),
                 ));
             }
-            Line::from(ci_line_spans)
+            Line::from(spans)
         },
     ];
 

@@ -40,6 +40,10 @@ pub struct App {
     pub terminal_kinds: BTreeMap<String, ShellKind>,
     pub session_order: Vec<String>,
     pub selected: usize,
+    /// Session keys seen from providers this run (for purging stale DB entries).
+    pub seen_from_provider: std::collections::HashSet<String>,
+    /// Whether we've done the initial stale-session purge.
+    pub purged_stale: bool,
 
     // ── Panes ──
     pub panes: PaneManager,
@@ -158,6 +162,8 @@ impl App {
             terminal_kinds: BTreeMap::new(),
             session_order,
             selected: 0,
+            seen_from_provider: std::collections::HashSet::new(),
+            purged_stale: false,
             panes: PaneManager::default_layout(),
             tab_order: Vec::new(),
             active_tab: 0,
@@ -356,6 +362,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
     match action {
         Action::Quit => {
             if app.terminals.is_empty() || app.quit_pending {
+                // Graceful shutdown: send Ctrl-C to all running terminals.
+                for (key, term) in app.terminals.iter_mut() {
+                    tracing::info!("Sending Ctrl-C to terminal {key}");
+                    let _ = term.write(&[0x03]); // Ctrl-C = ETX
+                }
                 save_all_sessions(app);
                 app.should_quit = true;
             } else {
@@ -442,6 +453,37 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             app.status = "Prompt sent to Claude".into();
                         }
                     }
+                }
+            }
+
+            // Purge stale sessions from SQLite after first poll completes.
+            // Wait 50 ticks (5s) after loaded to ensure all events have arrived.
+            if app.loaded && !app.purged_stale && app.tick_count > 50 {
+                app.purged_stale = true;
+                let stale_keys: Vec<String> = app.session_order.iter()
+                    .filter(|k| {
+                        // Only purge sessions from GitHub (not local sessions).
+                        k.starts_with("github:")
+                            && !app.seen_from_provider.contains(*k)
+                    })
+                    .cloned()
+                    .collect();
+                for key in &stale_keys {
+                    tracing::info!("Purging stale session: {key}");
+                    app.sessions.remove(key);
+                    app.terminals.remove(key);
+                    app.terminal_kinds.remove(key);
+                    // Delete from SQLite.
+                    if let Some((source, skey)) = key.split_once(':') {
+                        let tid = pilot_core::TaskId { source: source.into(), key: skey.into() };
+                        let _ = app.store.delete_session(&tid);
+                    }
+                }
+                app.session_order.retain(|k| !stale_keys.contains(k));
+                app.tab_order.retain(|k| !stale_keys.contains(k));
+                if !stale_keys.is_empty() {
+                    tracing::info!("Purged {} stale sessions", stale_keys.len());
+                    crate::nav::resort_sessions(app);
                 }
             }
 
@@ -942,9 +984,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
             match event.kind {
                 EventKind::TaskUpdated(task) => {
+                    // Track which sessions the provider knows about.
+                    app.seen_from_provider.insert(task.id.to_string());
+
                     if !app.loaded {
                         app.loaded = true;
-                        // Auto-select first session so detail pane isn't empty.
                         app.selected = 0;
                         update_detail_pane(app);
                         app.status = format!(
@@ -1092,6 +1136,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if app.selected >= app.session_order.len() && !app.session_order.is_empty() {
                         app.selected = app.session_order.len() - 1;
                     }
+                    // Also remove from persistent store so it doesn't come back on restart.
+                    let _ = app.store.delete_session(id);
                 }
                 EventKind::ProviderError { ref message } => {
                     tracing::warn!("Provider error: {message}");
@@ -1511,6 +1557,26 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             }
         }
 
+        Action::OpenInBrowser => {
+            if let Some(key) = app.selected_session_key() {
+                if let Some(session) = app.sessions.get(&key) {
+                    let url = &session.primary_task.url;
+                    if !url.is_empty() {
+                        let url = url.clone();
+                        tokio::spawn(async move {
+                            let _ = tokio::process::Command::new("open")
+                                .arg(&url)
+                                .output()
+                                .await;
+                        });
+                        app.status = format!("Opened in browser");
+                    } else {
+                        app.status = "No URL for this session".into();
+                    }
+                }
+            }
+        }
+
         Action::MergePr => {
             if let Some(key) = app.selected_session_key() {
                 if let Some(session) = app.sessions.get(&key) {
@@ -1822,6 +1888,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 reviewers: vec![],
                 assignees: vec![],
                 in_merge_queue: false,
+                has_conflicts: false,
                 needs_reply: false,
                 last_commenter: None,
                 recent_activity: vec![],
@@ -1931,7 +1998,29 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         }
     }
 
-    match TermSession::spawn(&cmd, size, Some(&cwd), env) {
+    // Try daemon first (sessions survive quit), fall back to local PTY.
+    let daemon_socket = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home).join(".pilot").join("daemon.sock")
+    };
+    let term_result = if daemon_socket.exists() {
+        tracing::info!("Spawning via daemon: {session_key}");
+        TermSession::spawn_remote(
+            &daemon_socket,
+            session_key,
+            &cmd,
+            size,
+            Some(&cwd),
+            env.clone(),
+        ).or_else(|e| {
+            tracing::warn!("Daemon spawn failed, falling back to local: {e}");
+            TermSession::spawn_local(&cmd, size, Some(&cwd), env)
+        })
+    } else {
+        TermSession::spawn_local(&cmd, size, Some(&cwd), env)
+    };
+
+    match term_result {
         Ok(term) => {
             app.terminals.insert(session_key.to_string(), term);
             app.terminal_kinds.insert(session_key.to_string(), kind);
@@ -2012,9 +2101,10 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 
     let task = &session.primary_task;
 
-    // Detect what needs fixing: CI failure, review comments, or both.
+    // Detect what needs fixing: conflicts, CI failure, review comments, or combination.
     let ci_failing = task.ci == pilot_core::CiStatus::Failure;
     let has_failed_checks = task.checks.iter().any(|c| c.status == pilot_core::CiStatus::Failure);
+    let has_conflicts = task.has_conflicts;
 
     // Gather selected comments (or all unread if none selected).
     let indices: Vec<usize> = if app.selected_comments.is_empty() {
@@ -2028,8 +2118,8 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     let has_comments = !indices.is_empty();
 
     // Must have SOMETHING to fix.
-    if !ci_failing && !has_comments {
-        app.status = "Nothing to fix — CI is green and no unread comments".into();
+    if !ci_failing && !has_comments && !has_conflicts {
+        app.status = "Nothing to fix — CI green, no conflicts, no unread comments".into();
         return;
     }
 
@@ -2037,14 +2127,17 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     let mut prompt = String::new();
 
     // Determine the task description based on what's broken.
-    let action_word = if mode == "reply" {
-        "draft replies to these review comments (no code changes needed)"
-    } else if ci_failing && has_comments {
-        "fix the CI failures AND address the review comments"
-    } else if ci_failing {
-        "fix the CI failures on this PR"
+    let mut issues: Vec<&str> = vec![];
+    if has_conflicts { issues.push("resolve merge conflicts"); }
+    if ci_failing { issues.push("fix CI failures"); }
+    if has_comments && mode == "fix" { issues.push("address review comments"); }
+    if has_comments && mode == "reply" { issues.push("draft replies to review comments"); }
+
+    let action_word = if issues.is_empty() {
+        "investigate this PR"
     } else {
-        "address these review comments by making the necessary code changes"
+        // Leak is fine — this is a one-off prompt string.
+        &*issues.join(" AND ").leak()
     };
 
     prompt.push_str(&format!("# Task: {action_word}\n\n"));
@@ -2056,8 +2149,20 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     }
     prompt.push_str(&format!("- **CI:** {:?}\n", task.ci));
     prompt.push_str(&format!("- **Review:** {:?}\n", task.review));
+    if has_conflicts {
+        prompt.push_str("- **Merge conflicts:** YES\n");
+    }
 
-    // CI failure details — this is the KEY section for CI fixes.
+    // Merge conflict instructions.
+    if has_conflicts {
+        prompt.push_str("\n## Merge Conflicts\n\n");
+        prompt.push_str("This PR has merge conflicts with the base branch.\n");
+        prompt.push_str("1. Run `git fetch origin main && git rebase origin/main`\n");
+        prompt.push_str("2. Resolve any conflicts\n");
+        prompt.push_str("3. Use `pilot_push` to force-push the rebased branch\n\n");
+    }
+
+    // CI failure details.
     if ci_failing || has_failed_checks {
         prompt.push_str("\n## CI Failures\n\n");
         let failed: Vec<_> = task.checks.iter()

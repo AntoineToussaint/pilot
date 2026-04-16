@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(slack --help)"
+      "Bash(slack --help)",
+      "Bash(sqlite3:*)"
     ]
   }
 }

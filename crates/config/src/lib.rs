@@ -192,6 +192,10 @@ pub struct DisplayConfig {
     /// Only show sessions with activity within this many days.
     /// 0 = show all. Default: 7.
     pub activity_days: u32,
+    /// Hide PRs you've already approved (you've done your part).
+    pub hide_approved_by_me: bool,
+    /// Treat assignees as reviewers (some teams use assignees for review tracking).
+    pub assignee_is_reviewer: bool,
 }
 
 impl Default for DisplayConfig {
@@ -200,6 +204,8 @@ impl Default for DisplayConfig {
             sort_by: SortMode::Priority,
             show_archived: false,
             activity_days: 7,
+            hide_approved_by_me: true,
+            assignee_is_reviewer: false,
         }
     }
 }

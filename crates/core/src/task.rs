@@ -115,6 +115,9 @@ pub struct Task {
     /// Whether this PR is in a merge queue / has auto-merge enabled.
     #[serde(default)]
     pub in_merge_queue: bool,
+    /// Whether this PR has merge conflicts.
+    #[serde(default)]
+    pub has_conflicts: bool,
     /// Whether the last comment/review on this task is from someone else
     /// (i.e. you need to reply).
     pub needs_reply: bool,

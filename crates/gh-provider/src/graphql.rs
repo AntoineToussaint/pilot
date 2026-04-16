@@ -22,6 +22,7 @@ query($query: String!, $first: Int!) {
         additions
         deletions
         headRefName
+        mergeable
         reviewDecision
         autoMergeRequest { enabledAt }
         author { login }
@@ -148,6 +149,9 @@ pub struct GqlPr {
     pub deletions: u32,
     #[serde(rename = "headRefName")]
     pub head_ref_name: String,
+    /// MERGEABLE, CONFLICTING, or UNKNOWN.
+    #[serde(default)]
+    pub mergeable: Option<String>,
     #[serde(rename = "reviewDecision")]
     pub review_decision: Option<String>, // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED
     #[serde(rename = "autoMergeRequest")]
@@ -457,6 +461,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             .map(|a| a.login.clone())
             .collect(),
         in_merge_queue: pr.auto_merge_request.is_some(),
+        has_conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
         needs_reply,
         last_commenter,
         recent_activity: activities,

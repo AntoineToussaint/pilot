@@ -74,7 +74,15 @@ pub(crate) fn build_repo_groups(app: &App) -> Vec<(String, Vec<String>)> {
                 continue;
             }
 
-            // Hide sessions where I've done my part (approved as reviewer, all read).
+            // Hide PRs I've approved (done my part as reviewer).
+            if app.config.display.hide_approved_by_me
+                && session.primary_task.role == pilot_core::TaskRole::Mentioned
+                && session.unread_count() == 0
+            {
+                continue;
+            }
+
+            // Hide sessions where I've done my part (mentioned, all read, low priority).
             let priority = session.action_priority(&app.username);
             if session.primary_task.role == pilot_core::TaskRole::Mentioned
                 && session.unread_count() == 0
@@ -239,6 +247,7 @@ pub(crate) fn apply_search_filter(app: &mut App) {
                         "open" => task.state == pilot_core::TaskState::Open,
                         "draft" => task.state == pilot_core::TaskState::Draft,
                         "merged" => task.state == pilot_core::TaskState::Merged,
+                        "conflict" | "conflicting" => task.has_conflicts,
                         _ => true,
                     }
                 } else if let Some(val) = token.strip_prefix("role:") {

@@ -323,6 +323,7 @@ mod tests {
             reviewers: vec![],
             assignees: vec![],
             in_merge_queue: false,
+            has_conflicts: false,
             needs_reply: false,
             last_commenter: None,
             recent_activity: vec![],

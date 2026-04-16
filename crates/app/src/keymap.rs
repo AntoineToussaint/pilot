@@ -33,6 +33,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Enter, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::FocusPaneNext, short: "Enter", label: "open", description: "Open detail pane" },
         Binding { key: KeyCode::Char('c'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::OpenSession(ShellKind::Claude), short: "c", label: "claude", description: "Open Claude Code in worktree" },
         Binding { key: KeyCode::Char('b'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::OpenSession(ShellKind::Shell), short: "b", label: "shell", description: "Open shell in worktree" },
+        Binding { key: KeyCode::Char('o'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::OpenInBrowser, short: "o", label: "open", description: "Open PR in browser" },
         Binding { key: KeyCode::Char('M'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::MergePr, short: "M", label: "merge", description: "Merge PR (requires double-press)" },
         Binding { key: KeyCode::Char('w'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ToggleMonitor, short: "w", label: "watch", description: "Toggle automatic monitor (CI fix + rebase)" },
         Binding { key: KeyCode::Char('N'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::NewSession, short: "N", label: "new", description: "Create new standalone session" },
@@ -73,20 +74,36 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
     ]),
 ];
 
-/// Get the action bar hints for a given mode — returns (short, label) pairs.
+/// Curated short action hints per mode — only the essentials.
 pub fn action_bar_for_mode(mode: KeyMode) -> Vec<(&'static str, &'static str)> {
-    let mut hints = Vec::new();
-    for (_category, bindings) in BINDINGS {
-        for b in *bindings {
-            if b.modes.contains(&mode) {
-                // Deduplicate by short key.
-                if !hints.iter().any(|(s, _)| *s == b.short) {
-                    hints.push((b.short, b.label));
-                }
-            }
-        }
+    match mode {
+        KeyMode::Normal => vec![
+            ("j/k", "navigate"),
+            ("Enter", "detail"),
+            ("c", "claude"),
+            ("o", "browser"),
+            ("f", "fix"),
+            ("g", "refresh"),
+            ("?", "help"),
+        ],
+        KeyMode::Detail => vec![
+            ("j/k", "navigate"),
+            ("Space", "read"),
+            ("f", "fix"),
+            ("e", "reply"),
+            ("o", "browser"),
+            ("Esc", "back"),
+            ("?", "help"),
+        ],
+        KeyMode::Terminal => vec![
+            ("Tab", "exit"),
+        ],
+        KeyMode::PanePrefix => vec![
+            ("h/j/k/l", "focus"),
+            ("v/s", "split"),
+            ("z", "fullscreen"),
+        ],
     }
-    hints
 }
 
 /// Get all bindings for the help page.
