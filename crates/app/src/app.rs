@@ -1236,11 +1236,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 MouseEventKind::ScrollUp => {
                     if app.key_mode == KeyMode::Terminal {
-                        // Send mouse scroll up to PTY (3 lines).
+                        // Send mouse scroll events to the PTY.
+                        // SGR encoding: \x1b[<65;col;rowM for scroll up.
                         if let Some(tab_key) = app.active_tab_key().cloned() {
                             if let Some(term) = app.terminals.get_mut(&tab_key) {
+                                let col = mouse.column + 1;
+                                let row = mouse.row + 1;
                                 for _ in 0..3 {
-                                    let _ = term.write(b"\x1b[A"); // Up arrow
+                                    let seq = format!("\x1b[<64;{col};{row}M");
+                                    let _ = term.write(seq.as_bytes());
                                 }
                             }
                         }
@@ -1250,11 +1254,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 MouseEventKind::ScrollDown => {
                     if app.key_mode == KeyMode::Terminal {
-                        // Send mouse scroll down to PTY (3 lines).
                         if let Some(tab_key) = app.active_tab_key().cloned() {
                             if let Some(term) = app.terminals.get_mut(&tab_key) {
+                                let col = mouse.column + 1;
+                                let row = mouse.row + 1;
                                 for _ in 0..3 {
-                                    let _ = term.write(b"\x1b[B"); // Down arrow
+                                    let seq = format!("\x1b[<65;{col};{row}M");
+                                    let _ = term.write(seq.as_bytes());
                                 }
                             }
                         }
