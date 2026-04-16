@@ -2283,7 +2283,31 @@ pub(crate) fn update_detail_pane(app: &mut App) {
             app.panes
                 .set_content(detail_id, PaneContent::Detail(key.clone()));
         }
-        // Also update terminal pane if the session has a running terminal.
+
+        // Auto-reattach: if a tmux session exists but no terminal in pilot, reattach.
+        if !app.terminals.contains_key(&key) {
+            let tmux_name = key.replace(':', "_").replace('/', "_");
+            let has_tmux = std::process::Command::new("tmux")
+                .args(["has-session", "-t", &tmux_name])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if has_tmux {
+                if let Some(session) = app.sessions.get(&key) {
+                    let cwd = session.worktree_path.clone()
+                        .unwrap_or_else(|| {
+                            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                            std::path::PathBuf::from(home)
+                        });
+                    tracing::info!("Auto-reattaching tmux session: {tmux_name}");
+                    spawn_terminal(app, &key, cwd, ShellKind::Claude);
+                }
+            }
+        }
+
+        // Update terminal pane if the session has a running terminal.
         if app.terminals.contains_key(&key) {
             if let Some(term_id) = app
                 .panes
