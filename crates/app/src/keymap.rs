@@ -48,8 +48,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::ToggleCommentSelect, short: "Spc", label: "select", description: "Select comment / mark as read" },
         Binding { key: KeyCode::Enter, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::ToggleCommentSelect, short: "Enter", label: "select", description: "Select/deselect comment for batch action" },
         Binding { key: KeyCode::Char('f'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::FixWithClaude, short: "f", label: "fix", description: "Send selected to Claude for fix" },
-        Binding { key: KeyCode::Char('r'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::ReplyWithClaude, short: "r", label: "reply", description: "Send selected to Claude for reply" },
-        Binding { key: KeyCode::Char('e'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::QuickReply, short: "e", label: "reply", description: "Quick reply (post comment directly)" },
+        Binding { key: KeyCode::Char('r'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::QuickReply, short: "r", label: "reply", description: "Reply to comment directly" },
     ]),
     ("Sidebar", &[
         Binding { key: KeyCode::Char('m'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::MarkRead, short: "m", label: "read", description: "Mark session as read" },
