@@ -738,19 +738,23 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     app.key_mode = KeyMode::PanePrefix;
                 }
                 Action::None if app.key_mode == KeyMode::Terminal => {
-                    // Forward to PTY and reset scroll to live output.
+                    // Forward to PTY.
                     if let Some(tab_key) = app.active_tab_key().cloned() {
                         if let Some(term) = app.terminals.get_mut(&tab_key) {
                             term.scroll_reset();
                             if let Some(bytes) = keys::key_to_bytes(&key) {
-                                let _ = term.write(&bytes);
+                                if let Err(e) = term.write(&bytes) {
+                                    tracing::error!("PTY write failed: {e}");
+                                    app.status = format!("Error: terminal write failed: {e}");
+                                }
                             }
                         } else {
                             tracing::warn!("Terminal mode but no terminal for tab: {tab_key}");
                             app.key_mode = KeyMode::Normal;
+                            app.status = "Terminal disconnected — returned to sidebar".into();
                         }
                     } else {
-                        tracing::warn!("Terminal mode but no active tab (tab_order: {:?}, active_tab: {})", app.tab_order, app.active_tab);
+                        tracing::warn!("Terminal mode but no active tab");
                         app.key_mode = KeyMode::Normal;
                     }
                 }
