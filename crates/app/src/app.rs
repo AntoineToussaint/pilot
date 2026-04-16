@@ -1936,9 +1936,11 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         pixel_height: 0,
     };
 
-    // Check if Claude was previously used in this session (for --continue).
+    // Only use --continue if there's an actual conversation to resume in this worktree.
     let had_claude = app.sessions.get(session_key)
-        .map(|s| s.had_claude)
+        .map(|s| s.had_claude && s.worktree_path.as_ref()
+            .map(|p| p.join(".claude").exists())
+            .unwrap_or(false))
         .unwrap_or(false);
 
     let cmd_strs: Vec<String> = match kind {
