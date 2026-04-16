@@ -111,10 +111,6 @@ fn map_terminal(key: KeyEvent) -> Action {
     if key.code == KeyCode::Char(']') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Action::FocusPaneNext;
     }
-    // Ctrl-o — reliable alternative escape from terminal mode.
-    if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Action::FocusPaneNext;
-    }
     if let KeyCode::Char(c @ '1'..='9') = key.code {
         if key.modifiers.contains(KeyModifiers::ALT) {
             return Action::GoToTab((c as usize) - ('0' as usize));
