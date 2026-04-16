@@ -1646,7 +1646,6 @@ dependencies = [
  "pilot-auth",
  "pilot-config",
  "pilot-core",
- "pilot-daemon",
  "pilot-events",
  "pilot-gh",
  "pilot-git-ops",
@@ -1689,19 +1688,6 @@ dependencies = [
  "chrono",
  "serde",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "pilot-daemon"
-version = "0.1.0"
-dependencies = [
- "base64",
- "portable-pty",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1768,11 +1754,9 @@ dependencies = [
 name = "pilot-tui-term"
 version = "0.1.0"
 dependencies = [
- "base64",
  "libghostty-vt",
  "portable-pty",
  "ratatui",
- "serde_json",
  "thiserror 2.0.18",
 ]
 

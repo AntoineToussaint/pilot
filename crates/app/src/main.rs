@@ -15,22 +15,6 @@ mod ui;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-
-    // `pilot daemon` — run as background daemon (PTY server).
-    if args.get(1).map(|s| s.as_str()) == Some("daemon") {
-        let socket_path = args.get(2).map(std::path::PathBuf::from);
-        // Daemon has its own logging.
-        let log_file = std::fs::File::create("/tmp/pilot-daemon.log")?;
-        tracing_subscriber::fmt()
-            .with_writer(log_file)
-            .with_ansi(false)
-            .init();
-        pilot_daemon::run_daemon(socket_path).await;
-        return Ok(());
-    }
-
-    // Normal TUI mode.
     let log_file = std::fs::File::create("/tmp/pilot.log")?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("pilot=debug".parse()?))

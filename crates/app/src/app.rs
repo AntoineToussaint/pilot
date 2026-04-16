@@ -309,66 +309,6 @@ pub async fn run(app: &mut App) -> Result<()> {
         }
     }
 
-    // ── Reconnect to daemon sessions (only if daemon mode enabled) ──
-    if std::env::var("PILOT_DAEMON").is_ok() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        let daemon_sock = std::path::PathBuf::from(&home).join(".pilot").join("daemon.sock");
-        if daemon_sock.exists() {
-            tracing::info!("Daemon socket found, checking for running sessions...");
-            // Connect and list sessions.
-            if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(&daemon_sock) {
-                use std::io::{Read, Write};
-                let list_req = serde_json::json!({"type": "list"});
-                let payload = serde_json::to_vec(&list_req).unwrap_or_default();
-                let len = (payload.len() as u32).to_be_bytes();
-                let _ = conn.write_all(&len);
-                let _ = conn.write_all(&payload);
-                let _ = conn.flush();
-
-                let mut len_buf = [0u8; 4];
-                if conn.read_exact(&mut len_buf).is_ok() {
-                    let resp_len = u32::from_be_bytes(len_buf) as usize;
-                    let mut buf = vec![0u8; resp_len];
-                    if conn.read_exact(&mut buf).is_ok() {
-                        if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(&buf) {
-                            if let Some(ids) = resp.get("ids").and_then(|v| v.as_array()) {
-                                for info in ids {
-                                    let id = info.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    let finished = info.get("finished").and_then(|v| v.as_bool()).unwrap_or(true);
-                                    let cols = info.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                                    let rows = info.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-
-                                    if id.is_empty() || finished { continue; }
-                                    // Only reattach if we have a matching session.
-                                    if !app.sessions.contains_key(id) { continue; }
-                                    if app.terminals.contains_key(id) { continue; }
-
-                                    tracing::info!("Reattaching to daemon session: {id}");
-                                    let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
-                                    // Connect with empty cmd (reattach, not spawn).
-                                    match TermSession::spawn_remote(
-                                        &daemon_sock, id, &[], size, None, vec![],
-                                    ) {
-                                        Ok(term) => {
-                                            app.terminals.insert(id.to_string(), term);
-                                            app.terminal_kinds.insert(id.to_string(), ShellKind::Claude);
-                                            if !app.tab_order.contains(&id.to_string()) {
-                                                app.tab_order.push(id.to_string());
-                                            }
-                                            tracing::info!("Reattached to {id}");
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("Failed to reattach to {id}: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     // ── TUI setup ──
     // Start MCP Unix socket listener for Claude Code confirmations.
@@ -2060,34 +2000,7 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         }
     }
 
-    // Direct local PTY — fast and reliable.
-    // Daemon mode available via PILOT_DAEMON=1 env var for detachable sessions.
-    let use_daemon = std::env::var("PILOT_DAEMON").is_ok();
-    let term_result = if use_daemon {
-        let daemon_socket = {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            std::path::PathBuf::from(home).join(".pilot").join("daemon.sock")
-        };
-        if !daemon_socket.exists() {
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(&exe)
-                    .args(["daemon", &daemon_socket.to_string_lossy()])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            }
-        }
-        TermSession::spawn_remote(
-            &daemon_socket, session_key, &cmd, size, Some(&cwd), env.clone(),
-        ).or_else(|e| {
-            tracing::warn!("Daemon failed, falling back to local: {e}");
-            TermSession::spawn_local(&cmd, size, Some(&cwd), env)
-        })
-    } else {
-        TermSession::spawn_local(&cmd, size, Some(&cwd), env)
-    };
+    let term_result = TermSession::spawn(&cmd, size, Some(&cwd), env);
 
     match term_result {
         Ok(term) => {

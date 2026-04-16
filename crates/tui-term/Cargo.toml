@@ -7,6 +7,4 @@ edition.workspace = true
 ratatui = { workspace = true }
 portable-pty = { workspace = true }
 thiserror = { workspace = true }
-serde_json = { workspace = true }
-base64 = "0.22"
 libghostty-vt = { path = "/Users/antoine/Development/libghostty-rs/crates/libghostty-vt" }
