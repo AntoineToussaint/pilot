@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 mod action;
 mod app;
 mod agent_state;
+pub mod input;
 pub mod keymap;
 mod keys;
 mod monitor;

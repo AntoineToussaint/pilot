@@ -120,7 +120,7 @@ fn map_terminal(key: KeyEvent) -> Action {
 }
 
 /// Pane prefix (Ctrl-w + ...).
-fn map_pane_prefix(key: KeyEvent) -> Action {
+pub fn map_pane_prefix(key: KeyEvent) -> Action {
     use crate::action::ShellKind;
     match key.code {
         KeyCode::Char('v') => Action::SplitHorizontal,

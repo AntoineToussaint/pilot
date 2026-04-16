@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::action::{Action, ShellKind};
+use crate::input::{InputMode, TextInputKind};
 use crate::keys::{self, KeyMode};
 use crate::monitor::{check_needs_rebase, handle_monitor_tick, run_rebase};
 use crate::nav::{
@@ -50,6 +51,9 @@ pub struct App {
 
     // ── Input ──
     pub key_mode: KeyMode,
+    /// High-level input mode state machine. Determines which handler
+    /// processes key events. Set when overlays open/close.
+    pub input_mode: InputMode,
 
     // ── Search/filter ──
     pub search_active: bool,
@@ -163,6 +167,7 @@ impl App {
             tab_order: Vec::new(),
             active_tab: 0,
             key_mode: KeyMode::Normal,
+            input_mode: InputMode::Normal,
             search_active: false,
             search_query: String::new(),
             filtered_keys: None,
@@ -204,12 +209,51 @@ impl App {
         })
     }
 
+    #[allow(dead_code)]
     pub fn selected_session_key(&self) -> Option<String> {
         selected_session_from_nav(self)
     }
 
     pub fn active_tab_key(&self) -> Option<&String> {
         self.tab_order.get(self.active_tab)
+    }
+
+    /// Compute the base InputMode from the current key_mode.
+    /// Used when exiting an overlay to return to the correct underlying mode.
+    pub fn base_input_mode(&self) -> InputMode {
+        InputMode::from_key_mode(self.key_mode)
+    }
+
+    /// Get the currently selected session (if cursor is on one).
+    #[allow(dead_code)]
+    pub fn selected_session(&self) -> Option<&Session> {
+        self.selected_session_key().and_then(|k| self.sessions.get(&k))
+    }
+
+    /// Close a terminal and clean up all associated state.
+    pub fn close_terminal(&mut self, key: &str) {
+        self.terminals.remove(key);
+        self.terminal_kinds.remove(key);
+        self.tab_order.retain(|k| k != key);
+        self.agent_states.remove(key);
+        self.pending_prompts.remove(key);
+        self.notified_asking.remove(key);
+        if self.active_tab >= self.tab_order.len() && !self.tab_order.is_empty() {
+            self.active_tab = self.tab_order.len() - 1;
+        }
+    }
+
+    /// Report an error to the status bar.
+    #[allow(dead_code)]
+    pub fn report_error(&mut self, msg: impl std::fmt::Display) {
+        tracing::error!("{msg}");
+        self.status = format!("Error: {msg}");
+    }
+
+    /// Report a status message.
+    #[allow(dead_code)]
+    pub fn report_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
     }
 }
 
@@ -361,7 +405,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 // Graceful shutdown: send Ctrl-C to all running terminals.
                 for (key, term) in app.terminals.iter_mut() {
                     tracing::info!("Sending Ctrl-C to terminal {key}");
-                    let _ = term.write(&[0x03]); // Ctrl-C = ETX
+                    if let Err(e) = term.write(&[0x03]) {
+                        tracing::error!("Failed to send Ctrl-C to terminal {key}: {e}");
+                    }
                 }
                 save_all_sessions(app);
                 app.should_quit = true;
@@ -449,10 +495,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 for key in ready_keys {
                     if let Some(prompt) = app.pending_prompts.remove(&key) {
                         if let Some(term) = app.terminals.get_mut(&key) {
-                            let _ = term.write(prompt.as_bytes());
-                            let _ = term.write(b"\r");
-                            tracing::info!("Injected pending prompt into {key}");
-                            app.status = "Prompt sent to Claude".into();
+                            if let Err(e) = term.write(prompt.as_bytes()) {
+                                tracing::error!("Terminal write failed for prompt injection into {key}: {e}");
+                            } else if let Err(e) = term.write(b"\r") {
+                                tracing::error!("Terminal write failed for prompt newline into {key}: {e}");
+                            } else {
+                                tracing::info!("Injected pending prompt into {key}");
+                                app.status = "Prompt sent to Claude".into();
+                            }
                         }
                     }
                 }
@@ -493,13 +543,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 .map(|(k, _)| k.clone())
                 .collect();
             for key in exited {
-                app.terminals.remove(&key);
-                app.terminal_kinds.remove(&key);
-                app.tab_order.retain(|k| k != &key);
-                if let Some(_prompt) = app.pending_prompts.remove(&key) {
+                if app.pending_prompts.contains_key(&key) {
                     tracing::warn!("Pending prompt lost for {key} (terminal exited)");
                     app.status = format!("Warning: queued prompt lost — terminal exited");
                 }
+                app.close_terminal(&key);
                 if let Some(session) = app.sessions.get_mut(&key) {
                     session.state = SessionState::Active;
                     // If monitored and fixing CI, Claude exited — wait for CI.
@@ -509,9 +557,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         tracing::info!("Monitor: Claude exited for {key}, waiting for CI (attempt {attempt})");
                     }
                 }
-            }
-            if app.active_tab >= app.tab_order.len() && !app.tab_order.is_empty() {
-                app.active_tab = app.tab_order.len() - 1;
             }
 
             // Periodic merge conflict check for monitored sessions (~30s).
@@ -571,201 +616,231 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::Key(key) => {
-            // Help overlay — any key dismisses it.
-            if app.show_help {
-                app.show_help = false;
-                return;
-            }
-            // MCP confirmation mode — y/n to approve/reject.
-            if app.pending_mcp.is_some() {
-                use crossterm::event::KeyCode;
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Enter => {
-                        handle_action(app, Action::ApproveMcpAction, action_tx);
-                    }
-                    KeyCode::Char('n') | KeyCode::Esc => {
-                        handle_action(app, Action::RejectMcpAction, action_tx);
-                    }
-                    _ => {} // ignore other keys during confirmation
-                }
-                return;
-            }
-            // Clear quit confirmation on any key that isn't q.
-            if app.quit_pending && key.code != crossterm::event::KeyCode::Char('q') {
+            use crossterm::event::KeyCode;
+
+            // ── Confirmation clearing ──
+            // quit_pending and merge_pending are "double-press" guards.
+            // Clear them on any key that isn't the confirming key.
+            // This runs BEFORE mode dispatch so the guard resets regardless
+            // of which overlay is active.
+            if app.quit_pending && key.code != KeyCode::Char('q') {
                 app.quit_pending = false;
                 app.status = String::new();
             }
-            // Clear merge confirmation on any key that isn't M.
-            if app.merge_pending.is_some() && key.code != crossterm::event::KeyCode::Char('M') {
+            if app.merge_pending.is_some() && key.code != KeyCode::Char('M') {
                 app.merge_pending = None;
                 app.status = String::new();
             }
-            // Search mode intercepts keys.
-            if app.search_active {
-                use crossterm::event::KeyCode;
-                match key.code {
-                    KeyCode::Esc => {
-                        handle_action(app, Action::SearchClear, action_tx);
-                    }
-                    KeyCode::Enter => {
-                        app.search_active = false; // keep filter, exit typing
-                    }
-                    KeyCode::Backspace => {
-                        handle_action(app, Action::SearchBackspace, action_tx);
-                    }
-                    KeyCode::Char(c) => {
-                        handle_action(app, Action::SearchInput(c), action_tx);
-                    }
-                    _ => {}
+            // ── Input mode state machine ──
+            // Exactly one arm runs per key event. No fallthrough.
+            match app.input_mode {
+
+                // 1. Help overlay -- any key dismisses.
+                InputMode::Help => {
+                    app.show_help = false;
+                    app.input_mode = app.base_input_mode();
                 }
-                return;
-            }
-            // Picker overlay intercepts keys.
-            if app.picker.is_some() {
-                use crossterm::event::KeyCode;
-                match key.code {
-                    KeyCode::Esc => {
-                        handle_action(app, Action::PickerCancel, action_tx);
+
+                // 2. MCP confirmation -- y/n only.
+                InputMode::McpConfirm => {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            handle_action(app, Action::ApproveMcpAction, action_tx);
+                            app.input_mode = app.base_input_mode();
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            handle_action(app, Action::RejectMcpAction, action_tx);
+                            app.input_mode = app.base_input_mode();
+                        }
+                        _ => {} // swallow other keys during confirmation
                     }
-                    KeyCode::Enter => {
-                        // If nothing was changed yet, toggle the current item first.
-                        if let Some(ref mut picker) = app.picker {
-                            let any_changed = picker.items.iter().any(|i| i.selected != i.was_selected);
-                            if !any_changed {
+                }
+
+                // 3. Text input overlays -- search, new session, quick reply.
+                InputMode::TextInput(ref kind) => {
+                    match kind {
+                        TextInputKind::Search => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    handle_action(app, Action::SearchClear, action_tx);
+                                    app.input_mode = app.base_input_mode();
+                                }
+                                KeyCode::Enter => {
+                                    app.search_active = false; // keep filter, exit typing
+                                    app.input_mode = app.base_input_mode();
+                                }
+                                KeyCode::Backspace => {
+                                    handle_action(app, Action::SearchBackspace, action_tx);
+                                }
+                                KeyCode::Char(c) => {
+                                    handle_action(app, Action::SearchInput(c), action_tx);
+                                }
+                                _ => {}
+                            }
+                        }
+                        TextInputKind::NewSession => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    handle_action(app, Action::NewSessionCancel, action_tx);
+                                    app.input_mode = app.base_input_mode();
+                                }
+                                KeyCode::Enter => {
+                                    let desc = app.new_session_input.clone().unwrap_or_default();
+                                    if !desc.trim().is_empty() {
+                                        handle_action(app, Action::NewSessionConfirm { description: desc }, action_tx);
+                                    }
+                                    app.input_mode = app.base_input_mode();
+                                }
+                                KeyCode::Backspace => {
+                                    if let Some(ref mut input) = app.new_session_input {
+                                        input.pop();
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    if let Some(ref mut input) = app.new_session_input {
+                                        input.push(c);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        TextInputKind::QuickReply => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    handle_action(app, Action::QuickReplyCancel, action_tx);
+                                    app.input_mode = app.base_input_mode();
+                                }
+                                KeyCode::Enter => {
+                                    let body = app.quick_reply_input.as_ref().map(|(_, t, _)| t.clone()).unwrap_or_default();
+                                    if !body.trim().is_empty() {
+                                        handle_action(app, Action::QuickReplyConfirm { body }, action_tx);
+                                    }
+                                    app.input_mode = app.base_input_mode();
+                                }
+                                KeyCode::Backspace => {
+                                    if let Some((_, ref mut text, _)) = app.quick_reply_input {
+                                        text.pop();
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    if let Some((_, ref mut text, _)) = app.quick_reply_input {
+                                        text.push(c);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                // 4. Picker overlay -- reviewer/assignee selection.
+                InputMode::Picker => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            handle_action(app, Action::PickerCancel, action_tx);
+                            app.input_mode = app.base_input_mode();
+                        }
+                        KeyCode::Enter => {
+                            // If nothing was changed yet, toggle the current item first.
+                            if let Some(ref mut picker) = app.picker {
+                                let any_changed = picker.items.iter().any(|i| i.selected != i.was_selected);
+                                if !any_changed {
+                                    let filtered = picker.filtered_indices();
+                                    if let Some(&real_idx) = filtered.get(picker.cursor) {
+                                        picker.items[real_idx].selected = !picker.items[real_idx].selected;
+                                    }
+                                }
+                            }
+                            handle_action(app, Action::PickerConfirm, action_tx);
+                            app.input_mode = app.base_input_mode();
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if let Some(ref mut picker) = app.picker {
+                                let count = picker.filtered_indices().len();
+                                if count > 0 {
+                                    picker.cursor = (picker.cursor + 1).min(count - 1);
+                                }
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if let Some(ref mut picker) = app.picker {
+                                picker.cursor = picker.cursor.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            if let Some(ref mut picker) = app.picker {
                                 let filtered = picker.filtered_indices();
                                 if let Some(&real_idx) = filtered.get(picker.cursor) {
                                     picker.items[real_idx].selected = !picker.items[real_idx].selected;
                                 }
                             }
                         }
-                        handle_action(app, Action::PickerConfirm, action_tx);
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if let Some(ref mut picker) = app.picker {
-                            let count = picker.filtered_indices().len();
-                            if count > 0 {
-                                picker.cursor = (picker.cursor + 1).min(count - 1);
+                        KeyCode::Backspace => {
+                            if let Some(ref mut picker) = app.picker {
+                                picker.filter.pop();
+                                picker.cursor = 0;
                             }
                         }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        if let Some(ref mut picker) = app.picker {
-                            picker.cursor = picker.cursor.saturating_sub(1);
-                        }
-                    }
-                    KeyCode::Char(' ') => {
-                        if let Some(ref mut picker) = app.picker {
-                            let filtered = picker.filtered_indices();
-                            if let Some(&real_idx) = filtered.get(picker.cursor) {
-                                picker.items[real_idx].selected = !picker.items[real_idx].selected;
+                        KeyCode::Char(c) => {
+                            if let Some(ref mut picker) = app.picker {
+                                picker.filter.push(c);
+                                picker.cursor = 0;
                             }
                         }
+                        _ => {}
                     }
-                    KeyCode::Backspace => {
-                        if let Some(ref mut picker) = app.picker {
-                            picker.filter.pop();
-                            picker.cursor = 0;
-                        }
-                    }
-                    KeyCode::Char(c) => {
-                        if let Some(ref mut picker) = app.picker {
-                            picker.filter.push(c);
-                            picker.cursor = 0;
-                        }
-                    }
-                    _ => {}
                 }
-                return;
-            }
 
-            // New session input intercepts keys.
-            if app.new_session_input.is_some() {
-                use crossterm::event::KeyCode;
-                match key.code {
-                    KeyCode::Esc => {
-                        handle_action(app, Action::NewSessionCancel, action_tx);
+                // 5. Pane prefix -- one-shot pane operation after Ctrl-w.
+                InputMode::PanePrefix => {
+                    let mapped = keys::map_pane_prefix(key);
+                    app.key_mode = determine_mode(app);
+                    app.input_mode = app.base_input_mode();
+                    if !matches!(mapped, Action::None) {
+                        handle_action(app, mapped, action_tx);
                     }
-                    KeyCode::Enter => {
-                        let desc = app.new_session_input.clone().unwrap_or_default();
-                        if !desc.trim().is_empty() {
-                            handle_action(app, Action::NewSessionConfirm { description: desc }, action_tx);
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        if let Some(ref mut input) = app.new_session_input {
-                            input.pop();
-                        }
-                    }
-                    KeyCode::Char(c) => {
-                        if let Some(ref mut input) = app.new_session_input {
-                            input.push(c);
-                        }
-                    }
-                    _ => {}
                 }
-                return;
-            }
 
-            // Quick reply input intercepts keys.
-            if app.quick_reply_input.is_some() {
-                use crossterm::event::KeyCode;
-                match key.code {
-                    KeyCode::Esc => {
-                        handle_action(app, Action::QuickReplyCancel, action_tx);
-                    }
-                    KeyCode::Enter => {
-                        let body = app.quick_reply_input.as_ref().map(|(_, t, _)| t.clone()).unwrap_or_default();
-                        if !body.trim().is_empty() {
-                            handle_action(app, Action::QuickReplyConfirm { body }, action_tx);
+                // 6. Terminal / Normal / Detail -- regular key mapping.
+                InputMode::Normal | InputMode::Detail | InputMode::Terminal => {
+                    let mapped = keys::map_key(key, app.key_mode);
+                    match mapped {
+                        Action::WaitingPrefix => {
+                            app.key_mode = KeyMode::PanePrefix;
+                            app.input_mode = InputMode::PanePrefix;
                         }
-                    }
-                    KeyCode::Backspace => {
-                        if let Some((_, ref mut text, _)) = app.quick_reply_input {
-                            text.pop();
-                        }
-                    }
-                    KeyCode::Char(c) => {
-                        if let Some((_, ref mut text, _)) = app.quick_reply_input {
-                            text.push(c);
-                        }
-                    }
-                    _ => {}
-                }
-                return;
-            }
-
-            let mapped = keys::map_key(key, app.key_mode);
-            match mapped {
-                Action::WaitingPrefix => {
-                    app.key_mode = KeyMode::PanePrefix;
-                }
-                Action::None if app.key_mode == KeyMode::Terminal => {
-                    // Forward to PTY.
-                    if let Some(tab_key) = app.active_tab_key().cloned() {
-                        if let Some(term) = app.terminals.get_mut(&tab_key) {
-                            term.scroll_reset();
-                            if let Some(bytes) = keys::key_to_bytes(&key) {
-                                if let Err(e) = term.write(&bytes) {
-                                    tracing::error!("PTY write failed: {e}");
-                                    app.status = format!("Error: terminal write failed: {e}");
+                        Action::None if app.key_mode == KeyMode::Terminal => {
+                            // Forward to PTY.
+                            if let Some(tab_key) = app.active_tab_key().cloned() {
+                                if let Some(term) = app.terminals.get_mut(&tab_key) {
+                                    term.scroll_reset();
+                                    if let Some(bytes) = keys::key_to_bytes(&key) {
+                                        if let Err(e) = term.write(&bytes) {
+                                            tracing::error!("PTY write failed: {e}");
+                                            app.status = format!("Error: terminal write failed: {e}");
+                                        }
+                                    }
+                                } else {
+                                    tracing::warn!("Terminal mode but no terminal for tab: {tab_key}");
+                                    app.key_mode = KeyMode::Normal;
+                                    app.input_mode = InputMode::Normal;
+                                    app.status = "Terminal disconnected — returned to sidebar".into();
                                 }
+                            } else {
+                                tracing::warn!("Terminal mode but no active tab");
+                                app.key_mode = KeyMode::Normal;
+                                app.input_mode = InputMode::Normal;
                             }
-                        } else {
-                            tracing::warn!("Terminal mode but no terminal for tab: {tab_key}");
-                            app.key_mode = KeyMode::Normal;
-                            app.status = "Terminal disconnected — returned to sidebar".into();
                         }
-                    } else {
-                        tracing::warn!("Terminal mode but no active tab");
-                        app.key_mode = KeyMode::Normal;
+                        other => {
+                            // After pane prefix, return to previous mode.
+                            if app.key_mode == KeyMode::PanePrefix {
+                                app.key_mode = determine_mode(app);
+                                app.input_mode = app.base_input_mode();
+                            }
+                            handle_action(app, other, action_tx);
+                        }
                     }
-                }
-                other => {
-                    // After pane prefix, return to previous mode.
-                    if app.key_mode == KeyMode::PanePrefix {
-                        app.key_mode = determine_mode(app);
-                    }
-                    handle_action(app, other, action_tx);
                 }
             }
         }
@@ -854,14 +929,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::CloseTab => {
             if let Some(key) = app.active_tab_key().cloned() {
                 // Kill terminal but keep session.
-                app.terminals.remove(&key);
-                app.terminal_kinds.remove(&key);
-                app.tab_order.retain(|k| k != &key);
+                app.close_terminal(&key);
                 if let Some(session) = app.sessions.get_mut(&key) {
                     session.state = SessionState::Active;
-                }
-                if app.active_tab >= app.tab_order.len() && !app.tab_order.is_empty() {
-                    app.active_tab = app.tab_order.len() - 1;
                 }
                 app.key_mode = determine_mode(app);
             }
@@ -1011,14 +1081,16 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     // Persist full session to SQLite.
                     if let Some(session) = app.sessions.get(&persist_key) {
                         let json = serde_json::to_string(session).ok();
-                        let _ = app.store.save_session(&pilot_store::SessionRecord {
+                        if let Err(e) = app.store.save_session(&pilot_store::SessionRecord {
                             task_id: persist_key.clone(),
                             seen_count: session.seen_count as i64,
                             last_viewed_at: session.last_viewed_at,
                             created_at: session.created_at,
                             session_json: json,
                             metadata: None,
-                        });
+                        }) {
+                            tracing::error!("Failed to save session {persist_key}: {e}");
+                        }
                     }
                     resort_sessions(app);
                 }
@@ -1114,15 +1186,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 EventKind::TaskRemoved(ref id) => {
                     let key = id.to_string();
                     app.sessions.remove(&key);
-                    app.terminals.remove(&key);
-                    app.terminal_kinds.remove(&key);
+                    app.close_terminal(&key);
                     app.session_order.retain(|k| k != &key);
-                    app.tab_order.retain(|k| k != &key);
                     if app.selected >= app.session_order.len() && !app.session_order.is_empty() {
                         app.selected = app.session_order.len() - 1;
                     }
                     // Also remove from persistent store so it doesn't come back on restart.
-                    let _ = app.store.delete_session(id);
+                    if let Err(e) = app.store.delete_session(id) {
+                        tracing::error!("Failed to delete session {id}: {e}");
+                    }
                 }
                 EventKind::ProviderError { ref message } => {
                     tracing::warn!("Provider error: {message}");
@@ -1244,7 +1316,10 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 let row = mouse.row + 1;
                                 for _ in 0..3 {
                                     let seq = format!("\x1b[<64;{col};{row}M");
-                                    let _ = term.write(seq.as_bytes());
+                                    if let Err(e) = term.write(seq.as_bytes()) {
+                                        tracing::error!("Terminal scroll write failed: {e}");
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1260,7 +1335,10 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 let row = mouse.row + 1;
                                 for _ in 0..3 {
                                     let seq = format!("\x1b[<65;{col};{row}M");
-                                    let _ = term.write(seq.as_bytes());
+                                    if let Err(e) = term.write(seq.as_bytes()) {
+                                        tracing::error!("Terminal scroll write failed: {e}");
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1278,9 +1356,12 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 if let Some(tab_key) = app.active_tab_key().cloned() {
                     if let Some(term) = app.terminals.get_mut(&tab_key) {
                         // Bracketed paste: \x1b[200~ ... \x1b[201~
-                        let _ = term.write(b"\x1b[200~");
-                        let _ = term.write(text.as_bytes());
-                        let _ = term.write(b"\x1b[201~");
+                        if let Err(e) = term.write(b"\x1b[200~")
+                            .and_then(|_| term.write(text.as_bytes()))
+                            .and_then(|_| term.write(b"\x1b[201~"))
+                        {
+                            tracing::error!("Terminal paste write failed: {e}");
+                        }
                     }
                 }
             }
@@ -1351,6 +1432,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         // ── Search ──
         Action::SearchActivate => {
             app.search_active = true;
+            app.input_mode = InputMode::TextInput(TextInputKind::Search);
         }
         Action::SearchInput(c) => {
             app.search_query.push(c);
@@ -1368,6 +1450,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             app.search_query.clear();
             app.filtered_keys = None;
             app.search_active = false;
+            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::Search)) {
+                app.input_mode = app.base_input_mode();
+            }
         }
 
         // ── Picker (reviewer/assignee) ──
@@ -1406,6 +1491,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             repo,
                             pr_number,
                         });
+                        app.input_mode = InputMode::Picker;
                     } else {
                         app.status = format!("Loading collaborators for {repo}…");
                         let repo_clone = repo.clone();
@@ -1438,14 +1524,21 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 repo,
                 pr_number,
             });
+            app.input_mode = InputMode::Picker;
             app.status = String::new();
         }
 
         Action::PickerCancel => {
             app.picker = None;
+            if matches!(app.input_mode, InputMode::Picker) {
+                app.input_mode = app.base_input_mode();
+            }
         }
 
         Action::PickerConfirm => {
+            if matches!(app.input_mode, InputMode::Picker) {
+                app.input_mode = app.base_input_mode();
+            }
             if let Some(picker) = app.picker.take() {
                 let added: Vec<String> = picker.items.iter()
                     .filter(|i| i.selected && !i.was_selected)
@@ -1773,6 +1866,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
         Action::ToggleHelp => {
             app.show_help = !app.show_help;
+            if app.show_help {
+                app.input_mode = InputMode::Help;
+            } else {
+                app.input_mode = app.base_input_mode();
+            }
         }
 
         Action::CycleTimeFilter => {
@@ -1797,6 +1895,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 display,
                 response_tx: Some(response_tx),
             });
+            app.input_mode = InputMode::McpConfirm;
             app.status = format!("Claude wants to: {tool} — y/n");
         }
         Action::ApproveMcpAction => {
@@ -1806,6 +1905,10 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 app.status = format!("Approved: {}", action.tool);
             }
+            // Reset input mode in case this came from a non-key source.
+            if matches!(app.input_mode, InputMode::McpConfirm) {
+                app.input_mode = app.base_input_mode();
+            }
         }
         Action::RejectMcpAction => {
             if let Some(action) = app.pending_mcp.take() {
@@ -1813,6 +1916,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     let _ = tx.send(false);
                 }
                 app.status = format!("Rejected: {}", action.tool);
+            }
+            if matches!(app.input_mode, InputMode::McpConfirm) {
+                app.input_mode = app.base_input_mode();
             }
         }
 
@@ -1893,16 +1999,23 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
         Action::NewSession => {
             app.new_session_input = Some(String::new());
+            app.input_mode = InputMode::TextInput(TextInputKind::NewSession);
             app.status = "New session — type description, Enter to create, Esc to cancel".into();
         }
 
         Action::NewSessionCancel => {
             app.new_session_input = None;
+            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
+                app.input_mode = app.base_input_mode();
+            }
             app.status = String::new();
         }
 
         Action::NewSessionConfirm { description } => {
             app.new_session_input = None;
+            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
+                app.input_mode = app.base_input_mode();
+            }
             let key = format!("local:{}", chrono::Utc::now().timestamp_millis());
             let task = pilot_core::Task {
                 id: pilot_core::TaskId { source: "local".into(), key: key.clone() },
@@ -2041,7 +2154,9 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
                 let gitignore = cwd.join(".gitignore");
                 if let Ok(content) = std::fs::read_to_string(&gitignore) {
                     if !content.contains(".mcp.json") {
-                        let _ = std::fs::write(&gitignore, format!("{content}\n.mcp.json\n"));
+                        if let Err(e) = std::fs::write(&gitignore, format!("{content}\n.mcp.json\n")) {
+                            tracing::warn!("Failed to update .gitignore: {e}");
+                        }
                     }
                 }
             }
@@ -2263,7 +2378,11 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     // Write context to file with timestamp to avoid race conditions.
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let context_dir = std::path::PathBuf::from(&home).join(".pilot").join("context");
-    let _ = std::fs::create_dir_all(&context_dir);
+    if let Err(e) = std::fs::create_dir_all(&context_dir) {
+        tracing::error!("Failed to create context dir: {e}");
+        app.status = format!("Failed to create context dir: {e}");
+        return;
+    }
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let safe_key = session_key.replace(':', "_").replace('/', "_");
     let context_file = context_dir.join(format!("{safe_key}_{timestamp}.md"));
@@ -2273,8 +2392,10 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     }
     // Also write a stable "latest" symlink for pilot_get_context.
     let latest = context_dir.join(format!("{safe_key}.md"));
-    let _ = std::fs::remove_file(&latest);
-    let _ = std::fs::copy(&context_file, &latest);
+    let _ = std::fs::remove_file(&latest); // intentional cleanup
+    if let Err(e) = std::fs::copy(&context_file, &latest) {
+        tracing::warn!("Failed to copy context to latest: {e}");
+    }
 
     // Queue the prompt — it will be injected when Claude is idle.
     tracing::info!("Queued prompt for {session_key} ({} bytes)", prompt.len());
@@ -2472,9 +2593,17 @@ pub fn start_mcp_socket_listener(
                 let resp = serde_json::json!({ "approved": approved, "message": "" });
                 let resp_bytes = serde_json::to_vec(&resp).unwrap();
                 let len = (resp_bytes.len() as u32).to_be_bytes();
-                let _ = stream.write_all(&len).await;
-                let _ = stream.write_all(&resp_bytes).await;
-                let _ = stream.flush().await;
+                if let Err(e) = stream.write_all(&len).await {
+                    tracing::error!("MCP socket write (length) failed: {e}");
+                    return;
+                }
+                if let Err(e) = stream.write_all(&resp_bytes).await {
+                    tracing::error!("MCP socket write (body) failed: {e}");
+                    return;
+                }
+                if let Err(e) = stream.flush().await {
+                    tracing::error!("MCP socket flush failed: {e}");
+                }
             });
         }
     });

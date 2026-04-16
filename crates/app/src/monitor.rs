@@ -151,7 +151,10 @@ pub(crate) fn spawn_monitor_claude_fix(
     // Write context file.
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let context_dir = std::path::PathBuf::from(&home).join(".pilot").join("context");
-    let _ = std::fs::create_dir_all(&context_dir);
+    if let Err(e) = std::fs::create_dir_all(&context_dir) {
+        tracing::error!("Failed to create context dir: {e}");
+        return;
+    }
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let safe_key = session_key.replace(':', "_").replace('/', "_");
     let context_file = context_dir.join(format!("{safe_key}_monitor_{timestamp}.md"));
@@ -161,8 +164,10 @@ pub(crate) fn spawn_monitor_claude_fix(
     }
     // Update the stable latest link for pilot_get_context.
     let latest = context_dir.join(format!("{safe_key}.md"));
-    let _ = std::fs::remove_file(&latest);
-    let _ = std::fs::copy(&context_file, &latest);
+    let _ = std::fs::remove_file(&latest); // intentional cleanup
+    if let Err(e) = std::fs::copy(&context_file, &latest) {
+        tracing::warn!("Failed to copy context to latest: {e}");
+    }
 
     // Queue the prompt — it will be injected when Claude is idle.
     app.pending_prompts.insert(session_key.to_string(), prompt);

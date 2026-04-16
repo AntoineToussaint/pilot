@@ -1092,12 +1092,14 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
     if new_size != app.last_term_area && new_size.0 > 0 && new_size.1 > 0 {
         app.last_term_area = new_size;
         if let Some(term) = app.terminals.get_mut(key) {
-            let _ = term.resize(pilot_tui_term::PtySize {
+            if let Err(e) = term.resize(pilot_tui_term::PtySize {
                 rows: new_size.1,
                 cols: new_size.0,
                 pixel_width: 0,
                 pixel_height: 0,
-            });
+            }) {
+                tracing::error!("Terminal resize failed: {e}");
+            }
         }
     }
 
