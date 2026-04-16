@@ -1944,7 +1944,7 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
     };
 
     // Wrap in tmux so the process survives pilot quit.
-    // tmux new-session -A: attach if exists, create if not.
+    // -A: attach if exists, create if not.
     let tmux_name = session_key.replace(':', "_").replace('/', "_");
     let inner_joined = inner_cmd.join(" ");
     let cmd_strs: Vec<String> = vec![
@@ -1956,6 +1956,13 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         inner_joined,
     ];
     let cmd: Vec<&str> = cmd_strs.iter().map(|s| s.as_str()).collect();
+
+    // Hide tmux chrome — no status bar.
+    let _ = std::process::Command::new("tmux")
+        .args(["set-option", "-g", "status", "off"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 
     // Mark that Claude has been used in this session.
     if matches!(kind, ShellKind::Claude) {
