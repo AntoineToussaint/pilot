@@ -1574,6 +1574,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         // Second M — execute merge.
                         app.merge_pending = None;
                         app.status = format!("Merging {repo}#{pr_num}…");
+                        // Return focus to sidebar.
+                        app.key_mode = KeyMode::Normal;
                         let repo = repo.to_string();
                         let pr = pr_num.clone();
                         let tx = action_tx.clone();
