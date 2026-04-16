@@ -1997,15 +1997,8 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         pixel_height: 0,
     };
 
-    // Only use --continue if there's an actual conversation to resume in this worktree.
-    let had_claude = app.sessions.get(session_key)
-        .map(|s| s.had_claude && s.worktree_path.as_ref()
-            .map(|p| p.join(".claude").exists())
-            .unwrap_or(false))
-        .unwrap_or(false);
-
     let cmd_strs: Vec<String> = match kind {
-        ShellKind::Claude => app.config.agent.config.spawn_command(had_claude),
+        ShellKind::Claude => app.config.agent.config.spawn_command(false),
         ShellKind::Shell => vec![app.config.shell.command.clone()],
     };
     let cmd: Vec<&str> = cmd_strs.iter().map(|s| s.as_str()).collect();
