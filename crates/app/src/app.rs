@@ -1998,11 +1998,28 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         }
     }
 
-    // Try daemon first (sessions survive quit), fall back to local PTY.
+    // Auto-start daemon if not running, then spawn via daemon.
+    // Sessions survive pilot quit/restart (like tmux).
     let daemon_socket = {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         std::path::PathBuf::from(home).join(".pilot").join("daemon.sock")
     };
+
+    // Start daemon if socket doesn't exist.
+    if !daemon_socket.exists() {
+        if let Ok(daemon_bin) = find_daemon_binary() {
+            tracing::info!("Auto-starting pilot-daemon");
+            let _ = std::process::Command::new(&daemon_bin)
+                .arg(daemon_socket.to_string_lossy().as_ref())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            // Give it a moment to bind the socket.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
     let term_result = if daemon_socket.exists() {
         tracing::info!("Spawning via daemon: {session_key}");
         TermSession::spawn_remote(
@@ -2324,6 +2341,31 @@ fn which_pilot_mcp() -> Result<String, ()> {
         }
     }
     tracing::warn!("pilot-mcp-server binary not found");
+    Err(())
+}
+
+/// Find the pilot-daemon binary — next to current exe, or in PATH.
+fn find_daemon_binary() -> Result<String, ()> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let sibling = parent.join("pilot-daemon");
+            if sibling.exists() {
+                return Ok(sibling.to_string_lossy().to_string());
+            }
+        }
+    }
+    let output = std::process::Command::new("which")
+        .arg("pilot-daemon")
+        .output();
+    if let Ok(o) = output {
+        if o.status.success() {
+            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(path);
+            }
+        }
+    }
+    tracing::debug!("pilot-daemon binary not found — using local PTY");
     Err(())
 }
 
