@@ -40,10 +40,6 @@ pub struct App {
     pub terminal_kinds: BTreeMap<String, ShellKind>,
     pub session_order: Vec<String>,
     pub selected: usize,
-    /// Session keys seen from providers this run (for purging stale DB entries).
-    pub seen_from_provider: std::collections::HashSet<String>,
-    /// Whether we've done the initial stale-session purge.
-    pub purged_stale: bool,
 
     // ── Panes ──
     pub panes: PaneManager,
@@ -162,8 +158,6 @@ impl App {
             terminal_kinds: BTreeMap::new(),
             session_order,
             selected: 0,
-            seen_from_provider: std::collections::HashSet::new(),
-            purged_stale: false,
             panes: PaneManager::default_layout(),
             tab_order: Vec::new(),
             active_tab: 0,
@@ -456,36 +450,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
             }
 
-            // Purge stale sessions from SQLite after first poll completes.
-            // Wait 50 ticks (5s) after loaded to ensure all events have arrived.
-            if app.loaded && !app.purged_stale && app.tick_count > 50 {
-                app.purged_stale = true;
-                let stale_keys: Vec<String> = app.session_order.iter()
-                    .filter(|k| {
-                        // Only purge sessions from GitHub (not local sessions).
-                        k.starts_with("github:")
-                            && !app.seen_from_provider.contains(*k)
-                    })
-                    .cloned()
-                    .collect();
-                for key in &stale_keys {
-                    tracing::info!("Purging stale session: {key}");
-                    app.sessions.remove(key);
-                    app.terminals.remove(key);
-                    app.terminal_kinds.remove(key);
-                    // Delete from SQLite.
-                    if let Some((source, skey)) = key.split_once(':') {
-                        let tid = pilot_core::TaskId { source: source.into(), key: skey.into() };
-                        let _ = app.store.delete_session(&tid);
-                    }
-                }
-                app.session_order.retain(|k| !stale_keys.contains(k));
-                app.tab_order.retain(|k| !stale_keys.contains(k));
-                if !stale_keys.is_empty() {
-                    tracing::info!("Purged {} stale sessions", stale_keys.len());
-                    crate::nav::resort_sessions(app);
-                }
-            }
+            // Note: stale sessions are handled by TaskRemoved events from the poller.
+            // We don't purge from SQLite on startup — the nav filters hide merged/closed PRs.
 
             // Auto-mark-read: if viewing a session for 2+ seconds, mark it read.
             if let Some(key) = app.selected_session_key() {
@@ -985,7 +951,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             match event.kind {
                 EventKind::TaskUpdated(task) => {
                     // Track which sessions the provider knows about.
-                    app.seen_from_provider.insert(task.id.to_string());
 
                     if !app.loaded {
                         app.loaded = true;
