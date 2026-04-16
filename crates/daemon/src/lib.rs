@@ -240,9 +240,28 @@ async fn handle_client(mut stream: UnixStream, sessions: Sessions) -> std::io::R
                         incoming = protocol::recv_message::<Request>(&mut stream) => {
                             match incoming {
                                 Ok(Request::Unsubscribe { .. }) => break,
-                                Ok(other) => {
-                                    // Handle other requests inline during subscription.
-                                    warn!("Got {:?} while subscribed, ignoring", other);
+                                Ok(Request::Write { id: ref write_id, ref data }) => {
+                                    // Handle writes inline during subscription.
+                                    let bytes = base64::Engine::decode(
+                                        &base64::engine::general_purpose::STANDARD,
+                                        data,
+                                    ).unwrap_or_default();
+                                    let mut s = sessions.lock().await;
+                                    if let Some(session) = s.get_mut(write_id) {
+                                        let _ = session.writer.write_all(&bytes);
+                                        let _ = session.writer.flush();
+                                    }
+                                }
+                                Ok(Request::Resize { id: ref resize_id, cols, rows }) => {
+                                    let mut s = sessions.lock().await;
+                                    if let Some(session) = s.get_mut(resize_id) {
+                                        let new_size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+                                        let _ = session.master.resize(new_size);
+                                        session.size = new_size;
+                                    }
+                                }
+                                Ok(_other) => {
+                                    // Other requests not handled during subscription.
                                 }
                                 Err(_) => break, // Disconnected.
                             }
