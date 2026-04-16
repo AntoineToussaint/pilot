@@ -1003,7 +1003,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             session.seen_count = record.seen_count as usize;
                             session.last_viewed_at = record.last_viewed_at;
                         }
-                        app.session_order.push(key.clone());
+                        if !app.session_order.contains(&key) {
+                            app.session_order.push(key.clone());
+                        }
                         app.sessions.insert(key, session);
                     }
                     // Persist full session to SQLite.

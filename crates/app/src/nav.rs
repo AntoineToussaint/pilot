@@ -52,7 +52,10 @@ pub(crate) fn build_repo_groups(app: &App) -> Vec<(String, Vec<String>)> {
     };
 
     let keys = app.filtered_keys.as_ref().unwrap_or(&app.session_order);
+    let mut seen_keys = std::collections::HashSet::new();
     for key in keys {
+        // Dedup — skip if we've already processed this key.
+        if !seen_keys.insert(key.clone()) { continue; }
         if let Some(session) = app.sessions.get(key) {
             // Apply time filter.
             if let Some(cutoff) = &cutoff {
