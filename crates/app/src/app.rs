@@ -309,8 +309,8 @@ pub async fn run(app: &mut App) -> Result<()> {
         }
     }
 
-    // ── Reconnect to daemon sessions ──
-    {
+    // ── Reconnect to daemon sessions (only if daemon mode enabled) ──
+    if std::env::var("PILOT_DAEMON").is_ok() {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         let daemon_sock = std::path::PathBuf::from(&home).join(".pilot").join("daemon.sock");
         if daemon_sock.exists() {
@@ -2060,25 +2060,25 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         }
     }
 
-    // Auto-start daemon if not running, then spawn via daemon.
-    let daemon_socket = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        std::path::PathBuf::from(home).join(".pilot").join("daemon.sock")
-    };
-    if !daemon_socket.exists() {
-        if let Ok(exe) = std::env::current_exe() {
-            tracing::info!("Auto-starting daemon");
-            let _ = std::process::Command::new(&exe)
-                .args(["daemon", &daemon_socket.to_string_lossy()])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-            std::thread::sleep(std::time::Duration::from_millis(300));
+    // Direct local PTY — fast and reliable.
+    // Daemon mode available via PILOT_DAEMON=1 env var for detachable sessions.
+    let use_daemon = std::env::var("PILOT_DAEMON").is_ok();
+    let term_result = if use_daemon {
+        let daemon_socket = {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            std::path::PathBuf::from(home).join(".pilot").join("daemon.sock")
+        };
+        if !daemon_socket.exists() {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(&exe)
+                    .args(["daemon", &daemon_socket.to_string_lossy()])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
         }
-    }
-    let term_result = if daemon_socket.exists() {
-        tracing::info!("Spawning via daemon: {session_key}");
         TermSession::spawn_remote(
             &daemon_socket, session_key, &cmd, size, Some(&cwd), env.clone(),
         ).or_else(|e| {
