@@ -45,7 +45,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Char('S'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::SlackNudge, short: "S", label: "slack", description: "Send Slack reminder to reviewers" },
     ]),
     ("Comments", &[
-        Binding { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::MarkRead, short: "Spc", label: "read", description: "Toggle read/unread" },
+        Binding { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::ToggleCommentSelect, short: "Spc", label: "select", description: "Select comment / mark as read" },
         Binding { key: KeyCode::Enter, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::ToggleCommentSelect, short: "Enter", label: "select", description: "Select/deselect comment for batch action" },
         Binding { key: KeyCode::Char('f'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::FixWithClaude, short: "f", label: "fix", description: "Send selected to Claude for fix" },
         Binding { key: KeyCode::Char('r'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::ReplyWithClaude, short: "r", label: "reply", description: "Send selected to Claude for reply" },

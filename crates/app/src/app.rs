@@ -1292,12 +1292,28 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         // ── Detail pane ──
         Action::DetailCursorUp => {
             app.detail_cursor = app.detail_cursor.saturating_sub(1);
+            // Auto-mark current comment as read when navigating to it.
+            if let Some(key) = app.selected_session_key() {
+                if let Some(session) = app.sessions.get_mut(&key) {
+                    if session.is_activity_unread(app.detail_cursor) {
+                        session.mark_activity_read(app.detail_cursor);
+                    }
+                }
+            }
         }
         Action::DetailCursorDown => {
             if let Some(key) = app.selected_session_key() {
                 if let Some(session) = app.sessions.get(&key) {
                     let max = session.activity.len().saturating_sub(1);
                     app.detail_cursor = (app.detail_cursor + 1).min(max);
+                }
+            }
+            // Auto-mark current comment as read when navigating to it.
+            if let Some(key) = app.selected_session_key() {
+                if let Some(session) = app.sessions.get_mut(&key) {
+                    if session.is_activity_unread(app.detail_cursor) {
+                        session.mark_activity_read(app.detail_cursor);
+                    }
                 }
             }
         }
@@ -1308,7 +1324,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             } else {
                 app.selected_comments.insert(idx);
             }
-            // Also mark the comment as read if it was unread.
+            // Mark as read.
             if let Some(key) = app.selected_session_key() {
                 if let Some(session) = app.sessions.get_mut(&key) {
                     if session.is_activity_unread(idx) {
@@ -1316,8 +1332,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     }
                 }
             }
-            // Auto-advance cursor after toggle.
-            handle_action(app, Action::DetailCursorDown, action_tx);
         }
         Action::SelectAllComments => {
             if let Some(key) = app.selected_session_key() {
