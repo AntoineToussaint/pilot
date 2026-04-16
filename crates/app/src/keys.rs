@@ -11,12 +11,25 @@ pub enum KeyMode {
     Terminal,
 }
 
+/// Last Ctrl-C timestamp for double-press detection in terminal mode.
+static LAST_CTRL_C: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 pub fn map_key(key: KeyEvent, mode: KeyMode) -> Action {
-    // Global Ctrl-C quits (except terminal).
+    // Global Ctrl-C quits (except terminal — needs double-press).
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         if mode != KeyMode::Terminal {
             return Action::Quit;
         }
+        // In terminal mode: double Ctrl-C within 1s = force quit.
+        let mut last = LAST_CTRL_C.lock().unwrap();
+        if let Some(prev) = *last {
+            if prev.elapsed().as_millis() < 1000 {
+                *last = None;
+                return Action::Quit;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+        // Single Ctrl-C goes to PTY (handled by Action::None below).
     }
 
     // Terminal mode: only a few escape keys, everything else → PTY.
@@ -84,6 +97,10 @@ fn matches_key(event: KeyEvent, code: KeyCode, modifiers: KeyModifiers) -> bool 
 fn map_terminal(key: KeyEvent) -> Action {
     // Tab — always cycles panes, never sent to PTY.
     if key.code == KeyCode::Tab {
+        return Action::FocusPaneNext;
+    }
+    // Esc — escape terminal mode (safety valve).
+    if key.code == KeyCode::Esc {
         return Action::FocusPaneNext;
     }
     if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {

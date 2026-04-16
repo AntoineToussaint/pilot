@@ -745,7 +745,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             if let Some(bytes) = keys::key_to_bytes(&key) {
                                 let _ = term.write(&bytes);
                             }
+                        } else {
+                            tracing::warn!("Terminal mode but no terminal for tab: {tab_key}");
+                            app.key_mode = KeyMode::Normal;
                         }
+                    } else {
+                        tracing::warn!("Terminal mode but no active tab (tab_order: {:?}, active_tab: {})", app.tab_order, app.active_tab);
+                        app.key_mode = KeyMode::Normal;
                     }
                 }
                 other => {
