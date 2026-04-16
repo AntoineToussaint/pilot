@@ -490,8 +490,10 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                     ("PUSH", C_ORANGE)
                 } else if task.role == TaskRole::Reviewer {
                     ("REVIEW", C_YELLOW)
-                } else if ci_ok && review_ok && no_conflicts && is_author {
+                } else if ci_ok && review_ok && no_conflicts && is_author && !task.in_merge_queue {
                     ("MERGE", C_GREEN)
+                } else if task.in_merge_queue {
+                    ("", C_TEXT_DIM) // Already queued — nothing to do.
                 } else if is_author && ci_ok && task.reviewers.is_empty() && task.assignees.is_empty() {
                     ("ASSIGN", C_YELLOW)
                 } else if is_author && ci_ok && matches!(task.review, ReviewStatus::None | ReviewStatus::Pending) {
