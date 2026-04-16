@@ -1602,7 +1602,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         }
                         let repo = repo.to_string();
                         let pr = pr_num.clone();
-                        let session_key = key.clone();
+                        let _session_key = key.clone();
                         let tx = action_tx.clone();
                         tokio::spawn(async move {
                             let output = tokio::process::Command::new("gh")
