@@ -2005,38 +2005,28 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
     }
 
     // Auto-start daemon if not running, then spawn via daemon.
-    // Sessions survive pilot quit/restart (like tmux).
     let daemon_socket = {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         std::path::PathBuf::from(home).join(".pilot").join("daemon.sock")
     };
-
-    // Auto-start daemon if not running (same binary: `pilot daemon`).
     if !daemon_socket.exists() {
         if let Ok(exe) = std::env::current_exe() {
-            tracing::info!("Auto-starting daemon: {} daemon", exe.display());
+            tracing::info!("Auto-starting daemon");
             let _ = std::process::Command::new(&exe)
                 .args(["daemon", &daemon_socket.to_string_lossy()])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
-            // Give it a moment to bind the socket.
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
     }
-
     let term_result = if daemon_socket.exists() {
         tracing::info!("Spawning via daemon: {session_key}");
         TermSession::spawn_remote(
-            &daemon_socket,
-            session_key,
-            &cmd,
-            size,
-            Some(&cwd),
-            env.clone(),
+            &daemon_socket, session_key, &cmd, size, Some(&cwd), env.clone(),
         ).or_else(|e| {
-            tracing::warn!("Daemon spawn failed, falling back to local: {e}");
+            tracing::warn!("Daemon failed, falling back to local: {e}");
             TermSession::spawn_local(&cmd, size, Some(&cwd), env)
         })
     } else {
