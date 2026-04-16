@@ -1234,9 +1234,12 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 MouseEventKind::ScrollUp => {
                     if app.key_mode == KeyMode::Terminal {
+                        // Send mouse scroll up to PTY (3 lines).
                         if let Some(tab_key) = app.active_tab_key().cloned() {
                             if let Some(term) = app.terminals.get_mut(&tab_key) {
-                                term.scroll_up(3);
+                                for _ in 0..3 {
+                                    let _ = term.write(b"\x1b[A"); // Up arrow
+                                }
                             }
                         }
                     } else {
@@ -1245,9 +1248,12 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 MouseEventKind::ScrollDown => {
                     if app.key_mode == KeyMode::Terminal {
+                        // Send mouse scroll down to PTY (3 lines).
                         if let Some(tab_key) = app.active_tab_key().cloned() {
                             if let Some(term) = app.terminals.get_mut(&tab_key) {
-                                term.scroll_down(3);
+                                for _ in 0..3 {
+                                    let _ = term.write(b"\x1b[B"); // Down arrow
+                                }
                             }
                         }
                     } else {
