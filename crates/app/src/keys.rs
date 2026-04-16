@@ -96,11 +96,12 @@ fn matches_key(event: KeyEvent, code: KeyCode, modifiers: KeyModifiers) -> bool 
 /// Terminal mode: almost everything → PTY.
 fn map_terminal(key: KeyEvent) -> Action {
     // Tab — always cycles panes, never sent to PTY.
-    if key.code == KeyCode::Tab {
+    // Note: Claude Code doesn't use Tab for anything critical.
+    if key.code == KeyCode::Tab && key.modifiers.is_empty() {
         return Action::FocusPaneNext;
     }
-    // Esc — escape terminal mode (safety valve).
-    if key.code == KeyCode::Esc {
+    // Backtab (Shift+Tab) also exits.
+    if key.code == KeyCode::BackTab {
         return Action::FocusPaneNext;
     }
     if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
