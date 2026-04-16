@@ -3,9 +3,9 @@ name = "pilot-daemon"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "pilot-daemon"
-path = "src/main.rs"
+[lib]
+name = "pilot_daemon"
+path = "src/lib.rs"
 
 [dependencies]
 portable-pty = "0.8"

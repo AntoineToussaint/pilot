@@ -16,6 +16,7 @@ pilot-store = { workspace = true }
 pilot-tui-term = { workspace = true }
 pilot-gh = { workspace = true }
 pilot-git-ops = { workspace = true }
+pilot-daemon = { path = "../daemon" }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 tui-markdown = { workspace = true }

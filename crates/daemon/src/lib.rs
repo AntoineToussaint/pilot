@@ -3,7 +3,7 @@
 //! Sessions survive TUI quit/restart. The TUI connects via Unix socket
 //! to spawn, write to, and receive output from terminals.
 
-mod protocol;
+pub mod protocol;
 
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use protocol::{Request, Response, SessionInfo};
@@ -45,20 +45,9 @@ impl DaemonSession {
 
 type Sessions = Arc<Mutex<HashMap<String, DaemonSession>>>;
 
-#[tokio::main]
-async fn main() {
-    let log_file = std::fs::File::create("/tmp/pilot-daemon.log").ok();
-    if let Some(f) = log_file {
-        tracing_subscriber::fmt()
-            .with_writer(f)
-            .with_ansi(false)
-            .init();
-    }
-
-    let socket_path = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(default_socket_path);
+/// Run the daemon. Call this from the `pilot daemon` subcommand.
+pub async fn run_daemon(socket_path: Option<std::path::PathBuf>) {
+    let socket_path = socket_path.unwrap_or_else(default_socket_path);
 
     // Remove stale socket.
     let _ = std::fs::remove_file(&socket_path);
