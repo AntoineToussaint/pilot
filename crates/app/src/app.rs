@@ -1937,10 +1937,24 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         pixel_height: 0,
     };
 
-    let cmd_strs: Vec<String> = match kind {
+    // Build the inner command (claude or shell).
+    let inner_cmd: Vec<String> = match kind {
         ShellKind::Claude => app.config.agent.config.spawn_command(false),
         ShellKind::Shell => vec![app.config.shell.command.clone()],
     };
+
+    // Wrap in tmux so the process survives pilot quit.
+    // tmux new-session -A: attach if exists, create if not.
+    let tmux_name = session_key.replace(':', "_").replace('/', "_");
+    let inner_joined = inner_cmd.join(" ");
+    let cmd_strs: Vec<String> = vec![
+        "tmux".into(),
+        "new-session".into(),
+        "-A".into(),
+        "-s".into(),
+        tmux_name,
+        inner_joined,
+    ];
     let cmd: Vec<&str> = cmd_strs.iter().map(|s| s.as_str()).collect();
 
     // Mark that Claude has been used in this session.

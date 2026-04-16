@@ -6,7 +6,8 @@
       "Bash(otool -L /Users/antoine/Development/gh-pilot/target/debug/build/libghostty-vt-sys-*/out/ghostty-install/lib/libghostty-vt.0.1.0.dylib)",
       "Bash(otool -L target/debug/pilot)",
       "Bash(pkill -f \"pilot daemon\")",
-      "Bash(rm -f ~/.pilot/daemon.sock)"
+      "Bash(rm -f ~/.pilot/daemon.sock)",
+      "Bash(tmux -V)"
     ]
   }
 }
