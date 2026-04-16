@@ -66,7 +66,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 
     // Quick reply overlay.
-    if let Some((ref _key, ref text)) = app.quick_reply_input {
+    if let Some((ref _key, ref text, _)) = app.quick_reply_input {
         render_quick_reply_overlay(frame, frame.area(), text);
     }
 

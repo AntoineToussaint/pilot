@@ -63,6 +63,7 @@ query($query: String!, $first: Int!) {
         }
         comments(first: 30) {
           nodes {
+            id
             author { login }
             body
             createdAt
@@ -82,6 +83,7 @@ query($query: String!, $first: Int!) {
             isOutdated
             comments(first: 10) {
               nodes {
+                id
                 author { login }
                 body
                 createdAt
@@ -269,6 +271,8 @@ pub struct GqlComments {
 
 #[derive(Deserialize, Debug)]
 pub struct GqlComment {
+    #[serde(default)]
+    pub id: Option<String>,
     pub author: Option<GqlAuthor>,
     pub body: String,
     #[serde(rename = "createdAt")]
@@ -376,6 +380,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             body: c.body.clone(),
             created_at: c.created_at,
             kind: ActivityKind::Comment,
+            node_id: c.id.clone(),
         });
     }
 
@@ -401,6 +406,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
                 body,
                 created_at: c.created_at,
                 kind: ActivityKind::Review,
+                node_id: c.id.clone(),
             });
         }
     }
@@ -421,6 +427,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             body: display,
             created_at: r.submitted_at.unwrap_or(pr.updated_at),
             kind: ActivityKind::Review,
+            node_id: None, // Reviews don't have reply-to IDs.
         });
     }
 

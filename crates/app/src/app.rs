@@ -120,7 +120,8 @@ pub struct App {
     /// Text input for new session description overlay.
     pub new_session_input: Option<String>,
     /// Quick reply input: (session_key, text).
-    pub quick_reply_input: Option<(String, String)>,
+    /// (session_key, text, comment_index) for quick reply.
+    pub quick_reply_input: Option<(String, String, usize)>,
     /// Whether GitHub credentials resolved successfully.
     pub credentials_ok: bool,
 }
@@ -713,18 +714,18 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         handle_action(app, Action::QuickReplyCancel, action_tx);
                     }
                     KeyCode::Enter => {
-                        let body = app.quick_reply_input.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+                        let body = app.quick_reply_input.as_ref().map(|(_, t, _)| t.clone()).unwrap_or_default();
                         if !body.trim().is_empty() {
                             handle_action(app, Action::QuickReplyConfirm { body }, action_tx);
                         }
                     }
                     KeyCode::Backspace => {
-                        if let Some((_, ref mut text)) = app.quick_reply_input {
+                        if let Some((_, ref mut text, _)) = app.quick_reply_input {
                             text.pop();
                         }
                     }
                     KeyCode::Char(c) => {
-                        if let Some((_, ref mut text)) = app.quick_reply_input {
+                        if let Some((_, ref mut text, _)) = app.quick_reply_input {
                             text.push(c);
                         }
                     }
@@ -1821,7 +1822,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
         Action::QuickReply => {
             if let Some(key) = app.selected_session_key() {
-                app.quick_reply_input = Some((key, String::new()));
+                let cursor = app.detail_cursor;
+                app.quick_reply_input = Some((key, String::new(), cursor));
                 app.status = "Quick reply — type message, Enter to post, Esc to cancel".into();
             }
         }
@@ -1832,18 +1834,29 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::QuickReplyConfirm { body } => {
-            if let Some((session_key, _)) = app.quick_reply_input.take() {
+            if let Some((session_key, _, comment_idx)) = app.quick_reply_input.take() {
                 if let Some(session) = app.sessions.get(&session_key) {
                     let repo = session.primary_task.repo.clone().unwrap_or_default();
                     let pr_number = session.primary_task.id.key.rsplit_once('#')
                         .map(|(_, n)| n.to_string())
                         .unwrap_or_default();
+                    let reply_to = session.activity.get(comment_idx)
+                        .and_then(|a| a.node_id.clone());
                     if !repo.is_empty() && !pr_number.is_empty() && !body.trim().is_empty() {
                         app.status = "Posting reply…".into();
                         let tx = action_tx.clone();
                         tokio::spawn(async move {
+                            let mut args = vec![
+                                "pr".to_string(), "comment".to_string(),
+                                pr_number, "--body".to_string(), body,
+                                "--repo".to_string(), repo,
+                            ];
+                            if let Some(node_id) = reply_to {
+                                args.push("--reply-to".to_string());
+                                args.push(node_id);
+                            }
                             let output = tokio::process::Command::new("gh")
-                                .args(["pr", "comment", &pr_number, "--body", &body, "--repo", &repo])
+                                .args(&args)
                                 .output()
                                 .await;
                             match output {

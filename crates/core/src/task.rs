@@ -78,6 +78,9 @@ pub struct Activity {
     pub body: String,
     pub created_at: DateTime<Utc>,
     pub kind: ActivityKind,
+    /// GitHub node ID for replying to this comment.
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

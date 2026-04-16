@@ -115,6 +115,7 @@ impl GhPoller {
                             body: format!("Title: \"{}\" → \"{}\"", prev_task.title, task.title),
                             created_at: chrono::Utc::now(),
                             kind: pilot_core::ActivityKind::StatusChange,
+                            node_id: None,
                         },
                     }));
                     changed = true;
