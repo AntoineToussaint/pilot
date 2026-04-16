@@ -309,6 +309,67 @@ pub async fn run(app: &mut App) -> Result<()> {
         }
     }
 
+    // ── Reconnect to daemon sessions ──
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let daemon_sock = std::path::PathBuf::from(&home).join(".pilot").join("daemon.sock");
+        if daemon_sock.exists() {
+            tracing::info!("Daemon socket found, checking for running sessions...");
+            // Connect and list sessions.
+            if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(&daemon_sock) {
+                use std::io::{Read, Write};
+                let list_req = serde_json::json!({"type": "list"});
+                let payload = serde_json::to_vec(&list_req).unwrap_or_default();
+                let len = (payload.len() as u32).to_be_bytes();
+                let _ = conn.write_all(&len);
+                let _ = conn.write_all(&payload);
+                let _ = conn.flush();
+
+                let mut len_buf = [0u8; 4];
+                if conn.read_exact(&mut len_buf).is_ok() {
+                    let resp_len = u32::from_be_bytes(len_buf) as usize;
+                    let mut buf = vec![0u8; resp_len];
+                    if conn.read_exact(&mut buf).is_ok() {
+                        if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(&buf) {
+                            if let Some(ids) = resp.get("ids").and_then(|v| v.as_array()) {
+                                for info in ids {
+                                    let id = info.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                    let finished = info.get("finished").and_then(|v| v.as_bool()).unwrap_or(true);
+                                    let cols = info.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                                    let rows = info.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+
+                                    if id.is_empty() || finished { continue; }
+                                    // Only reattach if we have a matching session.
+                                    if !app.sessions.contains_key(id) { continue; }
+                                    if app.terminals.contains_key(id) { continue; }
+
+                                    tracing::info!("Reattaching to daemon session: {id}");
+                                    let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+                                    // Connect with empty cmd (reattach, not spawn).
+                                    match TermSession::spawn_remote(
+                                        &daemon_sock, id, &[], size, None, vec![],
+                                    ) {
+                                        Ok(term) => {
+                                            app.terminals.insert(id.to_string(), term);
+                                            app.terminal_kinds.insert(id.to_string(), ShellKind::Claude);
+                                            if !app.tab_order.contains(&id.to_string()) {
+                                                app.tab_order.push(id.to_string());
+                                            }
+                                            tracing::info!("Reattached to {id}");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to reattach to {id}: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── TUI setup ──
     // Start MCP Unix socket listener for Claude Code confirmations.
     start_mcp_socket_listener(action_tx.clone(), Arc::clone(&app.monitored_sessions));
@@ -2452,17 +2513,26 @@ pub struct PendingMcpAction {
 
 /// Persist all sessions to SQLite.
 fn save_all_sessions(app: &App) {
+    let mut saved = 0;
+    let mut errors = 0;
     for (key, session) in &app.sessions {
         let json = serde_json::to_string(session).ok();
-        let _ = app.store.save_session(&pilot_store::SessionRecord {
+        match app.store.save_session(&pilot_store::SessionRecord {
             task_id: key.clone(),
             seen_count: session.seen_count as i64,
             last_viewed_at: session.last_viewed_at,
             created_at: session.created_at,
             session_json: json,
             metadata: None,
-        });
+        }) {
+            Ok(()) => saved += 1,
+            Err(e) => {
+                tracing::error!("Failed to save session {key}: {e}");
+                errors += 1;
+            }
+        }
     }
+    tracing::info!("Saved {saved} sessions ({errors} errors)");
 }
 
 /// Reset detail pane state when switching sessions and auto-update detail.

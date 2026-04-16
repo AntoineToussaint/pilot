@@ -62,24 +62,26 @@ impl RemoteTermSession {
     ) -> Result<Self, TermError> {
         use std::os::unix::net::UnixStream;
 
-        // ── Connection 1: Spawn + Subscribe (for reading output) ──
+        // ── Connection 1: Spawn (if cmd provided) + Subscribe ──
         let mut read_conn = UnixStream::connect(socket_path).map_err(TermError::Io)?;
 
-        // Spawn.
-        send_msg(&mut read_conn, &serde_json::json!({
-            "type": "spawn",
-            "id": session_id,
-            "cmd": cmd,
-            "cwd": cwd.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-            "env": env.into_iter().collect::<std::collections::HashMap<_, _>>(),
-            "cols": size.cols,
-            "rows": size.rows,
-        }))?;
+        // Spawn only if cmd is provided (empty = reattach to existing session).
+        if !cmd.is_empty() {
+            send_msg(&mut read_conn, &serde_json::json!({
+                "type": "spawn",
+                "id": session_id,
+                "cmd": cmd,
+                "cwd": cwd.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+                "env": env.into_iter().collect::<std::collections::HashMap<_, _>>(),
+                "cols": size.cols,
+                "rows": size.rows,
+            }))?;
 
-        let resp = recv_msg(&mut read_conn)?;
-        if resp.get("type").and_then(|t| t.as_str()) == Some("error") {
-            let msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
-            return Err(TermError::Terminal(format!("daemon: {msg}")));
+            let resp = recv_msg(&mut read_conn)?;
+            if resp.get("type").and_then(|t| t.as_str()) == Some("error") {
+                let msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                return Err(TermError::Terminal(format!("daemon: {msg}")));
+            }
         }
 
         // Subscribe.
