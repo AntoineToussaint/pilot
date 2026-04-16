@@ -338,6 +338,7 @@ mod tests {
             body: body.into(),
             created_at: Utc::now(),
             kind: ActivityKind::Comment,
+            node_id: None,
         }
     }
 
