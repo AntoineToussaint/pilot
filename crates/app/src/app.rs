@@ -427,14 +427,20 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 // Clean up states for removed terminals.
                 app.agent_states.retain(|k, _| app.terminals.contains_key(k));
             }
-            // Inject pending prompts when Claude becomes idle.
+            // Inject pending prompts when Claude becomes idle (or after 5s timeout).
             {
                 use crate::agent_state::AgentState;
                 let ready_keys: Vec<String> = app.pending_prompts.keys()
                     .filter(|key| {
-                        app.agent_states.get(*key)
+                        let is_idle = app.agent_states.get(*key)
                             .map(|s| *s == AgentState::Idle)
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                        // Also inject if terminal exists and we've waited 5+ seconds.
+                        let has_terminal = app.terminals.contains_key(*key);
+                        let waited_long = app.last_claude_send
+                            .map(|t| t.elapsed().as_secs() >= 5)
+                            .unwrap_or(false);
+                        is_idle || (has_terminal && waited_long)
                     })
                     .cloned()
                     .collect();
@@ -903,7 +909,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             let owner = parts[0].to_string();
                             let repo = parts[1].to_string();
                             let tx = action_tx.clone();
-                            let _session_key = key.clone();
+                            let session_key = key.clone();
                             let worktrees = WorktreeManager::default_base();
 
                             tokio::spawn(async move {
@@ -1586,7 +1592,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         }
                         let repo = repo.to_string();
                         let pr = pr_num.clone();
-                        let _session_key = key.clone();
+                        let session_key = key.clone();
                         let tx = action_tx.clone();
                         tokio::spawn(async move {
                             let output = tokio::process::Command::new("gh")
@@ -1704,7 +1710,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     let owner = parts[0].to_string();
                                     let repo = parts[1].to_string();
                                     let tx = action_tx.clone();
-                                    let _session_key = key.clone();
+                                    let session_key = key.clone();
                                     let worktrees = WorktreeManager::default_base();
                                     tokio::spawn(async move {
                                         match worktrees.checkout(&owner, &repo, &branch).await {
@@ -2254,6 +2260,7 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     let _ = std::fs::copy(&context_file, &latest);
 
     // Queue the prompt — it will be injected when Claude is idle.
+    tracing::info!("Queued prompt for {session_key} ({} bytes)", prompt.len());
     app.pending_prompts.insert(session_key.clone(), prompt);
     app.selected_comments.clear();
     app.last_claude_send = Some(now);
