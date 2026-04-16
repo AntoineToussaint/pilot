@@ -448,7 +448,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(prompt) = app.pending_prompts.remove(&key) {
                         if let Some(term) = app.terminals.get_mut(&key) {
                             let _ = term.write(prompt.as_bytes());
-                            let _ = term.write(b"\n");
+                            let _ = term.write(b"\r");
                             tracing::info!("Injected pending prompt into {key}");
                             app.status = "Prompt sent to Claude".into();
                         }
