@@ -13,7 +13,9 @@ use std::time::Instant;
 
 /// A terminal session backed by the pilot-daemon.
 pub struct RemoteTermSession {
+    #[allow(dead_code)]
     session_id: String,
+    #[allow(dead_code)]
     socket_path: std::path::PathBuf,
     /// Sender for writing to the daemon (in a background task).
     write_tx: mpsc::Sender<Vec<u8>>,
