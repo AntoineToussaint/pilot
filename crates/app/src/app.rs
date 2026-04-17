@@ -461,7 +461,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 app.status = format!("Claude needs input: {title}");
                                 let title_clone = title.clone();
                                 tokio::spawn(async move {
-                                    crate::notify::send_macos_notification(
+                                    crate::notify::send_notification(
                                         &format!("pilot: {title_clone}"),
                                         "Claude needs your input",
                                     ).await;
@@ -1116,7 +1116,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 let title = session.display_name.clone();
                                 let author = activity.author.clone();
                                 tokio::spawn(async move {
-                                    crate::notify::send_macos_notification(
+                                    crate::notify::send_notification(
                                         &format!("{author} commented on {title}"),
                                         "You may need to reply",
                                     )
@@ -1153,7 +1153,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             if session.primary_task.role == pilot_core::TaskRole::Author {
                                 let title = session.display_name.clone();
                                 tokio::spawn(async move {
-                                    crate::notify::send_macos_notification(
+                                    crate::notify::send_notification(
                                         &format!("CI failed: {title}"),
                                         "A CI check failed on your PR",
                                     )
@@ -1177,7 +1177,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             if session.primary_task.role == pilot_core::TaskRole::Author {
                                 let title = session.display_name.clone();
                                 tokio::spawn(async move {
-                                    crate::notify::send_macos_notification(
+                                    crate::notify::send_notification(
                                         &format!("Approved: {title}"),
                                         "Your PR was approved! Ready to merge.",
                                     )
@@ -1671,14 +1671,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 if let Some(session) = app.sessions.get(&key) {
                     let url = &session.primary_task.url;
                     if !url.is_empty() {
-                        let url = url.clone();
-                        tokio::spawn(async move {
-                            let _ = tokio::process::Command::new("open")
-                                .arg(&url)
-                                .output()
-                                .await;
-                        });
-                        app.status = format!("Opened in browser");
+                        crate::notify::open_url(url);
+                        app.status = "Opened in browser".into();
                     } else {
                         app.status = "No URL for this session".into();
                     }

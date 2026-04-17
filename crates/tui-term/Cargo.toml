@@ -7,4 +7,5 @@ edition.workspace = true
 ratatui = { workspace = true }
 portable-pty = { workspace = true }
 thiserror = { workspace = true }
-libghostty-vt = { path = "/Users/antoine/Development/libghostty-rs/crates/libghostty-vt" }
+# Clone https://github.com/ghostty-org/libghostty-rs as a sibling directory.
+libghostty-vt = { path = "../../../libghostty-rs/crates/libghostty-vt" }
