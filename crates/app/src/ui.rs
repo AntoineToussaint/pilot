@@ -1,5 +1,5 @@
 use pilot_core::time::{self, Staleness};
-use pilot_core::{ActionPriority, ActivityKind, CiStatus, ReviewStatus, TaskRole, TaskState};
+use pilot_core::{ActionPriority, CiStatus, ReviewStatus, TaskRole, TaskState};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
@@ -820,124 +820,76 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
             let is_unread = session.is_activity_unread(i);
 
             let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
-            let bar_color = if is_cursor {
-                C_ACCENT
-            } else if is_unread {
-                C_CYAN
-            } else {
-                C_BORDER
-            };
 
-            // Comment header: | author . 2h ago . Review
-            let icon = match a.kind {
-                ActivityKind::Comment => "comment",
-                ActivityKind::Review => "review",
-                ActivityKind::StatusChange => "status",
-                ActivityKind::CiUpdate => "ci",
-            };
+            let ago_str = time_ago_short(&a.created_at);
 
-            let ago_str = time::time_ago(&a.created_at);
-
-            // Checkbox or read indicator.
+            // Prefix: checkbox or read indicator.
             let prefix = if any_selected || is_checked {
-                if is_checked {
-                    Span::styled("[x] ", Style::default().fg(C_GREEN).bold().bg(bg))
-                } else {
-                    Span::styled("[ ] ", Style::default().fg(C_TEXT_DIM).bg(bg))
-                }
+                if is_checked { "[x] " } else { "[ ] " }
             } else if is_unread {
-                Span::styled("* ", Style::default().fg(C_RED).bg(bg))
+                " *  "
             } else {
-                Span::styled("  ", Style::default().fg(C_TEXT_DIM).bg(bg))
+                "    "
             };
+            let prefix_color = if is_checked { C_GREEN } else if is_unread { C_RED } else { C_TEXT_DIM };
 
-            let author_style = if is_unread {
-                Style::default().fg(C_TEXT_BRIGHT).bold().bg(bg)
-            } else {
-                Style::default().fg(C_TEXT_DIM).bg(bg)
-            };
+            // First line of body (summary).
+            let body_summary: String = a.body.lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .chars()
+                .take(comment_width.saturating_sub(25))
+                .collect();
 
-            // Top border of comment card.
-            let card_top_len = comment_width.saturating_sub(6);
-            let card_top_fill: String = "\u{2500}".repeat(card_top_len);
+            let author_color = if is_unread { C_TEXT_BRIGHT } else { C_TEXT_DIM };
+            let body_color = if is_unread { C_TEXT } else { C_TEXT_DIM };
+
+            // Compact: one line per comment.
             comment_lines.push(Line::from(vec![
-                Span::styled(
-                    " \u{250c} ",
-                    Style::default().fg(bar_color).bg(bg),
-                ),
-                prefix,
-                Span::styled(&a.author, author_style),
-                Span::styled(
-                    format!(" \u{00b7} {ago_str} \u{00b7} {icon} "),
-                    Style::default().fg(C_TEXT_DIM).bg(bg),
-                ),
-                Span::styled(card_top_fill, Style::default().fg(C_BORDER).bg(bg)),
+                Span::styled(prefix, Style::default().fg(prefix_color).bg(bg)),
+                Span::styled(&a.author, Style::default().fg(author_color).bold().bg(bg)),
+                Span::styled(format!(" {ago_str} ", ), Style::default().fg(C_TEXT_DIM).bg(bg)),
+                Span::styled(body_summary, Style::default().fg(body_color).bg(bg)),
             ]));
 
-            // Body line(s).
-            let body_style = if is_unread {
-                Style::default().fg(C_TEXT).bg(bg)
-            } else {
-                Style::default().fg(C_TEXT_DIM).bg(bg)
-            };
-            if !a.body.is_empty() {
-                let bar_prefix = format!(" \u{2502} ");
-                let bar_w = bar_prefix.len();
-                let wrap_width = comment_width.saturating_sub(bar_w + 1);
-
-                // Render comment body as markdown, then word-wrap long lines.
+            // Expanded: if cursor is on this comment, show full body below.
+            if is_cursor && !a.body.is_empty() {
+                let wrap_width = comment_width.saturating_sub(6);
                 let md_lines = render_markdown(&a.body);
-                let mut body_line_count = 0;
+                let mut count = 0;
                 for md_line in md_lines.into_iter() {
-                    if body_line_count >= 12 { break; }
-                    // Concatenate all spans into plain text for wrapping.
-                    let full_text: String = md_line.spans.iter()
+                    if count >= 15 { break; }
+                    let text: String = md_line.spans.iter()
                         .map(|s| s.content.as_ref())
                         .collect();
-                    if full_text.is_empty() {
-                        comment_lines.push(Line::from(vec![
-                            Span::styled(bar_prefix.clone(), Style::default().fg(bar_color).bg(bg)),
-                        ]));
-                        body_line_count += 1;
+                    if text.is_empty() {
+                        comment_lines.push(Line::from(Span::styled(
+                            "    \u{2502}",
+                            Style::default().fg(C_ACCENT).bg(bg),
+                        )));
+                        count += 1;
                         continue;
                     }
-                    // Get the style from the first span (simplified — preserves bold/color).
-                    let line_style = md_line.spans.first()
+                    let style = md_line.spans.first()
                         .map(|s| s.style)
-                        .unwrap_or(body_style);
-
-                    // Word-wrap.
-                    let mut remaining = full_text.as_str();
-                    while !remaining.is_empty() && body_line_count < 12 {
+                        .unwrap_or(Style::default().fg(C_TEXT));
+                    let mut remaining = text.as_str();
+                    while !remaining.is_empty() && count < 15 {
                         let chunk = if remaining.len() <= wrap_width {
                             remaining
                         } else {
-                            // Find last space before wrap_width.
-                            let cut = remaining[..wrap_width]
-                                .rfind(' ')
-                                .unwrap_or(wrap_width);
-                            &remaining[..cut]
+                            remaining[..wrap_width].rfind(' ').map(|p| &remaining[..p]).unwrap_or(&remaining[..wrap_width])
                         };
                         comment_lines.push(Line::from(vec![
-                            Span::styled(bar_prefix.clone(), Style::default().fg(bar_color).bg(bg)),
-                            Span::styled(chunk.to_string(), line_style),
+                            Span::styled("    \u{2502} ", Style::default().fg(C_ACCENT).bg(bg)),
+                            Span::styled(chunk.to_string(), style.bg(bg)),
                         ]));
                         remaining = remaining[chunk.len()..].trim_start();
-                        body_line_count += 1;
+                        count += 1;
                     }
                 }
+                comment_lines.push(Line::raw(""));
             }
-
-            // Bottom border of comment card.
-            let card_bot_len = comment_width.saturating_sub(4);
-            let card_bot_fill: String = "\u{2500}".repeat(card_bot_len);
-            comment_lines.push(Line::from(vec![
-                Span::styled(
-                    " \u{2514}",
-                    Style::default().fg(bar_color).bg(bg),
-                ),
-                Span::styled(card_bot_fill, Style::default().fg(C_BORDER).bg(bg)),
-            ]));
         }
     }
 

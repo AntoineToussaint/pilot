@@ -52,14 +52,23 @@ pub(crate) fn handle_monitor_tick(
             }
         }
         pilot_core::MonitorState::CiFixing { .. } => {
-            // Push detected via MCP auto-approve — transition to WaitingCi.
+            let ci = session.primary_task.ci;
             let attempt = match &session.monitor {
                 Some(pilot_core::MonitorState::CiFixing { attempt }) => *attempt,
                 _ => 1,
             };
-            let Some(session) = app.sessions.get_mut(session_key) else { return };
-            session.monitor = Some(pilot_core::MonitorState::WaitingCi { after_attempt: attempt });
-            app.status = format!("Monitor: pushed fix, waiting for CI on {}", session.display_name);
+            if ci == pilot_core::CiStatus::Success {
+                // CI passed (maybe flaky, or Claude fixed it) — back to Idle.
+                let display_name = session.display_name.clone();
+                let Some(session) = app.sessions.get_mut(session_key) else { return };
+                session.monitor = Some(pilot_core::MonitorState::Idle);
+                app.status = format!("Monitor: CI passed for {display_name}");
+            } else {
+                // Push detected or tick — transition to WaitingCi.
+                let Some(session) = app.sessions.get_mut(session_key) else { return };
+                session.monitor = Some(pilot_core::MonitorState::WaitingCi { after_attempt: attempt });
+                app.status = format!("Monitor: waiting for CI on {}", session.display_name);
+            }
         }
         pilot_core::MonitorState::Rebasing => {
             // Rebase completed (async task sent this tick) — wait for CI.
