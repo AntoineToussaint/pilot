@@ -351,7 +351,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         let title_w = w.saturating_sub(9 + 14); // same as row layout
         let header_title = format!("{:<width$}", "Title", width = title_w);
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<6} ", "#"), Style::default().fg(C_TEXT_DIM)),
+            Span::styled(format!("  {:<5}  ", "#"), Style::default().fg(C_TEXT_DIM)),
             Span::styled(header_title, Style::default().fg(C_TEXT_DIM)),
             Span::styled(" CI Rv \u{25cf}  Time", Style::default().fg(C_TEXT_DIM)),
         ]));
@@ -517,8 +517,14 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                         if is_cursor { "\u{258c} " } else { "  " },
                         if is_cursor { Style::default().fg(C_ACCENT).bg(bg) } else { Style::default().bg(bg) },
                     ),
-                    // PR# (fixed 7 chars)
-                    Span::styled(format!("{pr_num:<6} "), Style::default().fg(pr_color).bg(bg)),
+                    // PR# + role indicator
+                    Span::styled(format!("{pr_num:<5}"), Style::default().fg(pr_color).bg(bg)),
+                    match task.role {
+                        TaskRole::Author => Span::styled("@ ", Style::default().fg(C_CYAN).bg(bg)),
+                        TaskRole::Reviewer => Span::styled("R ", Style::default().fg(C_MAGENTA).bg(bg)),
+                        TaskRole::Assignee => Span::styled("A ", Style::default().fg(C_GREEN).bg(bg)),
+                        TaskRole::Mentioned => Span::styled("  ", Style::default().bg(bg)),
+                    },
                     // Title (padded to exact width)
                     Span::styled(padded_title, title_style),
                     // Right side: icons + time (fixed 14 chars)
