@@ -346,6 +346,18 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         }
     }
 
+    // Column header row — like gh-dash's "▸ Title" header.
+    if app.loaded && session_count > 0 {
+        let header_right = format!("{:>width$}", "CI Rv \u{25cf} ! Time", width = 13);
+        let header_left = format!("  {:<6} Title", "#");
+        let header_pad = w.saturating_sub(header_left.len() + header_right.len());
+        lines.push(Line::from(vec![
+            Span::styled(header_left, Style::default().fg(C_TEXT_DIM)),
+            Span::styled(" ".repeat(header_pad), Style::default()),
+            Span::styled(header_right, Style::default().fg(C_TEXT_DIM)),
+        ]));
+    }
+
     // Pre-compute repo stats.
     let repo_stats: std::collections::HashMap<&str, (usize, usize)> = repos
         .iter()
@@ -490,8 +502,9 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 // ── Time ──
                 let time_str = time_ago_short(&task.updated_at);
 
-                // ── Layout: cursor(1) pr#(6) title(fill) icons(5) time(5) ──
-                let right_cols = 7 + 6; // icons + time
+                // ── Layout: cursor(2) pr#(6) title(fill) icons(9) time(5) ──
+                // Icons have spaces between them for readability.
+                let right_cols = 10 + 6; // icons(spaced) + time
                 let left_cols = 2 + 6; // cursor + pr#
                 let title_avail = w.saturating_sub(left_cols + right_cols);
                 let title_text = truncate_str(&task.title, title_avail);
@@ -508,14 +521,17 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                     // Title
                     Span::styled(title_text, title_style),
                     Span::styled(" ".repeat(title_pad), Style::default().bg(bg)),
-                    // Icons: CI review unread conflict
-                    Span::styled(" ", Style::default().bg(bg)),
+                    // Icons: CI  review  unread  conflict — spaced for readability.
+                    Span::styled("  ", Style::default().bg(bg)),
                     ci_icon,
+                    Span::styled(" ", Style::default().bg(bg)),
                     review_icon,
+                    Span::styled(" ", Style::default().bg(bg)),
                     unread_icon,
+                    Span::styled(" ", Style::default().bg(bg)),
                     conflict_icon,
                     // Time
-                    Span::styled(format!(" {:>4}", time_str), Style::default().fg(C_TEXT_DIM).bg(bg)),
+                    Span::styled(format!("  {:>4}", time_str), Style::default().fg(C_TEXT_DIM).bg(bg)),
                 ]);
 
                 lines.push(row);
