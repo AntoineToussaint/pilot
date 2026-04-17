@@ -758,13 +758,16 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             if let Some(ref mut picker) = app.picker {
                                 let count = picker.filtered_indices().len();
                                 if count > 0 {
-                                    picker.cursor = (picker.cursor + 1).min(count - 1);
+                                    picker.cursor = (picker.cursor + 1) % count;
                                 }
                             }
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
                             if let Some(ref mut picker) = app.picker {
-                                picker.cursor = picker.cursor.saturating_sub(1);
+                                let count = picker.filtered_indices().len();
+                                if count > 0 {
+                                    picker.cursor = if picker.cursor == 0 { count - 1 } else { picker.cursor - 1 };
+                                }
                             }
                         }
                         KeyCode::Char(' ') => {
