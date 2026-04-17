@@ -801,27 +801,9 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
         chunks[0],
     );
 
-    // ── PR description (if present) ──
     let mut comment_lines: Vec<Line> = Vec::new();
 
-    if let Some(ref body) = task.body {
-        let body_trimmed = body.trim();
-        if !body_trimmed.is_empty() {
-            // Compact description — just 3 lines, dimmed. Activity is the focus.
-            let md_lines = render_markdown(body_trimmed);
-            let preview_lines = md_lines.len().min(3);
-            for line in md_lines.into_iter().take(preview_lines) {
-                let mut padded = vec![Span::styled("  ", Style::default().fg(C_TEXT_DIM))];
-                for span in line.spans {
-                    padded.push(Span::styled(span.content.to_string(), span.style.fg(C_TEXT_DIM)));
-                }
-                comment_lines.push(Line::from(padded));
-            }
-            comment_lines.push(Line::raw(""));
-        }
-    }
-
-    // ── Comment thread (card-like blocks) ──
+    // ── Activity thread — comments and reviews are the focus ──
 
     if session.activity.is_empty() {
         comment_lines.push(Line::from(Span::styled(

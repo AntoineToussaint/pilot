@@ -37,9 +37,9 @@ archives:
 brews:
   - name: pilot
     repository:
-      owner: tensorzero  # change to your GitHub org
+      owner: AntoineToussaint
       name: homebrew-tap
-    homepage: "https://github.com/tensorzero/pilot"
+    homepage: "https://github.com/AntoineToussaint/pilot"
     description: "Reactive PR inbox TUI with embedded Claude Code terminals"
     license: "MIT"
     install: |
@@ -64,5 +64,5 @@ changelog:
 
 release:
   github:
-    owner: tensorzero  # change to your GitHub org
+    owner: AntoineToussaint
     name: pilot
