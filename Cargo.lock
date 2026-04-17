@@ -1643,6 +1643,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "futures",
+ "libc",
  "pilot-auth",
  "pilot-config",
  "pilot-core",

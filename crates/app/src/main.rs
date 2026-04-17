@@ -16,6 +16,18 @@ mod ui;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Redirect stderr to /dev/null to suppress libghostty-vt warnings
+    // (e.g. "unimplemented mode: 7727") that leak into the TUI.
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Ok(devnull) = std::fs::File::open("/dev/null") {
+            unsafe {
+                libc::dup2(devnull.as_raw_fd(), 2);
+            }
+        }
+    }
+
     let log_file = std::fs::File::create("/tmp/pilot.log")?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("pilot=debug".parse()?))
