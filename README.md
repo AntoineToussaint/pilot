@@ -1,71 +1,43 @@
 # pilot
 
-A reactive PR inbox TUI for developers managing many repos and PRs. Instead of checking GitHub, events flow to you -- new comments, CI failures, review requests surface automatically. Each PR becomes a session with an embedded terminal for running Claude Code or a shell in an isolated git worktree.
-
-## Features
-
-- **Reactive inbox** -- PRs sorted by latest activity, with triage badges (`reply`, `CI`, `changes`, `review`, `MERGE`, `QUEUE`) and colored label pills
-- **Embedded terminals** -- Claude Code or shell in isolated git worktrees, with live agent state detection (spinner = thinking, `>_` = idle, `?` = asking)
-- **Monitor mode** -- Automatic CI failure fixing and merge conflict rebasing. Press `w`, walk away
-- **Smart filters** -- `needs:reply ci:failed role:author` finds exactly what needs your attention
-- **MCP integration** -- Claude can push, comment, merge, approve with your confirmation
-- **Desktop notifications** -- macOS alerts when CI fails, PRs get approved, or someone comments
-- **Quick actions** -- Merge (`M`), quick reply (`e`), edit reviewers (`R`), Slack nudge (`S`), snooze (`z`)
-- **Per-comment read tracking** -- Individual comments marked as read via `Space`, auto-mark-read after 2s of viewing
-- **Diff stats** -- `+123 -45` shown per PR in sidebar and detail pane
-- **Standalone sessions** -- Create sessions without a PR (`N`), launch Claude, work freely
-- **Agent-agnostic** -- Configurable agent command (Claude Code default, swap to Cursor/Aider/anything via config)
-- **PR number colors** -- Each `#1234` gets a unique color for visual anchoring
+A reactive PR inbox TUI. Events flow to you — new comments, CI failures, review requests surface automatically. Each PR becomes a session with an embedded terminal (Claude Code or shell) in an isolated git worktree, wrapped in tmux so sessions survive quit.
 
 ## Install
 
 ### Prerequisites
 
-- **Rust** 1.75+ -- [rustup.rs](https://rustup.rs)
-- **Zig** -- `brew install zig` (macOS) or [ziglang.org](https://ziglang.org/download/) (builds terminal emulator)
-- **GitHub CLI** -- `brew install gh` then `gh auth login`
-- **tmux** -- `brew install tmux` (keeps Claude alive across quit)
-- **Claude Code** (optional) -- for AI-assisted workflows
+- **Rust** 1.75+ — [rustup.rs](https://rustup.rs)
+- **Zig** — `brew install zig` (macOS) or [ziglang.org](https://ziglang.org/download/)
+- **GitHub CLI** — `brew install gh` then `gh auth login`
+- **tmux** — `brew install tmux` (sessions persist across quit)
+- **Claude Code** (optional) — for AI-assisted fix/reply workflows
 
 ### Build
 
 ```bash
-# Clone pilot and its terminal dependency
 git clone https://github.com/AntoineToussaint/pilot.git
-git clone https://github.com/ghostty-org/libghostty-rs.git
-
-# Build (first build takes ~2min — compiles Zig terminal + SQLite)
+git clone https://github.com/ghostty-org/libghostty-rs.git  # terminal emulator
 cd pilot
-make setup    # verify all deps
-make build    # or: cargo build
+make setup   # verify deps
+make build   # first build ~2min (compiles Zig terminal + SQLite)
+make run     # start pilot
 ```
-
-Or without make:
-```bash
-cd pilot
-cargo build                    # debug
-cargo build --release          # optimized
-cargo test --workspace         # tests
-```
-
-### Run
-
-```bash
-cargo run -p pilot             # uses `gh auth token` automatically
-# or with libghostty dynamic linking:
-./run.sh
-```
-
-Logs: `/tmp/pilot.log` | State: `~/.pilot/state.db`
 
 ## Quick Start
 
-1. Start pilot -- it connects via `gh auth token` and polls every 30s
-2. `j`/`k` to navigate PRs, `Enter` to see details
-3. `c` to open Claude Code in the PR's worktree
-4. Select review comments with `Space`, press `f` to send to Claude for fixing
-5. `Tab` to cycle between sidebar / detail / terminal
-6. `?` for full keybinding reference
+```
+  #      Title                                   CI Rv ●  Time
+  ── tensorzero (11) ────────────────────────────────────────
+  #7302 refactor: decouple GCP provider...        ✓  ◦  ●  14m
+  #7282 Add OTel GenAI fields to stored...        ✓  ✓      20h
+  #41   Fix TOCTOU race in resolve_org...         ◦  ◦  ●    4h
+```
+
+1. `j`/`k` navigate — `Enter` opens detail
+2. `f` fix (spawns Claude to fix CI/conflicts/comments)
+3. `r` reply (post comment directly)
+4. `M M` merge (double-press)
+5. `Tab` cycle panes — `?` help
 
 ## Keybindings
 
@@ -73,65 +45,95 @@ Logs: `/tmp/pilot.log` | State: `~/.pilot/state.db`
 
 | Key | Action |
 |-----|--------|
-| `j`/`k` | Navigate |
-| `Enter` | Open detail |
-| `c` | Claude Code in worktree |
-| `b` | Shell in worktree |
-| `m` | Mark all read |
-| `w` | Toggle monitor |
-| `M` | Merge (double-press) |
+| `j`/`k` | Navigate PRs |
+| `Enter` | Open detail pane |
+| `f` | Fix — spawns Claude for CI failures, conflicts, or comments |
+| `r` | Reply to comment directly |
+| `c` | Open Claude Code in worktree (tmux, survives quit) |
+| `b` | Open shell in worktree |
+| `o` | Open PR in browser |
+| `M M` | Merge (double-press to confirm) |
+| `w` | Toggle monitor (auto-fix CI + rebase) |
+| `R` | Edit reviewers |
+| `A` | Edit assignees |
+| `S` | Slack nudge to reviewers |
 | `N` | New standalone session |
 | `z` | Snooze for 4 hours |
-| `g` | Refresh now |
-| `t` | Cycle time filter |
+| `m` | Mark all as read |
+| `g` | Refresh from GitHub |
+| `t` | Cycle time filter (1d/3d/7d/30d/all) |
 | `/` | Search/filter |
 | `?` | Help |
+| `q` | Quit |
 
-### Detail
+### Detail Pane
 
 | Key | Action |
 |-----|--------|
-| `j`/`k` | Navigate comments |
-| `Space` | Mark comment read / select |
-| `f` | Send selected to Claude (fix) |
-| `r` | Send selected to Claude (reply) |
-| `e` | Quick reply (post directly) |
-| `R` | Edit reviewers |
-| `A` | Edit assignees |
-| `S` | Slack nudge |
+| `j`/`k` | Navigate comments (auto-marks as read) |
+| `Space` | Select comment |
+| `f` | Fix selected with Claude |
+| `r` | Reply directly |
+| `Esc`/`Left` | Back to sidebar |
 
 ### Terminal
 
 | Key | Action |
 |-----|--------|
 | `Tab` | Exit terminal, cycle panes |
-| `Ctrl-]`/`Ctrl-o` | Exit terminal |
-| `Ctrl-w` + `h/j/k/l` | Focus pane |
-| `Ctrl-w` + `v/s` | Split |
-| `Ctrl-w` + `z` | Fullscreen |
+| `Ctrl-]` | Exit terminal |
+| Double `Ctrl-C` | Force quit app |
 
-## Search Syntax
+## Sidebar Icons
 
-Press `/` then type. Combine filters with spaces (AND):
+```
+CI Rv ● !
+✓  ✓  ●    — CI passing, approved, unread activity
+✗  ◦  ● !  — CI failing, review pending, unread, merge conflict
+◦  ·       — CI running, no review
+```
+
+| Icon | Column | Meaning |
+|------|--------|---------|
+| `✓` | CI | CI passing |
+| `✗` | CI | CI failing |
+| `◦` | CI | CI running/pending |
+| `✓` | Rv | Approved |
+| `✗` | Rv | Changes requested |
+| `◦` | Rv | Review pending |
+| `●` | Unread | Has unread comments |
+| `!` | Conflict | Merge conflict |
+
+## Search / Filter
+
+Press `/` then type. Filters combine with AND:
 
 ```
 needs:reply              # you need to respond
-ci:failed                # CI is broken
+ci:failed                # CI broken
 role:author              # your PRs
 is:unread                # unread activity
-repo:api                 # by repo name
-ci:failed role:author    # your failing PRs
+is:conflict              # merge conflicts
+repo:api                 # filter by repo name
+ci:failed role:author    # your PRs with failing CI
 ```
 
 ## Monitor Mode
 
-Press `w` to auto-fix a PR:
+Press `w` on a PR:
 
-1. CI fails -> Claude Code spawns with fix prompt
-2. Claude pushes (auto-approved) -> waits for CI
-3. CI passes -> back to watching
-4. 3 failures -> gives up, notifies you
-5. Merge conflict -> auto-rebases onto default branch
+1. CI fails → Claude spawns with fix prompt, pushes automatically
+2. Merge conflict → auto-rebases onto default branch
+3. CI passes → back to watching
+4. 3 failures → gives up
+
+## Terminal Sessions
+
+Terminals run inside **tmux** — Claude Code survives pilot quit.
+
+- Press `c` → opens Claude in worktree via tmux
+- Quit pilot → tmux keeps Claude alive
+- Restart pilot → navigate to same PR → auto-reattaches
 
 ## Configuration
 
@@ -143,9 +145,11 @@ providers:
     poll_interval: 30s
     filters:
       - org: my-org
+      - watch: owner/repo    # watch ALL PRs, not just yours
 
 display:
   activity_days: 7
+  hide_approved_by_me: true
 
 agent:
   command: claude
@@ -161,29 +165,35 @@ slack:
 
 ## Architecture
 
+10 crates. Library crates never depend on each other.
+
 ```
 crates/
-  core/          # Task, Session, AgentConfig, TaskProvider traits
-  auth/          # Credential chain (env, command, static)
-  events/        # Event bus (tokio broadcast)
-  store/         # Store trait + SQLite + MemoryStore (tests)
-  config/        # YAML config
-  tui-term/      # PTY terminal (portable-pty + libghostty-vt)
-  gh-provider/   # GitHub GraphQL polling, implements TaskProvider
-  git-ops/       # Git worktree manager
-  mcp-server/    # MCP stdio server for Claude integration
-  app/           # TUI binary
+  core/          Task, Session, AgentConfig, TaskProvider traits
+  auth/          Credential chain (env, command)
+  events/        Event bus (tokio broadcast)
+  store/         Store trait + SQLite + MemoryStore
+  config/        YAML config
+  tui-term/      PTY terminal (portable-pty + libghostty-vt)
+  gh-provider/   GitHub GraphQL polling, implements TaskProvider
+  git-ops/       Git worktree manager
+  mcp-server/    MCP stdio server for Claude integration
+  app/           TUI binary
 ```
 
-Key crate rules: core, auth, events, store never depend on each other. Provider crates depend on core + events + auth. App depends on everything.
+### Extending
 
-## Extending
+**New provider** (Linear, Jira): implement `TaskProvider` trait, wire into app.
 
-**New provider** (Linear, Jira): implement `TaskProvider` trait (`name()` + `fetch_tasks()`), wire into app.
+**New agent** (Cursor, Aider): set `agent.command` in config.
 
-**New agent** (Cursor, Aider): set `agent.command` in config. Customize `asking_patterns` for idle/question detection.
+## Data
 
-**New storage**: implement `Store` trait, swap in app.
+| Data | Location |
+|------|----------|
+| Sessions + read state | `~/.pilot/state.db` |
+| Git worktrees | `~/.pilot/worktrees/` |
+| Logs | `/tmp/pilot.log` |
 
 ## License
 
