@@ -438,103 +438,38 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 lines.push(Line::from(spans));
             }
             NavItem::Session(key) => {
-                let Some(session) = app.sessions.get(key) else {
-                    continue;
-                };
+                let Some(session) = app.sessions.get(key) else { continue };
                 let task = &session.primary_task;
                 let unread = session.unread_count();
-                let priority = session.action_priority("");
                 let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
 
-                // Does this PR require MY action? Bold the whole row if yes.
-                let needs_my_action = matches!(
-                    priority,
-                    ActionPriority::NeedsReply
-                        | ActionPriority::CiFailed
-                        | ActionPriority::ChangesRequested
-                        | ActionPriority::NeedsYourReview
-                        | ActionPriority::ApprovedReadyToMerge
-                );
-
-                // ── STATE column: composite readiness. Show the WORST blocker. ──
-                let is_author = task.role == TaskRole::Author;
-                let ci_ok = matches!(task.ci, CiStatus::Success | CiStatus::None);
-                let ci_running = matches!(task.ci, CiStatus::Running | CiStatus::Pending);
-                let review_ok = task.review == ReviewStatus::Approved;
-                let no_conflicts = !task.has_conflicts;
-
-                let (state_text, state_color) = match task.state {
-                    TaskState::Draft => ("DRAFT", C_TEXT_DIM),
-                    TaskState::Merged => ("MERGED", C_MAGENTA),
-                    TaskState::Closed => ("CLOSED", C_RED),
-                    _ if task.in_merge_queue && review_ok && ci_ok && no_conflicts => ("QUEUED", C_MAGENTA),
-                    _ if ci_ok && review_ok && no_conflicts => ("READY", C_GREEN),
-                    // Blockers — show the worst one.
-                    _ if task.has_conflicts => ("CONFLICT", C_RED),
-                    _ if task.ci == CiStatus::Failure => ("CI FAIL", C_RED),
-                    _ if task.review == ReviewStatus::ChangesRequested => ("CHANGES", C_ORANGE),
-                    _ if ci_running => ("CI...", C_YELLOW),
-                    _ if task.review == ReviewStatus::Pending => ("REVIEW", C_YELLOW),
-                    _ if ci_ok && task.review == ReviewStatus::None => ("NO REV", C_YELLOW),
-                    _ => ("OPEN", C_TEXT_DIM),
+                // ── Icons (right side): CI, review, unread — like gh-dash ──
+                // CI: ✓ green, ✗ red, ◦ yellow
+                let ci_icon = match task.ci {
+                    CiStatus::Success => Span::styled("\u{2713}", Style::default().fg(C_GREEN).bg(bg)),
+                    CiStatus::Failure => Span::styled("\u{2717}", Style::default().fg(C_RED).bg(bg)),
+                    CiStatus::Running | CiStatus::Pending => Span::styled("\u{25e6}", Style::default().fg(C_YELLOW).bg(bg)),
+                    _ => Span::styled("\u{00b7}", Style::default().fg(C_TEXT_DIM).bg(bg)),
                 };
-
-                // ── ACTION column: what's the ONE thing I should do right now? ──
-                let (action_text, action_color) = if task.has_conflicts && is_author {
-                    ("REBASE", C_RED)
-                } else if task.ci == CiStatus::Failure && is_author {
-                    ("FIX", C_RED)
-                } else if task.needs_reply && is_author {
-                    ("RESPOND", C_RED)
-                } else if task.review == ReviewStatus::ChangesRequested && is_author {
-                    ("PUSH", C_ORANGE)
-                } else if task.role == TaskRole::Reviewer {
-                    ("REVIEW", C_YELLOW)
-                } else if ci_ok && review_ok && no_conflicts && is_author && !task.in_merge_queue {
-                    ("MERGE", C_GREEN)
-                } else if task.in_merge_queue {
-                    ("", C_TEXT_DIM) // Already queued — nothing to do.
-                } else if is_author && ci_ok && task.reviewers.is_empty() && task.assignees.is_empty() {
-                    ("ASSIGN", C_YELLOW)
-                } else if is_author && ci_ok && matches!(task.review, ReviewStatus::None | ReviewStatus::Pending) {
-                    ("NUDGE", C_YELLOW)
+                // Review: ✓ approved, ✗ changes, ◦ pending, · none
+                let review_icon = match task.review {
+                    ReviewStatus::Approved => Span::styled("\u{2713}", Style::default().fg(C_GREEN).bg(bg)),
+                    ReviewStatus::ChangesRequested => Span::styled("\u{2717}", Style::default().fg(C_ORANGE).bg(bg)),
+                    ReviewStatus::Pending => Span::styled("\u{25e6}", Style::default().fg(C_YELLOW).bg(bg)),
+                    _ => Span::styled("\u{00b7}", Style::default().fg(C_TEXT_DIM).bg(bg)),
+                };
+                // Unread dot
+                let unread_icon = if unread > 0 {
+                    Span::styled("\u{25cf}", Style::default().fg(C_RED).bg(bg))
                 } else {
-                    ("", C_TEXT_DIM)
+                    Span::styled(" ", Style::default().bg(bg))
                 };
 
-                // ── TIME column (5 chars) ──
-                let time_str = time_ago_short(&task.updated_at);
-
-                // ── Unread indicator ──
-                let unread_marker = if unread > 0 {
-                    format!("*{unread}")
+                // Conflict indicator
+                let conflict_icon = if task.has_conflicts {
+                    Span::styled("!", Style::default().fg(C_RED).bold().bg(bg))
                 } else {
-                    String::new()
-                };
-
-                // ── Agent indicator (compact) ──
-                let agent_marker = if app.terminals.contains_key(key) {
-                    use crate::agent_state::AgentState;
-                    match app.agent_states.get(key).copied().unwrap_or(AgentState::Active) {
-                        AgentState::Active => {
-                            let frames = ["\u{2807}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}"];
-                            frames[(app.tick_count as usize / 2) % frames.len()].to_string()
-                        }
-                        AgentState::Idle => ">_".into(),
-                        AgentState::Asking => "?!".into(),
-                    }
-                } else if session.is_monitored() {
-                    "\u{25c9}".into() // ◉ = monitored
-                } else {
-                    String::new()
-                };
-
-                // ── CI icon ──
-                let (ci_ch, ci_color) = match task.ci {
-                    CiStatus::Success => ("\u{2713}", C_GREEN),
-                    CiStatus::Failure => ("\u{2717}", C_RED),
-                    CiStatus::Running | CiStatus::Pending => ("\u{25e6}", C_YELLOW),
-                    _ => ("\u{00b7}", C_TEXT_DIM),
+                    Span::styled(" ", Style::default().bg(bg))
                 };
 
                 // ── PR number ──
@@ -543,10 +478,8 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                     .unwrap_or_default();
                 let pr_color = pr_number_color(&pr_num);
 
-                // ── Title style: bold if action needed, bright if unread ──
+                // ── Title style ──
                 let title_style = if is_cursor {
-                    Style::default().fg(C_TEXT_BRIGHT).bold().bg(bg)
-                } else if needs_my_action {
                     Style::default().fg(C_TEXT_BRIGHT).bold().bg(bg)
                 } else if unread > 0 {
                     Style::default().fg(C_TEXT_BRIGHT).bg(bg)
@@ -554,45 +487,35 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                     Style::default().fg(C_TEXT).bg(bg)
                 };
 
-                // ── Compute column widths ──
-                // Layout: accent(2) ci(2) pr#(6) title(fill) state(9) action(8) time(5)
-                let right_cols = 5 + 9 + 8 + 6 + 2; // indicators + state + action + time + gaps
-                let left_cols = 2 + 2 + 6; // accent + ci + pr#
+                // ── Time ──
+                let time_str = time_ago_short(&task.updated_at);
+
+                // ── Layout: cursor(1) pr#(6) title(fill) icons(5) time(5) ──
+                let right_cols = 7 + 6; // icons + time
+                let left_cols = 2 + 6; // cursor + pr#
                 let title_avail = w.saturating_sub(left_cols + right_cols);
                 let title_text = truncate_str(&task.title, title_avail);
                 let title_pad = title_avail.saturating_sub(title_text.len());
 
-                // ── Build the row ──
                 let row = Line::from(vec![
-                    // Accent bar
+                    // Cursor
                     Span::styled(
                         if is_cursor { "\u{258c} " } else { "  " },
                         if is_cursor { Style::default().fg(C_ACCENT).bg(bg) } else { Style::default().bg(bg) },
                     ),
-                    // CI
-                    Span::styled(format!("{ci_ch} "), Style::default().fg(ci_color).bg(bg)),
                     // PR#
                     Span::styled(format!("{pr_num:<5} "), Style::default().fg(pr_color).bg(bg)),
                     // Title
                     Span::styled(title_text, title_style),
                     Span::styled(" ".repeat(title_pad), Style::default().bg(bg)),
-                    // Unread + agent (compact, before state)
-                    if !unread_marker.is_empty() || !agent_marker.is_empty() {
-                        let combined = format!("{}{}{}", unread_marker, if !unread_marker.is_empty() && !agent_marker.is_empty() { " " } else { "" }, agent_marker);
-                        Span::styled(format!("{combined:>4} "), Style::default().fg(if unread > 0 { C_RED } else { C_YELLOW }).bg(bg))
-                    } else {
-                        Span::styled("     ", Style::default().bg(bg))
-                    },
-                    // STATE
-                    Span::styled(format!("{state_text:>8} "), Style::default().fg(state_color).bg(bg)),
-                    // ACTION (bold if present)
-                    if !action_text.is_empty() {
-                        Span::styled(format!("{action_text:>7} "), Style::default().fg(action_color).bold().bg(bg))
-                    } else {
-                        Span::styled("        ", Style::default().bg(bg))
-                    },
-                    // TIME
-                    Span::styled(format!(" {time_str:>5}"), Style::default().fg(C_TEXT_DIM).bg(bg)),
+                    // Icons: CI review unread conflict
+                    Span::styled(" ", Style::default().bg(bg)),
+                    ci_icon,
+                    review_icon,
+                    unread_icon,
+                    conflict_icon,
+                    // Time
+                    Span::styled(format!(" {:>4}", time_str), Style::default().fg(C_TEXT_DIM).bg(bg)),
                 ]);
 
                 lines.push(row);
