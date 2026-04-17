@@ -346,15 +346,14 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         }
     }
 
-    // Column header row — like gh-dash's "▸ Title" header.
+    // Column header — matches the fixed-width layout below.
     if app.loaded && session_count > 0 {
-        let header_right = format!("{:>width$}", "CI Rv \u{25cf} ! Time", width = 13);
-        let header_left = format!("  {:<6} Title", "#");
-        let header_pad = w.saturating_sub(header_left.len() + header_right.len());
+        let title_w = w.saturating_sub(9 + 14); // same as row layout
+        let header_title = format!("{:<width$}", "Title", width = title_w);
         lines.push(Line::from(vec![
-            Span::styled(header_left, Style::default().fg(C_TEXT_DIM)),
-            Span::styled(" ".repeat(header_pad), Style::default()),
-            Span::styled(header_right, Style::default().fg(C_TEXT_DIM)),
+            Span::styled(format!("  {:<6} ", "#"), Style::default().fg(C_TEXT_DIM)),
+            Span::styled(header_title, Style::default().fg(C_TEXT_DIM)),
+            Span::styled(" CI Rv \u{25cf}  Time", Style::default().fg(C_TEXT_DIM)),
         ]));
     }
 
@@ -502,13 +501,15 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 // ── Time ──
                 let time_str = time_ago_short(&task.updated_at);
 
-                // ── Layout: cursor(2) pr#(6) title(fill) icons(9) time(5) ──
-                // Icons have spaces between them for readability.
-                let right_cols = 10 + 6; // icons(spaced) + time
-                let left_cols = 2 + 6; // cursor + pr#
-                let title_avail = w.saturating_sub(left_cols + right_cols);
-                let title_text = truncate_str(&task.title, title_avail);
-                let title_pad = title_avail.saturating_sub(title_text.len());
+                // ── Layout ──
+                // Right side is fixed: "  ✓ ◦ ●    4h" = 14 chars
+                // Left side: cursor(2) + pr#(7)
+                let right_w = 14;
+                let left_w = 9;
+                let title_w = w.saturating_sub(left_w + right_w);
+                let title_text = truncate_str(&task.title, title_w);
+                // Pad title to exact width so right side always aligns.
+                let padded_title = format!("{:<width$}", title_text, width = title_w);
 
                 let row = Line::from(vec![
                     // Cursor
@@ -516,22 +517,19 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                         if is_cursor { "\u{258c} " } else { "  " },
                         if is_cursor { Style::default().fg(C_ACCENT).bg(bg) } else { Style::default().bg(bg) },
                     ),
-                    // PR#
-                    Span::styled(format!("{pr_num:<5} "), Style::default().fg(pr_color).bg(bg)),
-                    // Title
-                    Span::styled(title_text, title_style),
-                    Span::styled(" ".repeat(title_pad), Style::default().bg(bg)),
-                    // Icons: CI  review  unread  conflict — spaced for readability.
-                    Span::styled("  ", Style::default().bg(bg)),
+                    // PR# (fixed 7 chars)
+                    Span::styled(format!("{pr_num:<6} "), Style::default().fg(pr_color).bg(bg)),
+                    // Title (padded to exact width)
+                    Span::styled(padded_title, title_style),
+                    // Right side: icons + time (fixed 14 chars)
+                    Span::styled(" ", Style::default().bg(bg)),
                     ci_icon,
                     Span::styled(" ", Style::default().bg(bg)),
                     review_icon,
                     Span::styled(" ", Style::default().bg(bg)),
                     unread_icon,
-                    Span::styled(" ", Style::default().bg(bg)),
                     conflict_icon,
-                    // Time
-                    Span::styled(format!("  {:>4}", time_str), Style::default().fg(C_TEXT_DIM).bg(bg)),
+                    Span::styled(format!(" {:>4}", time_str), Style::default().fg(C_TEXT_DIM).bg(bg)),
                 ]);
 
                 lines.push(row);
