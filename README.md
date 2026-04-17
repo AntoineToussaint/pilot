@@ -21,19 +21,31 @@ A reactive PR inbox TUI for developers managing many repos and PRs. Instead of c
 
 ### Prerequisites
 
-- **Rust** 1.75+ (`cargo`)
-- **GitHub CLI** (`gh`) -- authenticated via `gh auth login`
-- **Claude Code** (`claude`) -- for AI-assisted workflows (optional)
-- **libghostty-vt** -- terminal emulation (see Cargo.toml path deps)
+- **Rust** 1.75+ -- [rustup.rs](https://rustup.rs)
+- **Zig** -- `brew install zig` (macOS) or [ziglang.org](https://ziglang.org/download/) (builds terminal emulator)
+- **GitHub CLI** -- `brew install gh` then `gh auth login`
+- **tmux** -- `brew install tmux` (keeps Claude alive across quit)
+- **Claude Code** (optional) -- for AI-assisted workflows
 
 ### Build
 
 ```bash
-git clone https://github.com/AntoineToussaint/gh-pilot.git
-cd gh-pilot
-cargo build                    # first build ~30s (compiles SQLite)
-cargo test --workspace         # 24 tests
-cargo clippy --workspace       # lint
+# Clone pilot and its terminal dependency
+git clone https://github.com/AntoineToussaint/pilot.git
+git clone https://github.com/ghostty-org/libghostty-rs.git
+
+# Build (first build takes ~2min — compiles Zig terminal + SQLite)
+cd pilot
+make setup    # verify all deps
+make build    # or: cargo build
+```
+
+Or without make:
+```bash
+cd pilot
+cargo build                    # debug
+cargo build --release          # optimized
+cargo test --workspace         # tests
 ```
 
 ### Run
