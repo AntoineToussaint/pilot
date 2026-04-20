@@ -454,26 +454,30 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 let unread = session.unread_count();
                 let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
 
-                // ── Status label (right side): one compact label showing the worst issue ──
-                let status_label = if task.has_conflicts {
-                    Span::styled(" CONFLICT ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_RED).bold())
+                // ── Status label: fixed 10 chars, right-aligned ──
+                let (label_text, label_fg, label_bg) = if task.has_conflicts {
+                    ("CONFLICT", Color::Rgb(15,17,23), C_RED)
                 } else if task.ci == CiStatus::Failure {
-                    Span::styled(" CI FAIL ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_RED).bold())
+                    ("CI FAIL", Color::Rgb(15,17,23), C_RED)
                 } else if task.review == ReviewStatus::ChangesRequested {
-                    Span::styled(" CHANGES ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_ORANGE).bold())
+                    ("CHANGES", Color::Rgb(15,17,23), C_ORANGE)
                 } else if task.in_merge_queue {
-                    Span::styled(" QUEUED ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_MAGENTA).bold())
+                    ("QUEUED", Color::Rgb(15,17,23), C_MAGENTA)
                 } else if task.review == ReviewStatus::Approved && matches!(task.ci, CiStatus::Success | CiStatus::None) {
-                    Span::styled(" READY ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_GREEN).bold())
+                    ("READY", Color::Rgb(15,17,23), C_GREEN)
                 } else if task.review == ReviewStatus::Pending {
-                    Span::styled(" REVIEW ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_YELLOW).bold())
+                    ("REVIEW", Color::Rgb(15,17,23), C_YELLOW)
                 } else if matches!(task.ci, CiStatus::Running | CiStatus::Pending) {
-                    Span::styled(" CI... ", Style::default().fg(C_YELLOW).bg(bg))
+                    ("CI...", C_YELLOW, bg)
                 } else if matches!(task.state, TaskState::Draft) {
-                    Span::styled(" DRAFT ", Style::default().fg(C_TEXT_DIM).bg(bg))
+                    ("DRAFT", C_TEXT_DIM, bg)
                 } else {
-                    Span::styled("       ", Style::default().bg(bg))
+                    ("", C_TEXT_DIM, bg)
                 };
+                let status_label = Span::styled(
+                    format!("{:>10}", if label_text.is_empty() { "".to_string() } else { format!(" {label_text} ") }),
+                    Style::default().fg(label_fg).bg(label_bg).bold(),
+                );
 
                 // Unread badge.
                 let unread_badge = if unread > 0 {
