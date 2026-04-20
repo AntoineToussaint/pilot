@@ -101,7 +101,7 @@ pub(crate) fn spawn_monitor_claude_fix(
             }
             return;
         }
-    } else if !app.terminal_kinds.get(session_key)
+    } else if !app.terminals.kind(session_key)
         .map(|k| matches!(k, ShellKind::Claude))
         .unwrap_or(false)
     {

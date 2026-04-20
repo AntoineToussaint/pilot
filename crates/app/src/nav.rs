@@ -51,7 +51,8 @@ pub(crate) fn build_repo_groups(app: &App) -> Vec<(String, Vec<String>)> {
         None
     };
 
-    let keys = app.filtered_keys.as_ref().unwrap_or(&app.session_order);
+    let order = app.sessions.order().to_vec();
+    let keys = app.filtered_keys.as_ref().unwrap_or(&order);
     let mut seen_keys = std::collections::HashSet::new();
     for key in keys {
         // Dedup — skip if we've already processed this key.
@@ -127,16 +128,7 @@ pub(crate) fn build_repo_groups(app: &App) -> Vec<(String, Vec<String>)> {
 pub(crate) fn resort_sessions(app: &mut App) {
     let prev_key = app.selected_session_key();
 
-    app.session_order.sort_by(|a, b| {
-        let sa = app.sessions.get(a);
-        let sb = app.sessions.get(b);
-        match (sa, sb) {
-            (Some(sa), Some(sb)) => sb.primary_task.updated_at.cmp(&sa.primary_task.updated_at),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-    });
+    app.sessions.sort_by_updated();
 
     // Restore selection in nav_items (not session_order — they differ!).
     if let Some(ref key) = prev_key {
@@ -190,7 +182,7 @@ pub(crate) fn handle_sidebar_click(app: &mut App, row: usize, action_tx: &mpsc::
                     for _i in 0..msg_count {
                         if current_row == row {
                             // Clicked on a message — select the session and toggle messages.
-                            if let Some(idx) = app.session_order.iter().position(|k2| k2 == key) {
+                            if let Some(idx) = app.sessions.order().iter().position(|k2| k2 == key) {
                                 app.selected = idx;
                                 crate::app::update_detail_pane(app);
                             }
@@ -218,7 +210,8 @@ pub(crate) fn apply_search_filter(app: &mut App) {
     }
 
     let filtered: Vec<String> = app
-        .session_order
+        .sessions
+        .order()
         .iter()
         .filter(|key| {
             let Some(session) = app.sessions.get(*key) else {

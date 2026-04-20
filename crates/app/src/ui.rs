@@ -38,13 +38,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     );
 
     let outer = Layout::vertical([
-        Constraint::Length(if app.tab_order.is_empty() { 0 } else { 1 }),
+        Constraint::Length(if app.terminals.tab_order().is_empty() { 0 } else { 1 }),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .split(frame.area());
 
-    if !app.tab_order.is_empty() {
+    if !app.terminals.tab_order().is_empty() {
         render_tab_bar(app, frame, outer[0]);
     }
     render_main(app, frame, outer[1]);
@@ -132,11 +132,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
 
 fn render_tab_bar(app: &App, frame: &mut Frame, area: Rect) {
     let tabs: Vec<Span> = app
-        .tab_order
+        .terminals
+        .tab_order()
         .iter()
         .enumerate()
         .flat_map(|(i, key)| {
-            let is_active = i == app.active_tab;
+            let is_active = i == app.terminals.active_tab();
             let session = app.sessions.get(key);
             let label = session
                 .map(|s| s.primary_task.id.key.as_str())
@@ -942,7 +943,7 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
     let is_focused = app.input_mode == InputMode::Terminal;
     let border_color = if is_focused { C_GREEN } else { C_BORDER };
 
-    let shell_label = match app.terminal_kinds.get(key) {
+    let shell_label = match app.terminals.kind(key) {
         Some(crate::action::ShellKind::Claude) => "Claude Code",
         Some(crate::action::ShellKind::Shell) => "Shell",
         None => "Terminal",
@@ -1171,9 +1172,9 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             Span::raw("")
         },
-        if !app.tab_order.is_empty() {
+        if !app.terminals.tab_order().is_empty() {
             Span::styled(
-                format!("{} tabs  ", app.tab_order.len()),
+                format!("{} tabs  ", app.terminals.tab_order().len()),
                 Style::default().fg(C_TEXT_DIM),
             )
         } else {

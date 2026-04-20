@@ -12,6 +12,8 @@ mod nav;
 mod notify;
 pub mod pane;
 mod picker;
+mod session_manager;
+mod terminal_manager;
 mod ui;
 
 #[tokio::main]

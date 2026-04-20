@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -25,6 +24,8 @@ use crate::nav::{
 };
 use crate::pane::{Direction, PaneContent, PaneManager};
 use crate::picker::{build_picker_items, fetch_collaborators, PickerState};
+use crate::session_manager::SessionManager;
+use crate::terminal_manager::TerminalManager;
 use crate::ui;
 
 /// Tracks an active mouse drag for pane resizing.
@@ -36,18 +37,12 @@ pub struct DragState;
 /// Top-level application state.
 pub struct App {
     // ── Sessions ──
-    pub sessions: BTreeMap<String, Session>,
-    pub terminals: BTreeMap<String, TermSession>,
-    pub terminal_kinds: BTreeMap<String, ShellKind>,
-    pub session_order: Vec<String>,
+    pub sessions: SessionManager,
+    pub terminals: TerminalManager,
     pub selected: usize,
 
     // ── Panes ──
     pub panes: PaneManager,
-
-    // ── Tabs ──
-    pub tab_order: Vec<String>,
-    pub active_tab: usize,
 
     // ── Input ──
     /// The single source of truth for what mode the app is in.
@@ -136,37 +131,20 @@ impl App {
         tracing::info!("State database opened at ~/.pilot/state.db");
 
         // Load cached sessions from SQLite for instant startup.
-        let mut sessions = BTreeMap::new();
-        let mut session_order = Vec::new();
+        let mut sessions = SessionManager::new();
         let mut loaded = false;
 
-        if let Ok(records) = store.list_sessions() {
-            for record in records {
-                if let Some(json) = &record.session_json {
-                    if let Ok(session) = serde_json::from_str::<Session>(json) {
-                        let key = record.task_id.clone();
-                        if !session_order.contains(&key) {
-                            session_order.push(key.clone());
-                        }
-                        sessions.insert(key, session);
-                    }
-                }
-            }
-            if !sessions.is_empty() {
-                loaded = true;
-                tracing::info!("Restored {} cached sessions from SQLite", sessions.len());
-            }
+        sessions.load_from_store(store.as_ref());
+        if !sessions.is_empty() {
+            loaded = true;
+            tracing::info!("Restored {} cached sessions from SQLite", sessions.len());
         }
 
         Ok(Self {
             sessions,
-            terminals: BTreeMap::new(),
-            terminal_kinds: BTreeMap::new(),
-            session_order,
+            terminals: TerminalManager::new(),
             selected: 0,
             panes: PaneManager::default_layout(),
-            tab_order: Vec::new(),
-            active_tab: 0,
             input_mode: InputMode::Normal,
             search_active: false,
             search_query: String::new(),
@@ -215,7 +193,7 @@ impl App {
     }
 
     pub fn active_tab_key(&self) -> Option<&String> {
-        self.tab_order.get(self.active_tab)
+        self.terminals.active_tab_key()
     }
 
     /// Get the currently selected session (if cursor is on one).
@@ -226,15 +204,10 @@ impl App {
 
     /// Close a terminal and clean up all associated state.
     pub fn close_terminal(&mut self, key: &str) {
-        self.terminals.remove(key);
-        self.terminal_kinds.remove(key);
-        self.tab_order.retain(|k| k != key);
+        self.terminals.close(key);
         self.agent_states.remove(key);
         self.pending_prompts.remove(key);
         self.notified_asking.remove(key);
-        if self.active_tab >= self.tab_order.len() && !self.tab_order.is_empty() {
-            self.active_tab = self.tab_order.len() - 1;
-        }
     }
 
     /// Report an error to the status bar.
@@ -403,7 +376,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         tracing::error!("Failed to send Ctrl-C to terminal {key}: {e}");
                     }
                 }
-                save_all_sessions(app);
+                app.sessions.save_all(app.store.as_ref());
                 app.should_quit = true;
             } else {
                 app.quit_pending = true;
@@ -418,15 +391,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::Tick => {
             app.tick_count += 1;
             // Process pending PTY output for all terminals (needed for ghostty backend).
-            for term in app.terminals.values_mut() {
-                term.process_pending();
-            }
+            app.terminals.process_pending();
             // Update Claude state detection for each Claude terminal.
             {
                 use crate::agent_state::{AgentState, detect_state};
                 let asking_patterns = &app.config.agent.config.asking_patterns;
                 let claude_keys: Vec<String> = app.terminals.keys()
-                    .filter(|k| app.terminal_kinds.get(*k)
+                    .filter(|k| app.terminals.kind(k)
                         .map(|kind| matches!(kind, ShellKind::Claude))
                         .unwrap_or(false))
                     .cloned()
@@ -527,21 +498,19 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
             // Save all sessions every ~3s (30 ticks at 100ms).
             if app.tick_count % 30 == 0 && !app.sessions.is_empty() {
-                save_all_sessions(app);
+                app.sessions.save_all(app.store.as_ref());
             }
             // MCP confirmations now come via Unix socket (no polling needed).
-            let exited: Vec<String> = app
-                .terminals
-                .iter()
-                .filter(|(_, t)| t.is_finished())
-                .map(|(k, _)| k.clone())
-                .collect();
+            let exited = app.terminals.collect_finished();
             for key in exited {
                 if app.pending_prompts.contains_key(&key) {
                     tracing::warn!("Pending prompt lost for {key} (terminal exited)");
                     app.status = format!("Warning: queued prompt lost — terminal exited");
                 }
-                app.close_terminal(&key);
+                // Clean up app-level state associated with the terminal.
+                app.agent_states.remove(&key);
+                app.pending_prompts.remove(&key);
+                app.notified_asking.remove(&key);
                 if let Some(session) = app.sessions.get_mut(&key) {
                     session.state = SessionState::Active;
                     // If monitored and fixing CI, Claude exited — wait for CI.
@@ -894,23 +863,23 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
         // ── Tabs ──
         Action::NextTab => {
-            if !app.tab_order.is_empty() {
-                app.active_tab = (app.active_tab + 1) % app.tab_order.len();
+            if !app.terminals.tab_order().is_empty() {
+                app.terminals.next_tab();
                 sync_selected_to_tab(app);
                 set_mode(app, InputMode::Terminal);
             }
         }
         Action::PrevTab => {
-            if !app.tab_order.is_empty() {
-                app.active_tab = (app.active_tab + app.tab_order.len() - 1) % app.tab_order.len();
+            if !app.terminals.tab_order().is_empty() {
+                app.terminals.prev_tab();
                 sync_selected_to_tab(app);
                 set_mode(app, InputMode::Terminal);
             }
         }
         Action::GoToTab(n) => {
             let idx = n - 1;
-            if idx < app.tab_order.len() {
-                app.active_tab = idx;
+            if idx < app.terminals.tab_order().len() {
+                app.terminals.set_active_tab(idx);
                 sync_selected_to_tab(app);
                 set_mode(app, InputMode::Terminal);
             }
@@ -952,8 +921,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if let Some(key) = app.selected_session_key() {
                 if app.terminals.contains_key(&key) {
                     // Already has terminal — just switch to that tab.
-                    if let Some(idx) = app.tab_order.iter().position(|k| k == &key) {
-                        app.active_tab = idx;
+                    if let Some(idx) = app.terminals.tab_order().iter().position(|k| k == &key) {
+                        app.terminals.set_active_tab(idx);
                     }
                     set_mode(app, InputMode::Terminal);
                     return;
@@ -1061,9 +1030,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         if let Ok(Some(record)) = app.store.get_session(&task.id) {
                             session.seen_count = record.seen_count as usize;
                             session.last_viewed_at = record.last_viewed_at;
-                        }
-                        if !app.session_order.contains(&key) {
-                            app.session_order.push(key.clone());
                         }
                         app.sessions.insert(key, session);
                     }
@@ -1176,9 +1142,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     let key = id.to_string();
                     app.sessions.remove(&key);
                     app.close_terminal(&key);
-                    app.session_order.retain(|k| k != &key);
-                    if app.selected >= app.session_order.len() && !app.session_order.is_empty() {
-                        app.selected = app.session_order.len() - 1;
+                    let order_len = app.sessions.order().len();
+                    if app.selected >= order_len && order_len > 0 {
+                        app.selected = order_len - 1;
                     }
                     // Also remove from persistent store so it doesn't come back on restart.
                     if let Err(e) = app.store.delete_session(id) {
@@ -2052,9 +2018,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             };
             let mut session = pilot_core::Session::new(task);
             session.state = pilot_core::SessionState::Active;
-            if !app.session_order.contains(&key) {
-                app.session_order.push(key.clone());
-            }
             app.sessions.insert(key, session);
             crate::nav::resort_sessions(app);
             app.status = format!("Created session: {description}");
@@ -2177,12 +2140,7 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
 
     match term_result {
         Ok(term) => {
-            app.terminals.insert(session_key.to_string(), term);
-            app.terminal_kinds.insert(session_key.to_string(), kind);
-            if !app.tab_order.contains(&session_key.to_string()) {
-                app.tab_order.push(session_key.to_string());
-            }
-            app.active_tab = app.tab_order.len() - 1;
+            app.terminals.insert(session_key.to_string(), term, kind);
             if let Some(session) = app.sessions.get_mut(session_key) {
                 session.state = SessionState::Working;
             }
@@ -2413,8 +2371,8 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     app.selected_comments.clear();
     app.last_claude_send = Some(now);
 
-    if let Some(idx) = app.tab_order.iter().position(|k| k == &session_key) {
-        app.active_tab = idx;
+    if let Some(idx) = app.terminals.tab_order().iter().position(|k| k == &session_key) {
+        app.terminals.set_active_tab(idx);
     }
     set_mode(app, InputMode::Terminal);
 
@@ -2431,7 +2389,7 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 /// Sync sidebar selection to the active tab.
 fn sync_selected_to_tab(app: &mut App) {
     if let Some(tab_key) = app.active_tab_key().cloned() {
-        if let Some(idx) = app.session_order.iter().position(|k| k == &tab_key) {
+        if let Some(idx) = app.sessions.order().iter().position(|k| k == &tab_key) {
             app.selected = idx;
         }
         update_detail_pane(app);
@@ -2626,30 +2584,6 @@ pub struct PendingMcpAction {
     pub display: String,
     /// Channel to send approval/rejection back to the MCP server.
     pub response_tx: Option<std::sync::mpsc::Sender<bool>>,
-}
-
-/// Persist all sessions to SQLite.
-fn save_all_sessions(app: &App) {
-    let mut saved = 0;
-    let mut errors = 0;
-    for (key, session) in &app.sessions {
-        let json = serde_json::to_string(session).ok();
-        match app.store.save_session(&pilot_store::SessionRecord {
-            task_id: key.clone(),
-            seen_count: session.seen_count as i64,
-            last_viewed_at: session.last_viewed_at,
-            created_at: session.created_at,
-            session_json: json,
-            metadata: None,
-        }) {
-            Ok(()) => saved += 1,
-            Err(e) => {
-                tracing::error!("Failed to save session {key}: {e}");
-                errors += 1;
-            }
-        }
-    }
-    tracing::info!("Saved {saved} sessions ({errors} errors)");
 }
 
 /// Reset detail pane state when switching sessions and auto-update detail.
