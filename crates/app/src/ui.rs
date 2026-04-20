@@ -353,7 +353,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<5}  ", "#"), Style::default().fg(C_TEXT_DIM)),
             Span::styled(header_title, Style::default().fg(C_TEXT_DIM)),
-            Span::styled(" CI Rv \u{25cf}  Time", Style::default().fg(C_TEXT_DIM)),
+            Span::styled("      Status  Time", Style::default().fg(C_TEXT_DIM)),
         ]));
     }
 
@@ -454,33 +454,32 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 let unread = session.unread_count();
                 let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
 
-                // ── Icons (right side): CI, review, unread — like gh-dash ──
-                // CI: ✓ green, ✗ red, ◦ yellow
-                let ci_icon = match task.ci {
-                    CiStatus::Success => Span::styled("\u{2713}", Style::default().fg(C_GREEN).bg(bg)),
-                    CiStatus::Failure => Span::styled("\u{2717}", Style::default().fg(C_RED).bg(bg)),
-                    CiStatus::Running | CiStatus::Pending => Span::styled("\u{25e6}", Style::default().fg(C_YELLOW).bg(bg)),
-                    _ => Span::styled("\u{00b7}", Style::default().fg(C_TEXT_DIM).bg(bg)),
-                };
-                // Review: ✓ approved, ✗ changes, ◦ pending, · none
-                let review_icon = match task.review {
-                    ReviewStatus::Approved => Span::styled("\u{2713}", Style::default().fg(C_GREEN).bg(bg)),
-                    ReviewStatus::ChangesRequested => Span::styled("\u{2717}", Style::default().fg(C_ORANGE).bg(bg)),
-                    ReviewStatus::Pending => Span::styled("\u{25e6}", Style::default().fg(C_YELLOW).bg(bg)),
-                    _ => Span::styled("\u{00b7}", Style::default().fg(C_TEXT_DIM).bg(bg)),
-                };
-                // Unread dot
-                let unread_icon = if unread > 0 {
-                    Span::styled("\u{25cf}", Style::default().fg(C_RED).bg(bg))
+                // ── Status label (right side): one compact label showing the worst issue ──
+                let status_label = if task.has_conflicts {
+                    Span::styled(" CONFLICT ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_RED).bold())
+                } else if task.ci == CiStatus::Failure {
+                    Span::styled(" CI FAIL ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_RED).bold())
+                } else if task.review == ReviewStatus::ChangesRequested {
+                    Span::styled(" CHANGES ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_ORANGE).bold())
+                } else if task.in_merge_queue {
+                    Span::styled(" QUEUED ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_MAGENTA).bold())
+                } else if task.review == ReviewStatus::Approved && matches!(task.ci, CiStatus::Success | CiStatus::None) {
+                    Span::styled(" READY ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_GREEN).bold())
+                } else if task.review == ReviewStatus::Pending {
+                    Span::styled(" REVIEW ", Style::default().fg(Color::Rgb(15,17,23)).bg(C_YELLOW).bold())
+                } else if matches!(task.ci, CiStatus::Running | CiStatus::Pending) {
+                    Span::styled(" CI... ", Style::default().fg(C_YELLOW).bg(bg))
+                } else if matches!(task.state, TaskState::Draft) {
+                    Span::styled(" DRAFT ", Style::default().fg(C_TEXT_DIM).bg(bg))
                 } else {
-                    Span::styled(" ", Style::default().bg(bg))
+                    Span::styled("       ", Style::default().bg(bg))
                 };
 
-                // Conflict indicator
-                let conflict_icon = if task.has_conflicts {
-                    Span::styled("!", Style::default().fg(C_RED).bold().bg(bg))
+                // Unread badge.
+                let unread_badge = if unread > 0 {
+                    Span::styled(format!(" *{unread}"), Style::default().fg(C_RED).bg(bg))
                 } else {
-                    Span::styled(" ", Style::default().bg(bg))
+                    Span::styled("   ", Style::default().bg(bg))
                 };
 
                 // ── PR number ──
@@ -502,9 +501,9 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 let time_str = time_ago_short(&task.updated_at);
 
                 // ── Layout ──
-                // Right side is fixed: "  ✓ ◦ ●    4h" = 14 chars
-                // Left side: cursor(2) + pr#(7)
-                let right_w = 14;
+                // Right side: unread(3) + status_label(10) + time(5) = 18
+                // Left side: cursor(2) + pr#(5) + role(2) = 9
+                let right_w = 18;
                 let left_w = 9;
                 let title_w = w.saturating_sub(left_w + right_w);
                 let title_text = truncate_str(&task.title, title_w);
@@ -527,14 +526,9 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                     },
                     // Title (padded to exact width)
                     Span::styled(padded_title, title_style),
-                    // Right side: icons + time (fixed 14 chars)
-                    Span::styled(" ", Style::default().bg(bg)),
-                    ci_icon,
-                    Span::styled(" ", Style::default().bg(bg)),
-                    review_icon,
-                    Span::styled(" ", Style::default().bg(bg)),
-                    unread_icon,
-                    conflict_icon,
+                    // Right side: unread + status label + time
+                    unread_badge,
+                    status_label,
                     Span::styled(format!(" {:>4}", time_str), Style::default().fg(C_TEXT_DIM).bg(bg)),
                 ]);
 

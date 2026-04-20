@@ -1203,11 +1203,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 EventKind::ProviderError { ref message } => {
                     tracing::warn!("Provider error: {message}");
-                    // Only show error in status bar if we haven't loaded yet.
-                    // Transient errors after initial load are just logged.
-                    if !app.loaded {
-                        app.status = format!("Error: {message}");
-                    }
+                    // Don't show transient errors in status bar — they clear on next poll.
+                    // Persistent errors will keep firing and user can check /tmp/pilot.log.
                 }
             }
         }
