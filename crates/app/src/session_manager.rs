@@ -84,12 +84,20 @@ impl SessionManager {
         });
     }
 
-    /// Load sessions from store.
+    /// Load sessions from store, skipping merged/closed.
     pub fn load_from_store(&mut self, store: &dyn Store) {
         if let Ok(records) = store.list_sessions() {
             for record in records {
                 if let Some(json) = &record.session_json {
                     if let Ok(session) = serde_json::from_str::<Session>(json) {
+                        // Skip merged/closed — they're done.
+                        if matches!(
+                            session.primary_task.state,
+                            pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
+                        ) {
+                            let _ = store.delete_session(&session.task_id);
+                            continue;
+                        }
                         self.insert(record.task_id.clone(), session);
                     }
                 }

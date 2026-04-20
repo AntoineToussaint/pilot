@@ -769,6 +769,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 // 6. Terminal / Normal / Detail -- regular key mapping.
                 InputMode::Normal | InputMode::Detail | InputMode::Terminal => {
                     let effective_mode = app.input_mode.to_key_mode();
+                    if app.input_mode == InputMode::Terminal {
+                        tracing::debug!("TERM key: {:?} -> effective_mode: {:?}", key.code, effective_mode);
+                    }
                     let mapped = keys::map_key(key, effective_mode);
                     match mapped {
                         Action::WaitingPrefix => {

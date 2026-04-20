@@ -31,6 +31,18 @@ pub(crate) fn handle_external_event(app: &mut App, event: Event, action_tx: &mps
             }
             let key = task.id.to_string();
             let persist_key = key.clone();
+
+            // If task is merged/closed, remove it — don't update.
+            if matches!(task.state, pilot_core::TaskState::Merged | pilot_core::TaskState::Closed) {
+                app.sessions.remove(&key);
+                app.terminals.close(&key);
+                if let Err(e) = app.store.delete_session(&task.id) {
+                    tracing::error!("Failed to delete merged session: {e}");
+                }
+                resort_sessions(app);
+                return;
+            }
+
             if let Some(session) = app.sessions.get_mut(&key) {
                 let existing_count = session.activity.len();
                 let fresh_count = task.recent_activity.len();
