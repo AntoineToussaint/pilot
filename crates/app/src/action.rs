@@ -74,6 +74,8 @@ pub enum Action {
 
     // -- PR actions --
     MergePr,
+    /// Merge succeeded — set state to Merged and clean up.
+    MergeCompleted { session_key: String },
     /// Open PR in browser.
     OpenInBrowser,
     /// Send a Slack reminder to reviewers.

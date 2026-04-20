@@ -146,7 +146,9 @@ impl App {
                 if let Some(json) = &record.session_json {
                     if let Ok(session) = serde_json::from_str::<Session>(json) {
                         let key = record.task_id.clone();
-                        session_order.push(key.clone());
+                        if !session_order.contains(&key) {
+                            session_order.push(key.clone());
+                        }
                         sessions.insert(key, session);
                     }
                 }
@@ -1701,13 +1703,16 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         app.merge_pending = None;
                         app.status = format!("Merging {repo}#{pr_num}…");
                         set_key_mode(app, KeyMode::Normal);
-                        // Optimistic update — show as queued/merging immediately.
+                        // Optimistic update — mark as merged immediately so the
+                        // nav filter hides it. If the merge fails, the next poll
+                        // will correct the state back to Open.
                         if let Some(session) = app.sessions.get_mut(&key) {
-                            session.primary_task.in_merge_queue = true;
+                            session.primary_task.state = pilot_core::TaskState::Merged;
                         }
+                        resort_sessions(app);
                         let repo = repo.to_string();
                         let pr = pr_num.clone();
-                        let _session_key = key.clone();
+                        let session_key = key.clone();
                         let tx = action_tx.clone();
                         tokio::spawn(async move {
                             let output = tokio::process::Command::new("gh")
@@ -1717,6 +1722,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             match output {
                                 Ok(o) if o.status.success() => {
                                     tracing::info!("Merged {repo}#{pr}");
+                                    let _ = tx.send(Action::MergeCompleted {
+                                        session_key,
+                                    });
                                     let _ = tx.send(Action::StatusMessage(
                                         format!("Merged {repo}#{pr}"),
                                     ));
@@ -1724,7 +1732,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 Ok(o) => {
                                     let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
                                     tracing::error!("Merge failed: {err}");
-                                    // Revert optimistic update — send task state back to Open.
                                     let _ = tx.send(Action::StatusMessage(
                                         format!("Error: merge failed — {err}"),
                                     ));
@@ -1745,6 +1752,17 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     }
                 }
             }
+        }
+
+        Action::MergeCompleted { session_key } => {
+            // Confirm the merged state and remove from store so it doesn't
+            // reappear on next launch.
+            if let Some(session) = app.sessions.get_mut(&session_key) {
+                session.primary_task.state = pilot_core::TaskState::Merged;
+                let task_id = session.primary_task.id.clone();
+                let _ = app.store.delete_session(&task_id);
+            }
+            resort_sessions(app);
         }
 
         Action::SlackNudge => {
@@ -1901,9 +1919,12 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 app.status = format!("Approved: {}", action.tool);
             }
-            // Reset input mode in case this came from a non-key source.
+            // Re-detect the correct mode from pane content so that key_mode
+            // and input_mode are both restored (e.g. back to Terminal if a
+            // terminal is active).
             if matches!(app.input_mode, InputMode::McpConfirm) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = InputMode::Normal; // clear overlay first
+                apply_determined_mode(app);
             }
         }
         Action::RejectMcpAction => {
@@ -1913,8 +1934,12 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 app.status = format!("Rejected: {}", action.tool);
             }
+            // Re-detect the correct mode from pane content so that key_mode
+            // and input_mode are both restored (e.g. back to Terminal if a
+            // terminal is active).
             if matches!(app.input_mode, InputMode::McpConfirm) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = InputMode::Normal; // clear overlay first
+                apply_determined_mode(app);
             }
         }
 
@@ -2047,7 +2072,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             };
             let mut session = pilot_core::Session::new(task);
             session.state = pilot_core::SessionState::Active;
-            app.session_order.push(key.clone());
+            if !app.session_order.contains(&key) {
+                app.session_order.push(key.clone());
+            }
             app.sessions.insert(key, session);
             crate::nav::resort_sessions(app);
             app.status = format!("Created session: {description}");
