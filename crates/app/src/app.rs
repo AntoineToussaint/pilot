@@ -77,6 +77,8 @@ pub struct App {
     pub merge_pending: Option<String>,
     /// Whether the first poll has completed.
     pub loaded: bool,
+    pub purged_stale: bool,
+    pub first_poll_keys: std::collections::HashSet<String>,
     /// Tick counter for spinner animation.
     pub tick_count: u64,
     /// Collapsed repos in the sidebar tree.
@@ -163,6 +165,8 @@ impl App {
             quit_pending: false,
             merge_pending: None,
             loaded,
+            purged_stale: false,
+            first_poll_keys: std::collections::HashSet::new(),
             tick_count: 0,
             collapsed_repos: std::collections::HashSet::new(),
             collapsed_sessions: std::collections::HashSet::new(),
@@ -1951,30 +1955,7 @@ pub(crate) fn update_detail_pane(app: &mut App) {
                 .set_content(detail_id, PaneContent::Detail(key.clone()));
         }
 
-        // Auto-reattach: if a tmux session exists but no terminal in pilot, reattach.
-        if !app.terminals.contains_key(&key) {
-            let tmux_name = key.replace(':', "_").replace('/', "_");
-            let has_tmux = std::process::Command::new("tmux")
-                .args(["has-session", "-t", &tmux_name])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if has_tmux {
-                if let Some(session) = app.sessions.get(&key) {
-                    let cwd = session.worktree_path.clone()
-                        .unwrap_or_else(|| {
-                            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                            std::path::PathBuf::from(home)
-                        });
-                    tracing::info!("Auto-reattaching tmux session: {tmux_name}");
-                    spawn_terminal(app, &key, cwd, ShellKind::Claude);
-                }
-            }
-        }
-
-        // Update terminal pane if the session has a running terminal.
+        // Update terminal pane if the session has a running terminal (don't auto-spawn).
         if app.terminals.contains_key(&key) {
             if let Some(term_id) = app
                 .panes

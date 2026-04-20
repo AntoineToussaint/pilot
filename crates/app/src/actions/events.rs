@@ -18,6 +18,25 @@ pub(crate) fn handle_external_event(app: &mut App, event: Event, action_tx: &mps
 
             if !app.loaded {
                 app.loaded = true;
+                // Track all keys from the first poll so we can purge stale SQLite entries.
+                app.first_poll_keys.insert(task.id.to_string());
+            } else if !app.purged_stale {
+                // Second TaskUpdated after loaded=true means first poll is done.
+                // Purge any GitHub sessions from SQLite that weren't in the poll.
+                app.purged_stale = true;
+                let stale: Vec<String> = app.sessions.order().iter()
+                    .filter(|k| k.starts_with("github:") && !app.first_poll_keys.contains(*k))
+                    .cloned()
+                    .collect();
+                for key in &stale {
+                    tracing::info!("Purging stale session: {key}");
+                    app.sessions.remove(key);
+                    app.terminals.close(key);
+                }
+                app.first_poll_keys.clear(); // Free memory.
+                if !stale.is_empty() {
+                    resort_sessions(app);
+                }
                 app.selected = 0;
                 update_detail_pane(app);
                 app.status = format!(
