@@ -41,14 +41,27 @@ pub enum TextInputKind {
 }
 
 impl InputMode {
-    /// The "base" mode derived from the KeyMode the app would normally be in.
-    /// Used when exiting an overlay to return to the right mode.
-    pub fn from_key_mode(mode: crate::keys::KeyMode) -> Self {
-        match mode {
-            crate::keys::KeyMode::Normal => InputMode::Normal,
-            crate::keys::KeyMode::Detail => InputMode::Detail,
-            crate::keys::KeyMode::Terminal => InputMode::Terminal,
-            crate::keys::KeyMode::PanePrefix => InputMode::PanePrefix,
+    /// Convert to `KeyMode` for keybinding lookup.
+    /// Overlay modes map to the "base" KeyMode they'd return to.
+    pub fn to_key_mode(&self) -> crate::keys::KeyMode {
+        match self {
+            InputMode::Normal => crate::keys::KeyMode::Normal,
+            InputMode::Detail => crate::keys::KeyMode::Detail,
+            InputMode::Terminal => crate::keys::KeyMode::Terminal,
+            InputMode::PanePrefix => crate::keys::KeyMode::PanePrefix,
+            // Overlay modes don't map to keybindings directly,
+            // but if asked, return Normal as a safe default.
+            InputMode::TextInput(_) | InputMode::Picker
+            | InputMode::McpConfirm | InputMode::Help => crate::keys::KeyMode::Normal,
         }
+    }
+
+    /// Whether this is an overlay mode (Help, McpConfirm, TextInput, Picker).
+    pub fn is_overlay(&self) -> bool {
+        matches!(
+            self,
+            InputMode::Help | InputMode::McpConfirm
+            | InputMode::TextInput(_) | InputMode::Picker
+        )
     }
 }

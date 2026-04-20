@@ -2,7 +2,9 @@ use crate::action::Action;
 use crate::keymap::BINDINGS;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Key input state machine.
+/// Key input modes for keybinding lookup.
+/// This is an internal type used by the keybinding system.
+/// The canonical mode is `InputMode` in `input.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyMode {
     Normal,

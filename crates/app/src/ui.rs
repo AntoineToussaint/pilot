@@ -4,9 +4,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::app::{App, PendingMcpAction};
+use crate::input::InputMode;
 use crate::nav::{NavItem, nav_items, build_repo_groups};
 use crate::picker::PickerState;
-use crate::keys::KeyMode;
 use pilot_core::SessionColor;
 
 // ─── Colors (refined GitHub dark theme) ───────────────────────────────────
@@ -347,13 +347,14 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     // Column header — matches the fixed-width layout below.
+    // Left(9) + Title(flex) + Right(20) = w
     if app.loaded && session_count > 0 {
-        let title_w = w.saturating_sub(9 + 14); // same as row layout
+        let title_w = w.saturating_sub(9 + 20);
         let header_title = format!("{:<width$}", "Title", width = title_w);
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<5}  ", "#"), Style::default().fg(C_TEXT_DIM)),
             Span::styled(header_title, Style::default().fg(C_TEXT_DIM)),
-            Span::styled("      Status  Time", Style::default().fg(C_TEXT_DIM)),
+            Span::styled("        Status  Time", Style::default().fg(C_TEXT_DIM)),
         ]));
     }
 
@@ -454,7 +455,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 let unread = session.unread_count();
                 let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
 
-                // ── Status label: fixed 10 chars, right-aligned ──
+                // ── Status label ──
                 let (label_text, label_fg, label_bg) = if task.has_conflicts {
                     ("CONFLICT", Color::Rgb(15,17,23), C_RED)
                 } else if task.ci == CiStatus::Failure {
@@ -473,17 +474,6 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                     ("DRAFT", C_TEXT_DIM, bg)
                 } else {
                     ("", C_TEXT_DIM, bg)
-                };
-                let status_label = Span::styled(
-                    format!("{:>10}", if label_text.is_empty() { "".to_string() } else { format!(" {label_text} ") }),
-                    Style::default().fg(label_fg).bg(label_bg).bold(),
-                );
-
-                // Unread badge.
-                let unread_badge = if unread > 0 {
-                    Span::styled(format!(" *{unread}"), Style::default().fg(C_RED).bg(bg))
-                } else {
-                    Span::styled("   ", Style::default().bg(bg))
                 };
 
                 // ── PR number ──
@@ -504,36 +494,60 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 // ── Time ──
                 let time_str = time_ago_short(&task.updated_at);
 
-                // ── Layout ──
-                // Right side: unread(3) + status_label(10) + time(5) = 18
-                // Left side: cursor(2) + pr#(5) + role(2) = 9
-                let right_w = 18;
-                let left_w = 9;
-                let title_w = w.saturating_sub(left_w + right_w);
+                // ── Build right side FIRST with fixed total width ──
+                // unread(4) + status(10) + time(6) = 20 chars always
+                const RIGHT_W: usize = 20;
+                let unread_str = if unread > 0 { format!("*{unread}") } else { String::new() };
+                let status_str = if label_text.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {label_text} ")
+                };
+                let time_part = format!("{:>5}", time_str);
+
+                // ── Left side: cursor(2) + pr#(5) + role(2) = 9 ──
+                const LEFT_W: usize = 9;
+
+                // ── Title fills the gap ──
+                let title_w = w.saturating_sub(LEFT_W + RIGHT_W);
                 let title_text = truncate_str(&task.title, title_w);
-                // Pad title to exact width so right side always aligns.
                 let padded_title = format!("{:<width$}", title_text, width = title_w);
 
+                // Build right-side spans with fixed widths.
+                let unread_span = Span::styled(
+                    format!("{:>4}", unread_str),
+                    Style::default().fg(if unread > 0 { C_RED } else { bg }).bg(bg),
+                );
+                let status_span = Span::styled(
+                    format!("{:>10}", status_str),
+                    Style::default().fg(label_fg).bg(label_bg).bold(),
+                );
+                let time_span = Span::styled(
+                    format!(" {time_part}"),
+                    Style::default().fg(C_TEXT_DIM).bg(bg),
+                );
+
                 let row = Line::from(vec![
-                    // Cursor
+                    // Cursor accent (2 chars)
                     Span::styled(
                         if is_cursor { "\u{258c} " } else { "  " },
                         if is_cursor { Style::default().fg(C_ACCENT).bg(bg) } else { Style::default().bg(bg) },
                     ),
-                    // PR# + role indicator
+                    // PR# (5 chars)
                     Span::styled(format!("{pr_num:<5}"), Style::default().fg(pr_color).bg(bg)),
+                    // Role indicator (2 chars)
                     match task.role {
                         TaskRole::Author => Span::styled("@ ", Style::default().fg(C_CYAN).bg(bg)),
                         TaskRole::Reviewer => Span::styled("R ", Style::default().fg(C_MAGENTA).bg(bg)),
                         TaskRole::Assignee => Span::styled("A ", Style::default().fg(C_GREEN).bg(bg)),
                         TaskRole::Mentioned => Span::styled("  ", Style::default().bg(bg)),
                     },
-                    // Title (padded to exact width)
+                    // Title (padded to fill)
                     Span::styled(padded_title, title_style),
-                    // Right side: unread + status label + time
-                    unread_badge,
-                    status_label,
-                    Span::styled(format!(" {:>4}", time_str), Style::default().fg(C_TEXT_DIM).bg(bg)),
+                    // Right side: unread(4) + status(10) + time(6) = 20
+                    unread_span,
+                    status_span,
+                    time_span,
                 ]);
 
                 lines.push(row);
@@ -610,7 +624,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
         return;
     };
     let task = &session.primary_task;
-    let is_focused = app.key_mode == KeyMode::Detail;
+    let is_focused = app.input_mode == InputMode::Detail;
     let border_color = if is_focused { C_BORDER_ACTIVE } else { C_BORDER };
 
     // Left border only to separate from sidebar.
@@ -925,7 +939,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
 // ─── Terminal ─────────────────────────────────────────────────────────────
 
 fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
-    let is_focused = app.key_mode == KeyMode::Terminal;
+    let is_focused = app.input_mode == InputMode::Terminal;
     let border_color = if is_focused { C_GREEN } else { C_BORDER };
 
     let shell_label = match app.terminal_kinds.get(key) {
@@ -1105,11 +1119,15 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
 // ─── Status bar ───────────────────────────────────────────────────────────
 
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let (label, label_bg) = match app.key_mode {
-        KeyMode::Normal => ("INBOX", C_ACCENT),
-        KeyMode::Detail => ("DETAIL", C_MAGENTA),
-        KeyMode::PanePrefix => ("PANE", C_ORANGE),
-        KeyMode::Terminal => ("TERM", C_GREEN),
+    let (label, label_bg) = match app.input_mode {
+        InputMode::Normal => ("INBOX", C_ACCENT),
+        InputMode::Detail => ("DETAIL", C_MAGENTA),
+        InputMode::PanePrefix => ("PANE", C_ORANGE),
+        InputMode::Terminal => ("TERM", C_GREEN),
+        InputMode::TextInput(_) => ("INPUT", C_YELLOW),
+        InputMode::Picker => ("PICKER", C_MAGENTA),
+        InputMode::McpConfirm => ("MCP", C_ORANGE),
+        InputMode::Help => ("HELP", C_ACCENT),
     };
 
     let total_unread: usize = app.sessions.values().map(|s| s.unread_count()).sum();

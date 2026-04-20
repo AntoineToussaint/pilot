@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::action::{Action, ShellKind};
 use crate::input::{InputMode, TextInputKind};
-use crate::keys::{self, KeyMode};
+use crate::keys;
 use crate::monitor::{check_needs_rebase, handle_monitor_tick, run_rebase};
 use crate::nav::{
     apply_search_filter, nav_items, resort_sessions, selected_nav_item,
@@ -50,9 +50,8 @@ pub struct App {
     pub active_tab: usize,
 
     // ── Input ──
-    pub key_mode: KeyMode,
-    /// High-level input mode state machine. Determines which handler
-    /// processes key events. Set when overlays open/close.
+    /// The single source of truth for what mode the app is in.
+    /// Determines which handler processes key events.
     pub input_mode: InputMode,
 
     // ── Search/filter ──
@@ -168,7 +167,6 @@ impl App {
             panes: PaneManager::default_layout(),
             tab_order: Vec::new(),
             active_tab: 0,
-            key_mode: KeyMode::Normal,
             input_mode: InputMode::Normal,
             search_active: false,
             search_query: String::new(),
@@ -218,12 +216,6 @@ impl App {
 
     pub fn active_tab_key(&self) -> Option<&String> {
         self.tab_order.get(self.active_tab)
-    }
-
-    /// Compute the base InputMode from the current key_mode.
-    /// Used when exiting an overlay to return to the correct underlying mode.
-    pub fn base_input_mode(&self) -> InputMode {
-        InputMode::from_key_mode(self.key_mode)
     }
 
     /// Get the currently selected session (if cursor is on one).
@@ -640,7 +632,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 // 1. Help overlay -- any key dismisses.
                 InputMode::Help => {
                     app.show_help = false;
-                    app.input_mode = app.base_input_mode();
+                    app.input_mode = determine_mode(app);
                 }
 
                 // 2. MCP confirmation -- y/n only.
@@ -648,11 +640,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Enter => {
                             handle_action(app, Action::ApproveMcpAction, action_tx);
-                            app.input_mode = app.base_input_mode();
+                            app.input_mode = determine_mode(app);
                         }
                         KeyCode::Char('n') | KeyCode::Esc => {
                             handle_action(app, Action::RejectMcpAction, action_tx);
-                            app.input_mode = app.base_input_mode();
+                            app.input_mode = determine_mode(app);
                         }
                         _ => {} // swallow other keys during confirmation
                     }
@@ -665,11 +657,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             match key.code {
                                 KeyCode::Esc => {
                                     handle_action(app, Action::SearchClear, action_tx);
-                                    app.input_mode = app.base_input_mode();
+                                    app.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Enter => {
                                     app.search_active = false; // keep filter, exit typing
-                                    app.input_mode = app.base_input_mode();
+                                    app.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Backspace => {
                                     handle_action(app, Action::SearchBackspace, action_tx);
@@ -684,14 +676,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             match key.code {
                                 KeyCode::Esc => {
                                     handle_action(app, Action::NewSessionCancel, action_tx);
-                                    app.input_mode = app.base_input_mode();
+                                    app.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Enter => {
                                     let desc = app.new_session_input.clone().unwrap_or_default();
                                     if !desc.trim().is_empty() {
                                         handle_action(app, Action::NewSessionConfirm { description: desc }, action_tx);
                                     }
-                                    app.input_mode = app.base_input_mode();
+                                    app.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Backspace => {
                                     if let Some(ref mut input) = app.new_session_input {
@@ -710,14 +702,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             match key.code {
                                 KeyCode::Esc => {
                                     handle_action(app, Action::QuickReplyCancel, action_tx);
-                                    app.input_mode = app.base_input_mode();
+                                    app.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Enter => {
                                     let body = app.quick_reply_input.as_ref().map(|(_, t, _)| t.clone()).unwrap_or_default();
                                     if !body.trim().is_empty() {
                                         handle_action(app, Action::QuickReplyConfirm { body }, action_tx);
                                     }
-                                    app.input_mode = app.base_input_mode();
+                                    app.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Backspace => {
                                     if let Some((_, ref mut text, _)) = app.quick_reply_input {
@@ -740,7 +732,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     match key.code {
                         KeyCode::Esc => {
                             handle_action(app, Action::PickerCancel, action_tx);
-                            app.input_mode = app.base_input_mode();
+                            app.input_mode = determine_mode(app);
                         }
                         KeyCode::Enter => {
                             // If nothing was changed yet, toggle the current item first.
@@ -754,7 +746,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 }
                             }
                             handle_action(app, Action::PickerConfirm, action_tx);
-                            app.input_mode = app.base_input_mode();
+                            app.input_mode = determine_mode(app);
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
                             if let Some(ref mut picker) = app.picker {
@@ -799,8 +791,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 // 5. Pane prefix -- one-shot pane operation after Ctrl-w.
                 InputMode::PanePrefix => {
                     let mapped = keys::map_pane_prefix(key);
-                    app.key_mode = determine_mode(app);
-                    app.input_mode = app.base_input_mode();
+                    app.input_mode = determine_mode(app);
                     if !matches!(mapped, Action::None) {
                         handle_action(app, mapped, action_tx);
                     }
@@ -808,21 +799,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
                 // 6. Terminal / Normal / Detail -- regular key mapping.
                 InputMode::Normal | InputMode::Detail | InputMode::Terminal => {
-                    // Use input_mode (not key_mode) for binding lookup to avoid desync.
-                    let effective_mode = match app.input_mode {
-                        InputMode::Normal => KeyMode::Normal,
-                        InputMode::Detail => KeyMode::Detail,
-                        InputMode::Terminal => KeyMode::Terminal,
-                        InputMode::PanePrefix => KeyMode::PanePrefix,
-                        _ => app.key_mode,
-                    };
+                    let effective_mode = app.input_mode.to_key_mode();
                     let mapped = keys::map_key(key, effective_mode);
                     match mapped {
                         Action::WaitingPrefix => {
-                            app.key_mode = KeyMode::PanePrefix;
                             app.input_mode = InputMode::PanePrefix;
                         }
-                        Action::None if effective_mode == KeyMode::Terminal => {
+                        Action::None if app.input_mode == InputMode::Terminal => {
                             // Forward to PTY.
                             if let Some(tab_key) = app.active_tab_key().cloned() {
                                 if let Some(term) = app.terminals.get_mut(&tab_key) {
@@ -835,22 +818,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     }
                                 } else {
                                     tracing::warn!("Terminal mode but no terminal for tab: {tab_key}");
-                                    app.key_mode = KeyMode::Normal;
                                     app.input_mode = InputMode::Normal;
                                     app.status = "Terminal disconnected — returned to sidebar".into();
                                 }
                             } else {
                                 tracing::warn!("Terminal mode but no active tab");
-                                app.key_mode = KeyMode::Normal;
                                 app.input_mode = InputMode::Normal;
                             }
                         }
                         other => {
-                            // After pane prefix, return to previous mode.
-                            if app.key_mode == KeyMode::PanePrefix {
-                                app.key_mode = determine_mode(app);
-                                app.input_mode = app.base_input_mode();
-                            }
                             handle_action(app, other, action_tx);
                         }
                     }
@@ -888,8 +864,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
         Action::FocusPaneNext => {
             // Clear terminal mode so determine_mode re-evaluates from the new pane.
-            if app.key_mode == KeyMode::Terminal {
-                set_key_mode(app, KeyMode::Normal);
+            if app.input_mode == InputMode::Terminal {
+                set_mode(app, InputMode::Normal);
             }
             app.panes.focus_next();
             apply_determined_mode(app);
@@ -897,8 +873,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::FocusPaneUp | Action::FocusPaneDown
         | Action::FocusPaneLeft | Action::FocusPaneRight => {
             // Clear terminal mode so determine_mode re-evaluates from the new pane.
-            if app.key_mode == KeyMode::Terminal {
-                set_key_mode(app, KeyMode::Normal);
+            if app.input_mode == InputMode::Terminal {
+                set_mode(app, InputMode::Normal);
             }
             let dir = match action {
                 Action::FocusPaneUp => Direction::Up,
@@ -921,14 +897,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if !app.tab_order.is_empty() {
                 app.active_tab = (app.active_tab + 1) % app.tab_order.len();
                 sync_selected_to_tab(app);
-                set_key_mode(app, KeyMode::Terminal);
+                set_mode(app, InputMode::Terminal);
             }
         }
         Action::PrevTab => {
             if !app.tab_order.is_empty() {
                 app.active_tab = (app.active_tab + app.tab_order.len() - 1) % app.tab_order.len();
                 sync_selected_to_tab(app);
-                set_key_mode(app, KeyMode::Terminal);
+                set_mode(app, InputMode::Terminal);
             }
         }
         Action::GoToTab(n) => {
@@ -936,7 +912,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if idx < app.tab_order.len() {
                 app.active_tab = idx;
                 sync_selected_to_tab(app);
-                set_key_mode(app, KeyMode::Terminal);
+                set_mode(app, InputMode::Terminal);
             }
         }
         Action::CloseTab => {
@@ -962,11 +938,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     }
                 }
                 // Re-sort but keep cursor on the same session.
-                let prev_mode = app.key_mode;
                 let prev_input_mode = app.input_mode.clone();
                 resort_sessions(app);
                 // Stay in current mode (don't jump away from detail).
-                app.key_mode = prev_mode;
                 app.input_mode = prev_input_mode;
                 update_detail_pane(app);
                 app.status = "Marked as read".into();
@@ -981,7 +955,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(idx) = app.tab_order.iter().position(|k| k == &key) {
                         app.active_tab = idx;
                     }
-                    set_key_mode(app, KeyMode::Terminal);
+                    set_mode(app, InputMode::Terminal);
                     return;
                 }
 
@@ -1284,7 +1258,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
                     // Click on sidebar area → select item or toggle repo.
                     if mouse.column < border_col {
-                        set_key_mode(app, KeyMode::Normal);
+                        set_mode(app, InputMode::Normal);
                         // Map click row to a sidebar item.
                         // Row 0 = title bar, 1 = search, 2+ = items.
                         let click_row = mouse.row.saturating_sub(2) as usize;
@@ -1299,9 +1273,9 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         let right_area_height = _term_h;
                         let detail_cutoff = right_area_height * 30 / 100; // 30% for detail
                         if has_term && mouse.row > detail_cutoff {
-                            set_key_mode(app, KeyMode::Terminal);
+                            set_mode(app, InputMode::Terminal);
                         } else {
-                            set_key_mode(app, KeyMode::Detail);
+                            set_mode(app, InputMode::Detail);
                         }
                         update_detail_pane(app);
                     }
@@ -1319,7 +1293,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     app.drag_resize = None;
                 }
                 MouseEventKind::ScrollUp => {
-                    if app.key_mode == KeyMode::Terminal {
+                    if app.input_mode == InputMode::Terminal {
                         // Send mouse scroll events to the PTY.
                         // SGR encoding: \x1b[<65;col;rowM for scroll up.
                         if let Some(tab_key) = app.active_tab_key().cloned() {
@@ -1340,7 +1314,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     }
                 }
                 MouseEventKind::ScrollDown => {
-                    if app.key_mode == KeyMode::Terminal {
+                    if app.input_mode == InputMode::Terminal {
                         if let Some(tab_key) = app.active_tab_key().cloned() {
                             if let Some(term) = app.terminals.get_mut(&tab_key) {
                                 let col = mouse.column + 1;
@@ -1364,7 +1338,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
         Action::Paste(text) => {
             // Forward paste to the active terminal using bracketed paste mode.
-            if app.key_mode == KeyMode::Terminal {
+            if app.input_mode == InputMode::Terminal {
                 if let Some(tab_key) = app.active_tab_key().cloned() {
                     if let Some(term) = app.terminals.get_mut(&tab_key) {
                         // Bracketed paste: \x1b[200~ ... \x1b[201~
@@ -1463,7 +1437,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             app.filtered_keys = None;
             app.search_active = false;
             if matches!(app.input_mode, InputMode::TextInput(TextInputKind::Search)) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
         }
 
@@ -1543,13 +1517,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::PickerCancel => {
             app.picker = None;
             if matches!(app.input_mode, InputMode::Picker) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
         }
 
         Action::PickerConfirm => {
             if matches!(app.input_mode, InputMode::Picker) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
             if let Some(picker) = app.picker.take() {
                 let added: Vec<String> = picker.items.iter()
@@ -1710,7 +1684,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         // Second M — execute merge.
                         app.merge_pending = None;
                         app.status = format!("Merging {repo}#{pr_num}…");
-                        set_key_mode(app, KeyMode::Normal);
+                        set_mode(app, InputMode::Normal);
                         // Optimistic update — mark as merged immediately so the
                         // nav filter hides it. If the merge fails, the next poll
                         // will correct the state back to Open.
@@ -1891,7 +1865,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if app.show_help {
                 app.input_mode = InputMode::Help;
             } else {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
         }
 
@@ -1927,9 +1901,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 app.status = format!("Approved: {}", action.tool);
             }
-            // Re-detect the correct mode from pane content so that key_mode
-            // and input_mode are both restored (e.g. back to Terminal if a
-            // terminal is active).
+            // Re-detect the correct mode from pane content (e.g. back
+            // to Terminal if a terminal is active).
             if matches!(app.input_mode, InputMode::McpConfirm) {
                 app.input_mode = InputMode::Normal; // clear overlay first
                 apply_determined_mode(app);
@@ -1942,9 +1915,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
                 app.status = format!("Rejected: {}", action.tool);
             }
-            // Re-detect the correct mode from pane content so that key_mode
-            // and input_mode are both restored (e.g. back to Terminal if a
-            // terminal is active).
+            // Re-detect the correct mode from pane content (e.g. back
+            // to Terminal if a terminal is active).
             if matches!(app.input_mode, InputMode::McpConfirm) {
                 app.input_mode = InputMode::Normal; // clear overlay first
                 apply_determined_mode(app);
@@ -1981,14 +1953,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::QuickReplyCancel => {
             app.quick_reply_input = None;
             if matches!(app.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
             app.status = String::new();
         }
 
         Action::QuickReplyConfirm { body } => {
             if matches!(app.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
             if let Some((session_key, _, comment_idx)) = app.quick_reply_input.take() {
                 if let Some(session) = app.sessions.get(&session_key) {
@@ -2042,7 +2014,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::NewSessionCancel => {
             app.new_session_input = None;
             if matches!(app.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
             app.status = String::new();
         }
@@ -2050,7 +2022,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         Action::NewSessionConfirm { description } => {
             app.new_session_input = None;
             if matches!(app.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
-                app.input_mode = app.base_input_mode();
+                app.input_mode = determine_mode(app);
             }
             let key = format!("local:{}", chrono::Utc::now().timestamp_millis());
             let task = pilot_core::Task {
@@ -2239,7 +2211,7 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
                         .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
                 }
             }
-            set_key_mode(app, KeyMode::Terminal);
+            set_mode(app, InputMode::Terminal);
             app.status = match kind {
                 ShellKind::Claude => format!("Claude Code started in {}", cwd.display()),
                 ShellKind::Shell => format!("Shell started in {}", cwd.display()),
@@ -2444,7 +2416,7 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     if let Some(idx) = app.tab_order.iter().position(|k| k == &session_key) {
         app.active_tab = idx;
     }
-    set_key_mode(app, KeyMode::Terminal);
+    set_mode(app, InputMode::Terminal);
 
     {
         let n = indices.len();
@@ -2688,45 +2660,38 @@ fn reset_detail_state(app: &mut App) {
     update_detail_pane(app);
 }
 
-/// Set key_mode and keep input_mode in sync.
-/// When no overlay is active, input_mode mirrors key_mode.
-/// When an overlay IS active (Help, McpConfirm, TextInput, Picker),
+/// Set the input mode, respecting overlay precedence.
+/// When an overlay is active (Help, McpConfirm, TextInput, Picker),
 /// input_mode is left alone -- the overlay owns it.
-fn set_key_mode(app: &mut App, mode: KeyMode) {
-    app.key_mode = mode;
-    let overlay_active = matches!(
-        app.input_mode,
-        InputMode::Help | InputMode::McpConfirm
-        | InputMode::TextInput(_) | InputMode::Picker
-    );
-    if !overlay_active {
-        app.input_mode = InputMode::from_key_mode(mode);
+fn set_mode(app: &mut App, mode: InputMode) {
+    if !app.input_mode.is_overlay() {
+        app.input_mode = mode;
     }
 }
 
-/// Determine the key mode from pane content and apply it via set_key_mode.
+/// Determine the input mode from pane content and apply it.
 fn apply_determined_mode(app: &mut App) {
     let mode = determine_mode(app);
-    set_key_mode(app, mode);
+    set_mode(app, mode);
 }
 
-/// Determine the key mode based on what the focused pane contains.
-fn determine_mode(app: &App) -> KeyMode {
+/// Determine the input mode based on what the focused pane contains.
+fn determine_mode(app: &App) -> InputMode {
     // If we're in terminal mode, stay there unless explicitly exited.
     // This prevents pane operations from accidentally resetting the mode.
-    if app.key_mode == KeyMode::Terminal {
+    if app.input_mode == InputMode::Terminal {
         // Check if the terminal is still alive.
         if let Some(key) = app.active_tab_key() {
             if app.terminals.contains_key(key) {
-                return KeyMode::Terminal;
+                return InputMode::Terminal;
             }
         }
     }
     // Default: use pane content to determine mode.
     match app.panes.focused_content() {
-        Some(PaneContent::Terminal(_)) => KeyMode::Terminal,
-        Some(PaneContent::Detail(_)) => KeyMode::Detail,
-        _ => KeyMode::Normal,
+        Some(PaneContent::Terminal(_)) => InputMode::Terminal,
+        Some(PaneContent::Detail(_)) => InputMode::Detail,
+        _ => InputMode::Normal,
     }
 }
 
