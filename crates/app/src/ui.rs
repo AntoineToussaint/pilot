@@ -776,11 +776,9 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
             };
             let prefix_color = if is_checked { C_GREEN } else if is_unread { C_RED } else { C_TEXT_DIM };
 
-            // First line of body (summary).
-            let body_summary: String = a.body.lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("")
-                .chars()
+            // First line of body (summary) — strip HTML/markdown noise.
+            let clean_body = strip_html(&a.body);
+            let body_summary: String = clean_body.chars()
                 .take(comment_width.saturating_sub(25))
                 .collect();
 
@@ -798,7 +796,8 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
             // Expanded: if cursor is on this comment, show full body below.
             if is_cursor && !a.body.is_empty() {
                 let wrap_width = comment_width.saturating_sub(6);
-                let md_lines = render_markdown(&a.body);
+                let cleaned = strip_html(&a.body);
+                let md_lines = render_markdown(&cleaned);
                 let mut count = 0;
                 for md_line in md_lines.into_iter() {
                     if count >= 15 { break; }
@@ -1538,6 +1537,35 @@ fn label_pill_color(label: &str) -> Color {
     ];
     let hash: u32 = label.bytes().fold(0u32, |acc, b| acc.wrapping_mul(37).wrapping_add(b as u32));
     LABEL_COLORS[(hash as usize) % LABEL_COLORS.len()]
+}
+
+/// Strip HTML tags and clean up markdown image syntax for terminal display.
+fn strip_html(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_tag = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            in_tag = true;
+        } else if c == '>' && in_tag {
+            in_tag = false;
+        } else if !in_tag {
+            // Skip markdown image syntax: ![alt](url)
+            if c == '!' && chars.peek() == Some(&'[') {
+                // Skip until closing )
+                let mut depth = 0;
+                for ic in chars.by_ref() {
+                    if ic == '(' { depth += 1; }
+                    if ic == ')' { depth -= 1; if depth <= 0 { break; } }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+    }
+    // Collapse multiple spaces/newlines.
+    let collapsed: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
 }
 
 fn truncate_str(s: &str, max: usize) -> &str {
