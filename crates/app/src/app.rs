@@ -6,7 +6,7 @@ use futures::StreamExt;
 use pilot_auth::{CommandProvider, CredentialChain, EnvProvider};
 use pilot_config::Config;
 use pilot_core::{Session, SessionState};
-use pilot_events::{event_bus, EventKind, EventProducer};
+use pilot_events::{event_bus, EventProducer};
 use pilot_gh::{GhClient, GhPoller};
 use pilot_git_ops::WorktreeManager;
 use pilot_store::{SqliteStore, Store};
@@ -918,61 +918,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
 
         Action::OpenSession(shell_kind) => {
-            if let Some(key) = app.selected_session_key() {
-                if app.terminals.contains_key(&key) {
-                    // Already has terminal — just switch to that tab.
-                    if let Some(idx) = app.terminals.tab_order().iter().position(|k| k == &key) {
-                        app.terminals.set_active_tab(idx);
-                    }
-                    set_mode(app, InputMode::Terminal);
-                    return;
-                }
-
-                let worktree_path = app
-                    .sessions
-                    .get(&key)
-                    .and_then(|s| s.worktree_path.clone());
-                if let Some(path) = worktree_path {
-                    spawn_terminal(app, &key, path, shell_kind);
-                    return;
-                }
-
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    let repo = session.primary_task.repo.clone();
-                    let branch = session.primary_task.branch.clone();
-                    session.state = SessionState::CheckingOut;
-                    app.status = format!("Checking out worktree for {}…", session.display_name);
-
-                    if let (Some(repo_full), Some(branch)) = (repo, branch) {
-                        let parts: Vec<&str> = repo_full.splitn(2, '/').collect();
-                        if parts.len() == 2 {
-                            let owner = parts[0].to_string();
-                            let repo = parts[1].to_string();
-                            let tx = action_tx.clone();
-                            let session_key = key.clone();
-                            let worktrees = WorktreeManager::default_base();
-
-                            tokio::spawn(async move {
-                                match worktrees.checkout(&owner, &repo, &branch).await {
-                                    Ok(wt) => {
-                                        let _ = tx.send(Action::WorktreeReady {
-                                            session_key: session_key.clone(),
-                                            path: wt.path,
-                                        });
-                                        let _ = tx.send(Action::OpenSession(shell_kind));
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Worktree checkout failed: {e}");
-                                    }
-                                }
-                            });
-                        }
-                    } else {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                        spawn_terminal(app, &key, home.into(), shell_kind);
-                    }
-                }
-            }
+            crate::actions::session::handle_open_session(app, shell_kind, action_tx);
         }
 
         Action::WorktreeReady { session_key, path } => {
@@ -988,175 +934,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::ExternalEvent(event) => {
-            let summary = event.summary();
-            app.notifications.insert(0, summary);
-            if app.notifications.len() > 100 {
-                app.notifications.truncate(100);
-            }
-
-            match event.kind {
-                EventKind::TaskUpdated(task) => {
-                    // Track which sessions the provider knows about.
-
-                    if !app.loaded {
-                        app.loaded = true;
-                        app.selected = 0;
-                        update_detail_pane(app);
-                        app.status = format!(
-                            "Loaded — {} as {}",
-                            app.config.providers.github.filters.iter()
-                                .filter_map(|f| f.org.as_ref())
-                                .next()
-                                .unwrap_or(&"all repos".to_string()),
-                            app.username
-                        );
-                    }
-                    let key = task.id.to_string();
-                    let persist_key = key.clone();
-                    if let Some(session) = app.sessions.get_mut(&key) {
-                        let existing_count = session.activity.len();
-                        let fresh_count = task.recent_activity.len();
-                        if fresh_count > existing_count {
-                            for a in task.recent_activity.iter().take(fresh_count - existing_count) {
-                                session.push_activity(a.clone());
-                            }
-                        }
-                        session.primary_task = task;
-                    } else {
-                        let mut session = Session::new(task.clone());
-                        for activity in &task.recent_activity {
-                            session.push_activity(activity.clone());
-                        }
-                        if let Ok(Some(record)) = app.store.get_session(&task.id) {
-                            session.seen_count = record.seen_count as usize;
-                            session.last_viewed_at = record.last_viewed_at;
-                        }
-                        app.sessions.insert(key, session);
-                    }
-                    // Persist full session to SQLite.
-                    if let Some(session) = app.sessions.get(&persist_key) {
-                        let json = serde_json::to_string(session).ok();
-                        if let Err(e) = app.store.save_session(&pilot_store::SessionRecord {
-                            task_id: persist_key.clone(),
-                            seen_count: session.seen_count as i64,
-                            last_viewed_at: session.last_viewed_at,
-                            created_at: session.created_at,
-                            session_json: json,
-                            metadata: None,
-                        }) {
-                            tracing::error!("Failed to save session {persist_key}: {e}");
-                        }
-                    }
-                    resort_sessions(app);
-                }
-                EventKind::NewActivity {
-                    ref task_id,
-                    ref activity,
-                } => {
-                    let key = task_id.to_string();
-                    if let Some(session) = app.sessions.get_mut(&key) {
-                        session.push_activity(activity.clone());
-                    }
-                    // Notify on new comment needing reply (only after initial load).
-                    if app.loaded {
-                        if let Some(session) = app.sessions.get(&key) {
-                            if session.primary_task.needs_reply
-                                && session.primary_task.role == pilot_core::TaskRole::Author
-                            {
-                                let title = session.display_name.clone();
-                                let author = activity.author.clone();
-                                tokio::spawn(async move {
-                                    crate::notify::send_notification(
-                                        &format!("{author} commented on {title}"),
-                                        "You may need to reply",
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                    }
-                    resort_sessions(app);
-                }
-                EventKind::TaskStateChanged {
-                    ref task_id, new, ..
-                } => {
-                    let key = task_id.to_string();
-                    if let Some(session) = app.sessions.get_mut(&key) {
-                        session.primary_task.state = new;
-                    }
-                    resort_sessions(app);
-                }
-                EventKind::CiStatusChanged {
-                    ref task_id, new, ..
-                } => {
-                    let key = task_id.to_string();
-                    if let Some(session) = app.sessions.get_mut(&key) {
-                        session.primary_task.ci = new;
-                        // Drive the monitor state machine on CI changes.
-                        if session.monitor.is_some() {
-                            let _ = action_tx.send(Action::MonitorTick { session_key: key.clone() });
-                        }
-                    }
-                    // Notify on CI failure for authored PRs (only after initial load).
-                    if app.loaded && new == pilot_core::CiStatus::Failure {
-                        if let Some(session) = app.sessions.get(&key) {
-                            if session.primary_task.role == pilot_core::TaskRole::Author {
-                                let title = session.display_name.clone();
-                                tokio::spawn(async move {
-                                    crate::notify::send_notification(
-                                        &format!("CI failed: {title}"),
-                                        "A CI check failed on your PR",
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                    }
-                    resort_sessions(app);
-                }
-                EventKind::ReviewStatusChanged {
-                    ref task_id, new, ..
-                } => {
-                    let key = task_id.to_string();
-                    if let Some(session) = app.sessions.get_mut(&key) {
-                        session.primary_task.review = new;
-                    }
-                    // Notify on PR approval for authored PRs (only after initial load).
-                    if app.loaded && new == pilot_core::ReviewStatus::Approved {
-                        if let Some(session) = app.sessions.get(&key) {
-                            if session.primary_task.role == pilot_core::TaskRole::Author {
-                                let title = session.display_name.clone();
-                                tokio::spawn(async move {
-                                    crate::notify::send_notification(
-                                        &format!("Approved: {title}"),
-                                        "Your PR was approved! Ready to merge.",
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                    }
-                    resort_sessions(app);
-                }
-                EventKind::TaskRemoved(ref id) => {
-                    let key = id.to_string();
-                    app.sessions.remove(&key);
-                    app.close_terminal(&key);
-                    let order_len = app.sessions.order().len();
-                    if app.selected >= order_len && order_len > 0 {
-                        app.selected = order_len - 1;
-                    }
-                    // Also remove from persistent store so it doesn't come back on restart.
-                    if let Err(e) = app.store.delete_session(id) {
-                        tracing::error!("Failed to delete session {id}: {e}");
-                    }
-                }
-                EventKind::ProviderError { ref message } => {
-                    tracing::warn!("Provider error: {message}");
-                    // Don't show transient errors in status bar — they clear on next poll.
-                    // Persistent errors will keep firing and user can check /tmp/pilot.log.
-                }
-            }
+            crate::actions::events::handle_external_event(app, event, action_tx);
         }
 
         Action::ToggleRepo(repo) => {
@@ -1614,155 +1392,19 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::OpenInBrowser => {
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get(&key) {
-                    let url = &session.primary_task.url;
-                    if !url.is_empty() {
-                        crate::notify::open_url(url);
-                        app.status = "Opened in browser".into();
-                    } else {
-                        app.status = "No URL for this session".into();
-                    }
-                }
-            }
+            crate::actions::pr::handle_open_in_browser(app);
         }
 
         Action::MergePr => {
-            if let Some(key) = app.selected_session_key() {
-                // Extract values before borrowing mutably.
-                let pr_info = app.sessions.get(&key).map(|session| {
-                    let task = &session.primary_task;
-                    let repo = task.repo.clone().unwrap_or_default();
-                    let pr_num = task.id.key.rsplit_once('#')
-                        .map(|(_, n)| n.to_string())
-                        .unwrap_or_default();
-                    let review = format!("{:?}", task.review);
-                    (repo, pr_num, review)
-                });
-
-                if let Some((repo, pr_num, review)) = pr_info {
-                    if repo.is_empty() || pr_num.is_empty() {
-                        app.status = "Cannot merge: no PR info".into();
-                        return;
-                    }
-
-                    if app.merge_pending.as_deref() == Some(key.as_str()) {
-                        // Second M — execute merge.
-                        app.merge_pending = None;
-                        app.status = format!("Merging {repo}#{pr_num}…");
-                        set_mode(app, InputMode::Normal);
-                        // Optimistic update — mark as merged immediately so the
-                        // nav filter hides it. If the merge fails, the next poll
-                        // will correct the state back to Open.
-                        if let Some(session) = app.sessions.get_mut(&key) {
-                            session.primary_task.state = pilot_core::TaskState::Merged;
-                        }
-                        resort_sessions(app);
-                        let repo = repo.to_string();
-                        let pr = pr_num.clone();
-                        let session_key = key.clone();
-                        let tx = action_tx.clone();
-                        tokio::spawn(async move {
-                            let output = tokio::process::Command::new("gh")
-                                .args(["pr", "merge", &pr, "--squash", "--repo", &repo])
-                                .output()
-                                .await;
-                            match output {
-                                Ok(o) if o.status.success() => {
-                                    tracing::info!("Merged {repo}#{pr}");
-                                    let _ = tx.send(Action::MergeCompleted {
-                                        session_key,
-                                    });
-                                    let _ = tx.send(Action::StatusMessage(
-                                        format!("Merged {repo}#{pr}"),
-                                    ));
-                                }
-                                Ok(o) => {
-                                    let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                                    tracing::error!("Merge failed: {err}");
-                                    let _ = tx.send(Action::StatusMessage(
-                                        format!("Error: merge failed — {err}"),
-                                    ));
-                                }
-                                Err(e) => {
-                                    tracing::error!("Merge error: {e}");
-                                    let _ = tx.send(Action::StatusMessage(
-                                        format!("Error: {e}"),
-                                    ));
-                                }
-                            }
-                        });
-                    } else {
-                        app.merge_pending = Some(key.clone());
-                        app.status = format!(
-                            "Merge? {repo}#{pr_num} (review: {review}). Press M again to confirm."
-                        );
-                    }
-                }
-            }
+            crate::actions::pr::handle_merge(app, action_tx);
         }
 
         Action::MergeCompleted { session_key } => {
-            // Confirm the merged state and remove from store so it doesn't
-            // reappear on next launch.
-            if let Some(session) = app.sessions.get_mut(&session_key) {
-                session.primary_task.state = pilot_core::TaskState::Merged;
-                let task_id = session.primary_task.id.clone();
-                let _ = app.store.delete_session(&task_id);
-            }
-            resort_sessions(app);
+            crate::actions::pr::handle_merge_completed(app, &session_key);
         }
 
         Action::SlackNudge => {
-            let webhook_url = app.config.slack.webhook_url.clone();
-            if webhook_url.is_none() {
-                app.status = "No Slack webhook configured — set slack.webhook_url in ~/.pilot/config.yaml".into();
-                return;
-            }
-            let webhook_url = webhook_url.unwrap();
-
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get(&key) {
-                    let task = &session.primary_task;
-                    let reviewers = &task.reviewers;
-                    if reviewers.is_empty() {
-                        app.status = "No reviewers to nudge".into();
-                        return;
-                    }
-
-                    let reviewer_list = reviewers.join(", ");
-                    let title = task.title.clone();
-                    let url = task.url.clone();
-                    let text = format!(
-                        "Friendly reminder: *{title}* is waiting for review.\n<{url}|View PR>\nReviewers: {reviewer_list}"
-                    );
-                    app.status = format!("Sending Slack nudge to {reviewer_list}…");
-
-                    tokio::spawn(async move {
-                        let payload = serde_json::json!({ "text": text });
-                        let output = tokio::process::Command::new("curl")
-                            .args([
-                                "-s", "-X", "POST",
-                                "-H", "Content-Type: application/json",
-                                "-d", &serde_json::to_string(&payload).unwrap(),
-                                &webhook_url,
-                            ])
-                            .output()
-                            .await;
-                        match output {
-                            Ok(o) if o.status.success() => {
-                                tracing::info!("Slack nudge sent for {title}");
-                            }
-                            Ok(o) => {
-                                tracing::error!("Slack nudge failed: {}", String::from_utf8_lossy(&o.stderr));
-                            }
-                            Err(e) => {
-                                tracing::error!("Slack nudge error: {e}");
-                            }
-                        }
-                    });
-                }
-            }
+            crate::actions::pr::handle_slack_nudge(app, action_tx);
         }
 
         Action::ToggleMonitor => {
@@ -1894,133 +1536,31 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::Snooze => {
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    if session.is_snoozed() {
-                        session.snoozed_until = None;
-                        app.status = format!("Unsnoozed: {}", session.display_name);
-                    } else {
-                        session.snoozed_until = Some(chrono::Utc::now() + chrono::Duration::hours(4));
-                        app.status = format!("Snoozed for 4h: {}", session.display_name);
-                    }
-                }
-            }
+            crate::actions::pr::handle_snooze(app);
         }
 
         Action::QuickReply => {
-            if let Some(key) = app.selected_session_key() {
-                let cursor = app.detail_cursor;
-                app.quick_reply_input = Some((key, String::new(), cursor));
-                app.input_mode = InputMode::TextInput(TextInputKind::QuickReply);
-                app.status = "Quick reply — type message, Enter to post, Esc to cancel".into();
-            }
+            crate::actions::pr::handle_quick_reply(app);
         }
 
         Action::QuickReplyCancel => {
-            app.quick_reply_input = None;
-            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
-                app.input_mode = determine_mode(app);
-            }
-            app.status = String::new();
+            crate::actions::pr::handle_quick_reply_cancel(app);
         }
 
         Action::QuickReplyConfirm { body } => {
-            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
-                app.input_mode = determine_mode(app);
-            }
-            if let Some((session_key, _, comment_idx)) = app.quick_reply_input.take() {
-                if let Some(session) = app.sessions.get(&session_key) {
-                    let repo = session.primary_task.repo.clone().unwrap_or_default();
-                    let pr_number = session.primary_task.id.key.rsplit_once('#')
-                        .map(|(_, n)| n.to_string())
-                        .unwrap_or_default();
-                    let reply_to = session.activity.get(comment_idx)
-                        .and_then(|a| a.node_id.clone());
-                    if !repo.is_empty() && !pr_number.is_empty() && !body.trim().is_empty() {
-                        app.status = "Posting reply…".into();
-                        let tx = action_tx.clone();
-                        tokio::spawn(async move {
-                            let mut args = vec![
-                                "pr".to_string(), "comment".to_string(),
-                                pr_number, "--body".to_string(), body,
-                                "--repo".to_string(), repo,
-                            ];
-                            if let Some(node_id) = reply_to {
-                                args.push("--reply-to".to_string());
-                                args.push(node_id);
-                            }
-                            let output = tokio::process::Command::new("gh")
-                                .args(&args)
-                                .output()
-                                .await;
-                            match output {
-                                Ok(o) if o.status.success() => {
-                                    let _ = tx.send(Action::StatusMessage("Reply posted".into()));
-                                }
-                                Ok(o) => {
-                                    let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                                    let _ = tx.send(Action::StatusMessage(format!("Error: {err}")));
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(Action::StatusMessage(format!("Error: {e}")));
-                                }
-                            }
-                        });
-                    }
-                }
-            }
+            crate::actions::pr::handle_quick_reply_confirm(app, body, action_tx);
         }
 
         Action::NewSession => {
-            app.new_session_input = Some(String::new());
-            app.input_mode = InputMode::TextInput(TextInputKind::NewSession);
-            app.status = "New session — type description, Enter to create, Esc to cancel".into();
+            crate::actions::session::handle_new_session(app);
         }
 
         Action::NewSessionCancel => {
-            app.new_session_input = None;
-            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
-                app.input_mode = determine_mode(app);
-            }
-            app.status = String::new();
+            crate::actions::session::handle_new_session_cancel(app);
         }
 
         Action::NewSessionConfirm { description } => {
-            app.new_session_input = None;
-            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
-                app.input_mode = determine_mode(app);
-            }
-            let key = format!("local:{}", chrono::Utc::now().timestamp_millis());
-            let task = pilot_core::Task {
-                id: pilot_core::TaskId { source: "local".into(), key: key.clone() },
-                title: description.clone(),
-                body: None,
-                state: pilot_core::TaskState::Open,
-                role: pilot_core::TaskRole::Author,
-                ci: pilot_core::CiStatus::None,
-                review: pilot_core::ReviewStatus::None,
-                checks: vec![],
-                unread_count: 0,
-                url: String::new(),
-                repo: None,
-                branch: None,
-                updated_at: chrono::Utc::now(),
-                labels: vec![],
-                reviewers: vec![],
-                assignees: vec![],
-                in_merge_queue: false,
-                has_conflicts: false,
-                needs_reply: false,
-                last_commenter: None,
-                recent_activity: vec![],
-                additions: 0,
-                deletions: 0,
-            };
-            let mut session = pilot_core::Session::new(task);
-            session.state = pilot_core::SessionState::Active;
-            app.sessions.insert(key, session);
-            crate::nav::resort_sessions(app);
-            app.status = format!("Created session: {description}");
+            crate::actions::session::handle_new_session_confirm(app, description);
         }
 
         Action::CacheDefaultBranch { repo, branch } => {
@@ -2610,7 +2150,7 @@ fn apply_determined_mode(app: &mut App) {
 }
 
 /// Determine the input mode based on what the focused pane contains.
-fn determine_mode(app: &App) -> InputMode {
+pub(crate) fn determine_mode(app: &App) -> InputMode {
     // If we're in terminal mode, stay there unless explicitly exited.
     // This prevents pane operations from accidentally resetting the mode.
     if app.input_mode == InputMode::Terminal {

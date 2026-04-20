@@ -2,6 +2,7 @@ use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 mod action;
+mod actions;
 mod app;
 mod agent_state;
 pub mod input;

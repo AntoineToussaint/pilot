@@ -40,7 +40,8 @@ impl SessionManager {
         &self.order
     }
 
-    #[allow(dead_code)]\n    pub fn order_mut(&mut self) -> &mut Vec<String> {
+    #[allow(dead_code)]
+    pub fn order_mut(&mut self) -> &mut Vec<String> {
         &mut self.order
     }
 
