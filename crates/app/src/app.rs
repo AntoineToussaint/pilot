@@ -808,13 +808,21 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
                 // 6. Terminal / Normal / Detail -- regular key mapping.
                 InputMode::Normal | InputMode::Detail | InputMode::Terminal => {
-                    let mapped = keys::map_key(key, app.key_mode);
+                    // Use input_mode (not key_mode) for binding lookup to avoid desync.
+                    let effective_mode = match app.input_mode {
+                        InputMode::Normal => KeyMode::Normal,
+                        InputMode::Detail => KeyMode::Detail,
+                        InputMode::Terminal => KeyMode::Terminal,
+                        InputMode::PanePrefix => KeyMode::PanePrefix,
+                        _ => app.key_mode,
+                    };
+                    let mapped = keys::map_key(key, effective_mode);
                     match mapped {
                         Action::WaitingPrefix => {
                             app.key_mode = KeyMode::PanePrefix;
                             app.input_mode = InputMode::PanePrefix;
                         }
-                        Action::None if app.key_mode == KeyMode::Terminal => {
+                        Action::None if effective_mode == KeyMode::Terminal => {
                             // Forward to PTY.
                             if let Some(tab_key) = app.active_tab_key().cloned() {
                                 if let Some(term) = app.terminals.get_mut(&tab_key) {
