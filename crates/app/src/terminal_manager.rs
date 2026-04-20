@@ -13,6 +13,7 @@ pub struct TerminalManager {
     active_tab: usize,
 }
 
+#[allow(dead_code)]
 impl TerminalManager {
     pub fn new() -> Self {
         Self {

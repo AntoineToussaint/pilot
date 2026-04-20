@@ -10,6 +10,7 @@ pub struct SessionManager {
     order: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl SessionManager {
     pub fn new() -> Self {
         Self {

@@ -580,6 +580,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
         Action::Key(key) => {
             use crossterm::event::KeyCode;
+            tracing::debug!("KEY {:?} in mode {:?}", key.code, app.input_mode);
 
             // ── Confirmation clearing ──
             // quit_pending and merge_pending are "double-press" guards.
