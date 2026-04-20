@@ -93,7 +93,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
 
-    for (category, items) in &groups {
+    for (category, items) in groups {
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(*category, Style::default().fg(C_ACCENT).bold()),

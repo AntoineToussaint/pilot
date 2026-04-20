@@ -504,6 +504,34 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             if app.tick_count % 30 == 0 && !app.sessions.is_empty() {
                 app.sessions.save_all(app.store.as_ref());
             }
+            // Purge stale SQLite sessions ~5s after first load (50 ticks).
+            // This delay ensures all first-poll TaskUpdated events have been processed.
+            if app.loaded && !app.purged_stale && app.tick_count >= 50 && !app.first_poll_keys.is_empty() {
+                app.purged_stale = true;
+                let stale: Vec<String> = app.sessions.order().iter()
+                    .filter(|k| k.starts_with("github:") && !app.first_poll_keys.contains(*k))
+                    .cloned()
+                    .collect();
+                for key in &stale {
+                    tracing::info!("Purging stale session: {key}");
+                    app.sessions.remove(key);
+                    app.terminals.close(key);
+                }
+                app.first_poll_keys.clear(); // Free memory.
+                if !stale.is_empty() {
+                    resort_sessions(app);
+                }
+                app.selected = 0;
+                update_detail_pane(app);
+                app.status = format!(
+                    "Loaded — {} as {}",
+                    app.config.providers.github.filters.iter()
+                        .filter_map(|f| f.org.as_ref())
+                        .next()
+                        .unwrap_or(&"all repos".to_string()),
+                    app.username
+                );
+            }
             // MCP confirmations now come via Unix socket (no polling needed).
             let exited = app.terminals.collect_finished();
             for key in exited {
@@ -1047,7 +1075,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 MouseEventKind::ScrollUp => {
                     if app.input_mode == InputMode::Terminal {
                         // Send mouse scroll events to the PTY.
-                        // SGR encoding: \x1b[<65;col;rowM for scroll up.
+                        // SGR encoding: \x1b[<64;col;rowM for scroll up, \x1b[<65;col;rowM for scroll down.
                         if let Some(tab_key) = app.active_tab_key().cloned() {
                             if let Some(term) = app.terminals.get_mut(&tab_key) {
                                 let col = mouse.column + 1;
@@ -1937,7 +1965,8 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 /// Sync sidebar selection to the active tab.
 fn sync_selected_to_tab(app: &mut App) {
     if let Some(tab_key) = app.active_tab_key().cloned() {
-        if let Some(idx) = app.sessions.order().iter().position(|k| k == &tab_key) {
+        let items = nav_items(app);
+        if let Some(idx) = items.iter().position(|i| matches!(i, NavItem::Session(k) if k == &tab_key)) {
             app.selected = idx;
         }
         update_detail_pane(app);

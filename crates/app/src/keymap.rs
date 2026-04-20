@@ -115,7 +115,7 @@ pub fn contextual_hints(
             } else if ci == pilot_core::CiStatus::Failure && is_author {
                 hints.push(("f", "FIX CI"));
             } else if needs_reply && is_author {
-                hints.push(("e", "REPLY"));
+                hints.push(("r", "REPLY"));
             }
             if matches!(role, pilot_core::TaskRole::Reviewer) {
                 hints.push(("o", "review"));
@@ -140,7 +140,7 @@ pub fn contextual_hints(
                 hints.push(("f", "FIX"));
             }
             if needs_reply {
-                hints.push(("e", "REPLY"));
+                hints.push(("r", "REPLY"));
             }
             if is_ready && is_author {
                 hints.push(("M", "MERGE"));
@@ -164,23 +164,28 @@ pub fn contextual_hints(
 }
 
 /// Get all bindings for the help page.
-pub fn all_bindings() -> Vec<(&'static str, Vec<(&'static str, &'static str, &'static str)>)> {
-    BINDINGS
-        .iter()
-        .map(|(category, bindings)| {
-            let items: Vec<_> = bindings
-                .iter()
-                .map(|b| {
-                    let modes: String = b.modes.iter().map(|m| match m {
-                        KeyMode::Normal => "N",
-                        KeyMode::Detail => "D",
-                        KeyMode::Terminal => "T",
-                        KeyMode::PanePrefix => "P",
-                    }).collect::<Vec<_>>().join("");
-                    (b.short, b.description, modes.leak() as &'static str)
-                })
-                .collect();
-            (*category, items)
-        })
-        .collect()
+/// Uses a cached result to avoid repeated String allocations.
+pub fn all_bindings() -> &'static Vec<(&'static str, Vec<(&'static str, &'static str, &'static str)>)> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Vec<(&str, Vec<(&str, &str, &str)>)>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        BINDINGS
+            .iter()
+            .map(|(category, bindings)| {
+                let items: Vec<_> = bindings
+                    .iter()
+                    .map(|b| {
+                        let modes: String = b.modes.iter().map(|m| match m {
+                            KeyMode::Normal => "N",
+                            KeyMode::Detail => "D",
+                            KeyMode::Terminal => "T",
+                            KeyMode::PanePrefix => "P",
+                        }).collect::<Vec<_>>().join("");
+                        (b.short, b.description, modes.leak() as &'static str)
+                    })
+                    .collect();
+                (*category, items)
+            })
+            .collect()
+    })
 }

@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use crate::action::Action;
-use crate::app::{App, update_detail_pane};
+use crate::app::App;
 use crate::nav::resort_sessions;
 use pilot_events::{Event, EventKind};
 
@@ -18,35 +18,11 @@ pub(crate) fn handle_external_event(app: &mut App, event: Event, action_tx: &mps
 
             if !app.loaded {
                 app.loaded = true;
-                // Track all keys from the first poll so we can purge stale SQLite entries.
+            }
+            // Track all keys from the first poll so we can purge stale SQLite entries.
+            // We keep accumulating until the purge is triggered (on Tick after a delay).
+            if !app.purged_stale {
                 app.first_poll_keys.insert(task.id.to_string());
-            } else if !app.purged_stale {
-                // Second TaskUpdated after loaded=true means first poll is done.
-                // Purge any GitHub sessions from SQLite that weren't in the poll.
-                app.purged_stale = true;
-                let stale: Vec<String> = app.sessions.order().iter()
-                    .filter(|k| k.starts_with("github:") && !app.first_poll_keys.contains(*k))
-                    .cloned()
-                    .collect();
-                for key in &stale {
-                    tracing::info!("Purging stale session: {key}");
-                    app.sessions.remove(key);
-                    app.terminals.close(key);
-                }
-                app.first_poll_keys.clear(); // Free memory.
-                if !stale.is_empty() {
-                    resort_sessions(app);
-                }
-                app.selected = 0;
-                update_detail_pane(app);
-                app.status = format!(
-                    "Loaded — {} as {}",
-                    app.config.providers.github.filters.iter()
-                        .filter_map(|f| f.org.as_ref())
-                        .next()
-                        .unwrap_or(&"all repos".to_string()),
-                    app.username
-                );
             }
             let key = task.id.to_string();
             let persist_key = key.clone();
@@ -191,9 +167,9 @@ pub(crate) fn handle_external_event(app: &mut App, event: Event, action_tx: &mps
             let key = id.to_string();
             app.sessions.remove(&key);
             app.close_terminal(&key);
-            let order_len = app.sessions.order().len();
-            if app.selected >= order_len && order_len > 0 {
-                app.selected = order_len - 1;
+            let nav_len = crate::nav::nav_items(app).len();
+            if app.selected >= nav_len && nav_len > 0 {
+                app.selected = nav_len - 1;
             }
             // Also remove from persistent store so it doesn't come back on restart.
             if let Err(e) = app.store.delete_session(id) {
