@@ -196,18 +196,8 @@ fn build_repo_groups_inner(
     // Remove repos with no visible sessions.
     repos.retain(|(_, sessions)| !sessions.is_empty());
 
-    // Sort repos by most recently updated session.
-    repos.sort_by(|a, b| {
-        let latest_a = a.1.iter()
-            .filter_map(|k| state.sessions.get(k))
-            .map(|s| s.primary_task.updated_at)
-            .max();
-        let latest_b = b.1.iter()
-            .filter_map(|k| state.sessions.get(k))
-            .map(|s| s.primary_task.updated_at)
-            .max();
-        latest_b.cmp(&latest_a)
-    });
+    // Sort repos alphabetically — stable across updates, no shuffling as events flow in.
+    repos.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
 
     repos
 }

@@ -95,6 +95,11 @@ pub struct State {
     pub(crate) loaded: bool,
     pub(crate) purged_stale: bool,
     pub(crate) first_poll_keys: HashSet<String>,
+    /// True if any ProviderError arrived before the purge window closed.
+    /// When set, we skip the stale purge — an error means the fresh result
+    /// set is incomplete, and purging stored sessions against it would
+    /// delete live PRs that just weren't in a truncated response.
+    pub(crate) first_poll_had_errors: bool,
     pub(crate) tick_count: u64,
 
     // ── Sidebar tree collapse state ──
@@ -164,6 +169,7 @@ impl State {
             loaded: false,
             purged_stale: false,
             first_poll_keys: HashSet::new(),
+            first_poll_had_errors: false,
             tick_count: 0,
             collapsed_repos: HashSet::new(),
             collapsed_sessions: HashSet::new(),

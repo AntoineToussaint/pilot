@@ -63,7 +63,8 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
     ("Tabs", &[
         Binding { key: KeyCode::Char('n'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::NextTab, short: "n", label: "next tab", description: "Next tab" },
         Binding { key: KeyCode::Char('p'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::PrevTab, short: "p", label: "prev tab", description: "Previous tab" },
-        Binding { key: KeyCode::Char('x'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::CloseTab, short: "x", label: "close tab", description: "Close active tab" },
+        Binding { key: KeyCode::Char('x'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::CloseTab, short: "x", label: "close tab", description: "Close active tab (tmux session survives — reattach with c)" },
+        Binding { key: KeyCode::Char('X'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal], action: || Action::KillSession, short: "X", label: "kill session", description: "Kill the tmux session entirely (state is lost)" },
     ]),
     ("Terminal", &[
         Binding { key: KeyCode::Char(']'), modifiers: KeyModifiers::CONTROL, modes: &[KeyMode::Terminal], action: || Action::FocusPaneNext, short: "^]/^o", label: "exit", description: "Exit terminal mode (Ctrl-] or Ctrl-o)" },

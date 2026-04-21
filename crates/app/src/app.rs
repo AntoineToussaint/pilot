@@ -415,6 +415,33 @@ impl App {
             C::SetActiveTab { idx } => {
                 self.terminals.set_active_tab(idx);
             }
+            C::FocusTerminalPane { session_key } => {
+                let key_str: &str = session_key.as_str();
+                // Retarget or create a terminal pane for this key, then focus it.
+                let existing = self.state.panes.find_pane(
+                    |c| matches!(c, PaneContent::Terminal(_))
+                );
+                match existing {
+                    Some(term_id) => {
+                        self.state.panes.set_content(
+                            term_id,
+                            PaneContent::Terminal(key_str.to_string()),
+                        );
+                        self.state.panes.focus(term_id);
+                    }
+                    None => {
+                        if let Some(detail_id) = self.state.panes.find_pane(
+                            |c| matches!(c, PaneContent::Detail(_))
+                        ) {
+                            self.state.panes.focused = detail_id;
+                            self.state.panes.split_vertical(
+                                PaneContent::Terminal(key_str.to_string()),
+                            );
+                        }
+                    }
+                }
+                apply_determined_mode(self);
+            }
             C::SpawnTerminal { session_key, cwd, kind, focus } => {
                 spawn_terminal(self, &session_key, cwd, kind, focus);
             }
@@ -504,6 +531,29 @@ impl App {
             C::RefreshLiveTmuxSessions => {
                 let tx = action_tx.clone();
                 tokio::task::spawn_blocking(move || {
+                    let sessions: std::collections::HashSet<String> =
+                        list_tmux_sessions().into_iter().collect();
+                    let _ = tx.send(Action::TmuxSessionsRefreshed { sessions });
+                });
+            }
+            C::KillTmuxSession { tmux_name } => {
+                let tx = action_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let status = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &tmux_name])
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => {
+                            tracing::info!("Killed tmux session: {tmux_name}");
+                        }
+                        Ok(s) => {
+                            tracing::warn!("tmux kill-session {tmux_name} exited with {s}");
+                        }
+                        Err(e) => {
+                            tracing::warn!("tmux kill-session {tmux_name} failed: {e}");
+                        }
+                    }
+                    // Refresh the live set so the sidebar indicator clears.
                     let sessions: std::collections::HashSet<String> =
                         list_tmux_sessions().into_iter().collect();
                     let _ = tx.send(Action::TmuxSessionsRefreshed { sessions });
@@ -911,7 +961,18 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             }
             // Purge stale SQLite sessions ~5s after first load (50 ticks).
             // This delay ensures all first-poll TaskUpdated events have been processed.
-            if app.state.loaded && !app.state.purged_stale && app.state.tick_count >= 50 && !app.state.first_poll_keys.is_empty() {
+            //
+            // Skip if the first poll reported ANY provider error — an
+            // incomplete result set would cause us to wipe stored sessions
+            // the user still cares about (the "PR reappears then vanishes"
+            // bug). Better to leave a stale row than to delete a live one;
+            // the user can always hit `x` to close what they don't want.
+            if app.state.loaded
+                && !app.state.purged_stale
+                && app.state.tick_count >= 50
+                && !app.state.first_poll_keys.is_empty()
+                && !app.state.first_poll_had_errors
+            {
                 app.state.purged_stale = true;
                 let stale: Vec<String> = app.state.sessions.order().iter()
                     .filter(|k| k.starts_with("github:") && !app.state.first_poll_keys.contains(*k))
@@ -934,6 +995,18 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         .next()
                         .unwrap_or(&"all repos".to_string()),
                     app.state.username
+                );
+            } else if app.state.loaded
+                && !app.state.purged_stale
+                && app.state.tick_count >= 50
+                && app.state.first_poll_had_errors
+            {
+                // Don't purge, but still mark as done so we don't keep
+                // rechecking every tick.
+                app.state.purged_stale = true;
+                app.state.first_poll_keys.clear();
+                tracing::warn!(
+                    "Skipped stale purge — first poll had errors; sessions kept as-is"
                 );
             }
             // Terminal reaping + all associated cleanup happens in
@@ -1267,7 +1340,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(term_key) = app.focused_terminal_key()
                         && let Some(term) = app.terminals.get_mut(&term_key)
                     {
-                        term.scroll_up(3);
+                        // Alt-screen apps (tmux, vim, less) never accumulate
+                        // scrollback in libghostty, so scroll_up is a no-op
+                        // visually. Forward as arrow-up presses instead so
+                        // the underlying app scrolls its own buffer.
+                        if term.in_alternate_screen() {
+                            let _ = term.write(b"\x1b[A\x1b[A\x1b[A");
+                        } else {
+                            term.scroll_up(3);
+                        }
                     } else {
                         app.state.detail_scroll = app.state.detail_scroll.saturating_sub(3);
                     }
@@ -1276,7 +1357,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(term_key) = app.focused_terminal_key()
                         && let Some(term) = app.terminals.get_mut(&term_key)
                     {
-                        term.scroll_down(3);
+                        if term.in_alternate_screen() {
+                            let _ = term.write(b"\x1b[B\x1b[B\x1b[B");
+                        } else {
+                            term.scroll_down(3);
+                        }
                     } else {
                         app.state.detail_scroll = app.state.detail_scroll.saturating_add(3);
                     }

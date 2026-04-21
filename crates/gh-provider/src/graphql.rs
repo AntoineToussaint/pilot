@@ -6,8 +6,9 @@ use serde::Deserialize;
 
 /// The single GraphQL query that fetches all PR data.
 const SEARCH_QUERY: &str = r#"
-query($query: String!, $first: Int!) {
-  search(query: $query, type: ISSUE, first: $first) {
+query($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
         number
@@ -171,6 +172,16 @@ pub struct GqlRateLimit {
 #[derive(Deserialize, Debug)]
 pub struct GqlSearch {
     pub nodes: Vec<GqlPr>,
+    #[serde(rename = "pageInfo", default)]
+    pub page_info: Option<GqlPageInfo>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct GqlPageInfo {
+    #[serde(rename = "hasNextPage", default)]
+    pub has_next_page: bool,
+    #[serde(rename = "endCursor", default)]
+    pub end_cursor: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -379,11 +390,16 @@ pub fn build_query(username: &str, filters: &[String]) -> String {
 }
 
 pub fn query_body(search_query: &str) -> serde_json::Value {
+    query_body_after(search_query, None)
+}
+
+pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "query": SEARCH_QUERY,
         "variables": {
             "query": search_query,
-            "first": 50
+            "first": 100,
+            "after": after,
         }
     })
 }

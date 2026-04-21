@@ -38,6 +38,10 @@ pub enum Command {
     /// updates `state.terminal_index.active_tab` for local decisions and
     /// emits this so the shell mirrors it.
     SetActiveTab { idx: usize },
+    /// Move pane focus onto the Terminal leaf showing `session_key`. Used
+    /// when re-engaging an already-visible terminal (sidebar nav → c) so
+    /// keystrokes route to the PTY instead of staying on the sidebar.
+    FocusTerminalPane { session_key: SessionKey },
     /// Write bytes to a running terminal's PTY.
     WriteToTerminal {
         session_key: SessionKey,
@@ -138,6 +142,10 @@ pub enum Command {
     },
     /// Enumerate live tmux sessions and dispatch `Action::TmuxSessionsRefreshed`.
     RefreshLiveTmuxSessions,
+    /// Run `tmux kill-session -t <tmux_name>` so a stuck session can be
+    /// wiped completely. The shell separately issues CloseTerminal to drop
+    /// the PTY; `state.live_tmux_sessions` refreshes on the next tick.
+    KillTmuxSession { tmux_name: String },
 
     // ── External services ──
     /// POST a JSON body to a URL (used for Slack webhooks).

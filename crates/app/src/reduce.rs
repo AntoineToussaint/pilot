@@ -465,13 +465,17 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 state.status = "No session selected".into();
                 return cmds;
             };
-            // Already has terminal → just switch to the tab. Pane visibility
-            // is enforced at render time by `enforce_invariants`.
+            // Already has terminal → switch to the tab AND focus the pane.
+            // Without the explicit focus command, `enforce_terminal_invariant`
+            // short-circuits when the session's terminal is already visible
+            // (e.g. sidebar nav already retargeted it), so keystrokes keep
+            // going to the sidebar.
             if state.terminal_index.contains_key(&key) {
                 if let Some(idx) = state.terminal_index.tab_order.iter().position(|k| k == &key) {
                     state.terminal_index.active_tab = Some(idx);
                     cmds.push(Command::SetActiveTab { idx });
                 }
+                cmds.push(Command::FocusTerminalPane { session_key: key.into() });
                 return cmds;
             }
             let worktree_path = state.sessions.get(&key).and_then(|s| s.worktree_path.clone());
@@ -519,6 +523,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 let next = (cur + 1) % n;
                 state.terminal_index.active_tab = Some(next);
                 cmds.push(Command::SetActiveTab { idx: next });
+                if let Some(key) = state.terminal_index.tab_order.get(next).cloned() {
+                    cmds.push(Command::FocusTerminalPane { session_key: key.into() });
+                }
                 sync_selected_to_active_tab(state);
             }
         }
@@ -529,6 +536,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 let next = (cur + n - 1) % n;
                 state.terminal_index.active_tab = Some(next);
                 cmds.push(Command::SetActiveTab { idx: next });
+                if let Some(key) = state.terminal_index.tab_order.get(next).cloned() {
+                    cmds.push(Command::FocusTerminalPane { session_key: key.into() });
+                }
                 sync_selected_to_active_tab(state);
             }
         }
@@ -537,6 +547,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             if idx < state.terminal_index.tab_order.len() {
                 state.terminal_index.active_tab = Some(idx);
                 cmds.push(Command::SetActiveTab { idx });
+                if let Some(key) = state.terminal_index.tab_order.get(idx).cloned() {
+                    cmds.push(Command::FocusTerminalPane { session_key: key.into() });
+                }
                 sync_selected_to_active_tab(state);
             }
         }
@@ -546,6 +559,27 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     session.state = pilot_core::SessionState::Active;
                 }
                 cmds.push(Command::CloseTerminal { session_key: key.into() });
+            }
+        }
+        Action::KillSession => {
+            // Prefer the focused-pane terminal (what the user is actually
+            // looking at). Fall back to active tab, then to the selected
+            // session — so `X` works even when the tmux session is alive
+            // but no pilot PTY is attached to it yet.
+            let target = selected_key(state);
+            let tab_key = state.terminal_index.active_key().cloned();
+            let key = tab_key.or(target);
+            if let Some(key) = key {
+                let tmux_name = key.replace([':', '/'], "_");
+                state.live_tmux_sessions.remove(&tmux_name);
+                if let Some(session) = state.sessions.get_mut(&key) {
+                    session.state = pilot_core::SessionState::Active;
+                }
+                cmds.push(Command::KillTmuxSession { tmux_name });
+                if state.terminal_index.contains_key(&key) {
+                    cmds.push(Command::CloseTerminal { session_key: key.clone().into() });
+                }
+                state.status = format!("Killed tmux session for {key}");
             }
         }
 
@@ -1171,6 +1205,12 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     let shown: String = message.chars().take(160).collect();
                     let suffix = if message.chars().count() > 160 { "…" } else { "" };
                     state.status = format!("Provider error: {shown}{suffix}");
+                    // Poison the purge: an error means the fresh result set
+                    // is incomplete, so we can't trust "not in first_poll_keys"
+                    // as a signal that a stored session is gone.
+                    if !state.purged_stale {
+                        state.first_poll_had_errors = true;
+                    }
                 }
             }
         }
@@ -1432,6 +1472,7 @@ pub fn handled_by_reduce(action: &Action) -> bool {
             | Action::PrevTab
             | Action::GoToTab(_)
             | Action::CloseTab
+            | Action::KillSession
             | Action::Resize { .. }
             | Action::CacheDefaultBranch { .. }
             | Action::WaitingPrefix

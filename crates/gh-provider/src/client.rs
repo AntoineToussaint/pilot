@@ -69,52 +69,77 @@ impl GhClient {
 
     pub async fn fetch_all_prs(&self) -> Result<Vec<Task>, GhError> {
         let search_query = graphql::build_query(&self.user, &self.filters);
-        let body = graphql::query_body(&search_query);
 
         tracing::info!("GraphQL search: {search_query}");
-        tracing::debug!("GraphQL body: {}", serde_json::to_string(&body).unwrap_or_default());
 
-        let response: graphql::GqlResponse = self
-            .inner
-            .post("/graphql", Some(&body))
-            .await
-            .map_err(|e| {
-                tracing::error!("GraphQL HTTP error: {e}");
-                GhError::Api(e)
-            })?;
-
-        if let Some(errors) = &response.errors {
-            let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
-            let joined = detailed.join("; ");
-            tracing::error!("GraphQL errors (search): {joined}");
-            tracing::error!("GraphQL search was: {search_query}");
-            tracing::error!(
-                "GraphQL body was: {}",
+        // Paginate until GitHub reports no more pages. Without this, users
+        // with >100 inbox PRs lose the tail on first poll, which the stale
+        // purge then deletes from SQLite — PRs "disappear" after restart.
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut page = 0usize;
+        loop {
+            let body = graphql::query_body_after(&search_query, cursor.as_deref());
+            tracing::debug!(
+                "GraphQL page {page} body: {}",
                 serde_json::to_string(&body).unwrap_or_default()
             );
-            return Err(GhError::Graphql(format!(
-                "search `{search_query}`: {joined}"
-            )));
-        }
 
-        let data = response
-            .data
-            .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
+            let response: graphql::GqlResponse = self
+                .inner
+                .post("/graphql", Some(&body))
+                .await
+                .map_err(|e| {
+                    tracing::error!("GraphQL HTTP error (page {page}): {e}");
+                    GhError::Api(e)
+                })?;
 
-        if let Some(rl) = &data.rate_limit {
-            tracing::info!(
-                "GitHub rate limit: {}/5000 remaining, resets {}",
-                rl.remaining,
-                rl.reset_at
+            if let Some(errors) = &response.errors {
+                let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
+                let joined = detailed.join("; ");
+                tracing::error!("GraphQL errors (search page {page}): {joined}");
+                tracing::error!("GraphQL search was: {search_query}");
+                return Err(GhError::Graphql(format!(
+                    "search `{search_query}` (page {page}): {joined}"
+                )));
+            }
+
+            let data = response
+                .data
+                .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
+
+            if let Some(rl) = &data.rate_limit {
+                tracing::info!(
+                    "GitHub rate limit: {}/5000 remaining, resets {}",
+                    rl.remaining,
+                    rl.reset_at
+                );
+            }
+
+            tasks.extend(
+                data.search
+                    .nodes
+                    .iter()
+                    .map(|pr| graphql::pr_to_task(pr, &self.user)),
             );
-        }
 
-        let mut tasks: Vec<Task> = data
-            .search
-            .nodes
-            .iter()
-            .map(|pr| graphql::pr_to_task(pr, &self.user))
-            .collect();
+            let page_info = data.search.page_info.unwrap_or_default();
+            if !page_info.has_next_page {
+                break;
+            }
+            cursor = page_info.end_cursor;
+            if cursor.is_none() {
+                // Defensive: hasNextPage=true but no cursor. Bail out rather
+                // than looping forever.
+                tracing::warn!("GraphQL paged: hasNextPage=true but endCursor=null");
+                break;
+            }
+            page += 1;
+            if page >= 20 {
+                tracing::warn!("GraphQL paged: bailing after {page} pages (safety cap)");
+                break;
+            }
+        }
 
         // Fetch watched repos (all open PRs, not just involves:user).
         for repo in &self.watch_repos {

@@ -261,4 +261,23 @@ impl TermSession {
     pub fn is_scrolled(&self) -> bool {
         self.scrolled_back
     }
+
+    /// True when the PTY child is using the alternate screen buffer
+    /// (tmux, vim, less, etc.). Libghostty's scrollback is empty in this
+    /// mode; callers should forward scroll wheel as arrow keys so the
+    /// underlying app can handle it (tmux copy mode, less pagination,
+    /// vim cursor movement).
+    pub fn in_alternate_screen(&self) -> bool {
+        self.terminal
+            .mode(libghostty_vt::terminal::Mode::ALT_SCREEN)
+            .unwrap_or(false)
+            || self
+                .terminal
+                .mode(libghostty_vt::terminal::Mode::ALT_SCREEN_SAVE)
+                .unwrap_or(false)
+            || self
+                .terminal
+                .mode(libghostty_vt::terminal::Mode::ALT_SCREEN_LEGACY)
+                .unwrap_or(false)
+    }
 }

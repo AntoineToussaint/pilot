@@ -44,6 +44,10 @@ pub enum Action {
     PrevTab,
     GoToTab(usize),
     CloseTab,
+    /// Kill the tmux session AND close the pilot tab. Unlike CloseTab which
+    /// only detaches (tmux session survives), this wipes it completely so
+    /// the next attach starts fresh.
+    KillSession,
 
     // -- Session management --
     OpenSession(ShellKind),
