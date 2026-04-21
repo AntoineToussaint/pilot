@@ -84,12 +84,17 @@ impl GhClient {
             })?;
 
         if let Some(errors) = &response.errors {
-            let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-            let joined = msgs.join("; ");
-            tracing::error!("GraphQL errors: {joined}");
+            let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
+            let joined = detailed.join("; ");
+            tracing::error!("GraphQL errors (search): {joined}");
             tracing::error!("GraphQL search was: {search_query}");
-            tracing::error!("GraphQL body was: {}", serde_json::to_string(&body).unwrap_or_default());
-            return Err(GhError::Graphql(joined));
+            tracing::error!(
+                "GraphQL body was: {}",
+                serde_json::to_string(&body).unwrap_or_default()
+            );
+            return Err(GhError::Graphql(format!(
+                "search `{search_query}`: {joined}"
+            )));
         }
 
         let data = response
@@ -130,8 +135,11 @@ impl GhClient {
                         }
                     }
                     if let Some(errors) = resp.errors {
-                        let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-                        tracing::warn!("Watch query errors for {repo}: {}", msgs.join("; "));
+                        let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
+                        tracing::warn!(
+                            "Watch query errors for {repo}: {}",
+                            detailed.join("; ")
+                        );
                     }
                 }
                 Err(e) => {

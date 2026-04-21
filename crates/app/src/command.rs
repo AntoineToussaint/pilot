@@ -22,10 +22,15 @@ pub enum Command {
     // ── Terminal lifecycle ──
     /// Spawn a new terminal session for `session_key` in the given worktree.
     /// The shell wraps the chosen shell or agent in tmux for persistence.
+    /// When `focus` is true, the terminal pane becomes the focused pane
+    /// (user-initiated OpenSession). When false, the terminal spawns
+    /// without stealing focus — used by auto-attach so sessions appearing
+    /// while the user is navigating don't yank them into TERM mode.
     SpawnTerminal {
         session_key: SessionKey,
         cwd: PathBuf,
         kind: ShellKind,
+        focus: bool,
     },
     /// Close and reap a terminal. Also runs pane/state cleanup in the shell.
     CloseTerminal { session_key: SessionKey },

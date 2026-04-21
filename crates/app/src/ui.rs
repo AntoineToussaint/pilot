@@ -533,15 +533,22 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                         TaskRole::Assignee => Span::styled("A ", Style::default().fg(C_GREEN).bg(bg)),
                         TaskRole::Mentioned => Span::styled("  ", Style::default().bg(bg)),
                     },
-                    // Session indicator (2 chars)
-                    if has_live_terminal {
-                        Span::styled("●", Style::default().fg(C_GREEN).bg(bg))
-                    } else if tmux_alive_detached {
-                        Span::styled("⚡", Style::default().fg(C_YELLOW).bg(bg))
-                    } else {
-                        Span::styled("  ", Style::default().bg(bg))
+                    // Session indicator (2 chars — glyph + trailing space).
+                    // Uses single-cell glyphs so column alignment is
+                    // predictable across terminals (emoji are often 2 cells).
+                    {
+                        let (ch, color) = if has_live_terminal {
+                            ("●", C_GREEN)
+                        } else if tmux_alive_detached {
+                            ("●", C_YELLOW)
+                        } else {
+                            (" ", C_TEXT_DIM)
+                        };
+                        Span::styled(
+                            format!("{ch} "),
+                            Style::default().fg(color).bg(bg),
+                        )
                     },
-                    Span::styled(" ", Style::default().bg(bg)),
                     // Title (padded to fill)
                     Span::styled(padded_title, title_style),
                     // Right side: unread(4) + status(10) + time(6) = 20

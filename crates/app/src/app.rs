@@ -415,8 +415,8 @@ impl App {
             C::SetActiveTab { idx } => {
                 self.terminals.set_active_tab(idx);
             }
-            C::SpawnTerminal { session_key, cwd, kind } => {
-                spawn_terminal(self, &session_key, cwd, kind);
+            C::SpawnTerminal { session_key, cwd, kind, focus } => {
+                spawn_terminal(self, &session_key, cwd, kind, focus);
             }
 
             // ── Monitor IO ──
@@ -1397,15 +1397,34 @@ fn resume_tmux_sessions(app: &mut App) {
     let count = to_resume.len();
     for (key, cwd) in to_resume {
         tracing::info!("Resuming tmux session for {key}");
-        spawn_terminal(app, &key, cwd, ShellKind::Claude);
+        // focus=false — starting in INBOX, not terminal.
+        spawn_terminal(app, &key, cwd, ShellKind::Claude, false);
     }
     app.state.status = format!(
         "Resumed {count} tmux session{}",
         if count == 1 { "" } else { "s" }
     );
+
+    // `spawn_terminal` focuses each new Terminal pane as it lands, which
+    // leaves the app in Terminal mode at startup. Pilot should always open
+    // in the inbox — move focus back to the Inbox pane.
+    if let Some(inbox_id) = app
+        .state
+        .panes
+        .find_pane(|c| matches!(c, crate::pane::PaneContent::Inbox))
+    {
+        app.state.panes.focus(inbox_id);
+    }
+    app.state.input_mode = InputMode::Normal;
 }
 
-pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::PathBuf, kind: ShellKind) {
+pub(crate) fn spawn_terminal(
+    app: &mut App,
+    session_key: &str,
+    cwd: std::path::PathBuf,
+    kind: ShellKind,
+    focus: bool,
+) {
     // Bail if the session was removed between the user action and here
     // (e.g. PR got merged/closed mid-spawn). Without this, env vars would
     // silently default and the terminal would come up disconnected from any PR.
@@ -1477,6 +1496,10 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
 
     match term_result {
         Ok(term) => {
+            // Remember the pre-spawn focused pane so we can restore focus
+            // when `focus == false` (auto-attach).
+            let prior_focus = app.state.panes.focused;
+
             app.terminals.insert(session_key.to_string(), term, kind);
             if let Some(session) = app.state.sessions.get_mut(session_key) {
                 session.state = SessionState::Working;
@@ -1487,7 +1510,6 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
                 .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
                 .is_some();
             if !has_term_pane {
-                // Find the detail pane and split it.
                 if let Some(detail_id) = app.state
                     .panes
                     .find_pane(|c| matches!(c, PaneContent::Detail(_)))
@@ -1496,17 +1518,19 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
                     app.state.panes
                         .split_vertical(PaneContent::Terminal(session_key.to_string()));
                 }
-            } else {
-                // Update existing terminal pane to show new session.
-                if let Some(term_id) = app.state
-                    .panes
-                    .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
-                {
-                    app.state.panes
-                        .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
-                }
+            } else if let Some(term_id) = app.state
+                .panes
+                .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+            {
+                app.state.panes
+                    .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
             }
-            focus_terminal_pane(app);
+
+            if focus {
+                focus_terminal_pane(app);
+            } else {
+                app.state.panes.focus(prior_focus);
+            }
             apply_determined_mode(app);
             app.state.status = match kind {
                 ShellKind::Claude => format!("Claude Code started in {}", cwd.display()),

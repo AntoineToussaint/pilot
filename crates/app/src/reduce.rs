@@ -452,6 +452,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     session_key: key.into(),
                     cwd: path,
                     kind: shell_kind,
+                    focus: true, // user-initiated
                 });
                 return cmds;
             }
@@ -476,6 +477,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                         session_key: key.into(),
                         cwd: clock.default_cwd.clone(),
                         kind: shell_kind,
+                        focus: true,
                     });
                 }
             }
@@ -897,6 +899,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     session_key: key.into(),
                     cwd,
                     kind: shell_kind,
+                    focus: false, // auto-attach — don't steal focus
                 });
             }
         }
@@ -1134,6 +1137,12 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 }
                 EventKind::ProviderError { message } => {
                     tracing::warn!("Provider error: {message}");
+                    // Surface to the user — truncate to keep the status bar
+                    // readable, but include enough of the message to debug
+                    // (GraphQL errors are often >100 chars).
+                    let shown: String = message.chars().take(160).collect();
+                    let suffix = if message.chars().count() > 160 { "…" } else { "" };
+                    state.status = format!("Provider error: {shown}{suffix}");
                 }
             }
         }
@@ -1309,6 +1318,7 @@ fn queue_monitor_claude_fix(state: &mut State, session_key: &str, clock: &Clock)
                 session_key: session_key.into(),
                 cwd: wt,
                 kind: crate::action::ShellKind::Claude,
+                focus: false, // monitor auto-spawn, don't grab focus
             });
         } else if let Some(s) = state.sessions.get_mut(session_key) {
             s.monitor = Some(pilot_core::MonitorState::Failed {

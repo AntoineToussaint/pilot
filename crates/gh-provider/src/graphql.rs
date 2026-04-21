@@ -121,6 +121,37 @@ pub struct GqlResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlError {
     pub message: String,
+    /// GraphQL path to the node that failed (if any).
+    #[serde(default)]
+    pub path: Option<Vec<serde_json::Value>>,
+    /// Error type / extensions (often contains the attribute name).
+    #[serde(default)]
+    pub extensions: Option<serde_json::Value>,
+    /// Source locations (line/col in the query).
+    #[serde(default)]
+    #[allow(dead_code)] // Captured for debug format — not yet used in messages.
+    pub locations: Option<Vec<serde_json::Value>>,
+}
+
+impl GqlError {
+    /// Human-readable debug line including path + extensions, not just the message.
+    pub fn full(&self) -> String {
+        let mut s = self.message.clone();
+        if let Some(path) = &self.path
+            && !path.is_empty()
+        {
+            let path_str = path
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from).or_else(|| v.as_u64().map(|n| n.to_string())))
+                .collect::<Vec<_>>()
+                .join(".");
+            s.push_str(&format!(" [at {path_str}]"));
+        }
+        if let Some(ext) = &self.extensions {
+            s.push_str(&format!(" (ext: {ext})"));
+        }
+        s
+    }
 }
 
 #[derive(Deserialize, Debug)]
