@@ -81,6 +81,19 @@ pub struct Activity {
     /// GitHub node ID for replying to this comment.
     #[serde(default)]
     pub node_id: Option<String>,
+    /// File path for inline review comments (e.g. "src/foo.rs").
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Line number for inline review comments.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// Diff hunk showing the code context for inline review comments.
+    #[serde(default)]
+    pub diff_hunk: Option<String>,
+    /// GraphQL node ID of the review *thread* (used for threaded replies
+    /// via `addPullRequestReviewThreadReply` and for `resolveReviewThread`).
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,9 +128,15 @@ pub struct Task {
     /// Assignees (user logins).
     #[serde(default)]
     pub assignees: Vec<String>,
-    /// Whether this PR is in a merge queue / has auto-merge enabled.
+    /// Auto-merge is enabled ("merge when ready" armed by someone).
+    /// NOTE: this does NOT mean the PR is approved or that anything will
+    /// merge right now — only that it will merge once CI + reviews pass.
+    #[serde(default, alias = "in_merge_queue")]
+    pub auto_merge_enabled: bool,
+    /// The PR is actually sitting in GitHub's merge queue right now
+    /// (separate from auto-merge; this is the real queued-to-merge state).
     #[serde(default)]
-    pub in_merge_queue: bool,
+    pub is_in_merge_queue: bool,
     /// Whether this PR has merge conflicts.
     #[serde(default)]
     pub has_conflicts: bool,
@@ -160,6 +179,81 @@ pub enum ActionPriority {
     Stale = 7,
 }
 
+/// Status badge displayed on a PR row — derived purely from task fields.
+/// Priority order matters: the first matching variant wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusTag {
+    /// Has merge conflicts with the base branch.
+    Conflict,
+    /// CI is failing.
+    CiFailed,
+    /// A reviewer requested changes.
+    ChangesRequested,
+    /// Actually sitting in GitHub's merge queue.
+    Queued,
+    /// Approved + CI green — ready to merge now.
+    Ready,
+    /// Auto-merge is armed (will merge when reviews + CI pass). Not the same
+    /// as Queued — the PR may still be un-approved.
+    AutoMerge,
+    /// Awaiting review.
+    ReviewPending,
+    /// CI is still running.
+    CiRunning,
+    /// PR is a draft.
+    Draft,
+    /// Nothing interesting — no badge.
+    None,
+}
+
+impl StatusTag {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Conflict => "CONFLICT",
+            Self::CiFailed => "CI FAIL",
+            Self::ChangesRequested => "CHANGES",
+            Self::Queued => "QUEUED",
+            Self::Ready => "READY",
+            Self::AutoMerge => "AUTO",
+            Self::ReviewPending => "REVIEW",
+            Self::CiRunning => "CI...",
+            Self::Draft => "DRAFT",
+            Self::None => "",
+        }
+    }
+
+    /// Derive the status tag for a task. Pure — unit-testable.
+    ///
+    /// Priority (first match wins): conflict → CI fail → changes requested
+    /// → actually-queued → ready → auto-merge armed → review pending →
+    /// CI running → draft → none.
+    pub fn for_task(task: &Task) -> Self {
+        if task.has_conflicts {
+            Self::Conflict
+        } else if task.ci == CiStatus::Failure {
+            Self::CiFailed
+        } else if task.review == ReviewStatus::ChangesRequested {
+            Self::ChangesRequested
+        } else if task.is_in_merge_queue {
+            Self::Queued
+        } else if task.review == ReviewStatus::Approved
+            && matches!(task.ci, CiStatus::Success | CiStatus::None)
+        {
+            Self::Ready
+        } else if task.auto_merge_enabled {
+            Self::AutoMerge
+        } else if task.review == ReviewStatus::Pending {
+            Self::ReviewPending
+        } else if matches!(task.ci, CiStatus::Running | CiStatus::Pending) {
+            Self::CiRunning
+        } else if matches!(task.state, TaskState::Draft) {
+            Self::Draft
+        } else {
+            Self::None
+        }
+    }
+}
+
 impl ActionPriority {
     /// Human-readable label for section headers.
     pub fn label(&self) -> &'static str {
@@ -173,5 +267,118 @@ impl ActionPriority {
             Self::WaitingOnOthers => "Waiting on Others",
             Self::Stale => "Stale",
         }
+    }
+}
+
+#[cfg(test)]
+mod status_tag_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn base() -> Task {
+        Task {
+            id: TaskId { source: "gh".into(), key: "o/r#1".into() },
+            title: "t".into(), body: None,
+            state: TaskState::Open, role: TaskRole::Author,
+            ci: CiStatus::None, review: ReviewStatus::None,
+            checks: vec![], unread_count: 0,
+            url: "u".into(), repo: Some("o/r".into()),
+            branch: Some("b".into()), updated_at: Utc::now(),
+            labels: vec![], reviewers: vec![], assignees: vec![],
+            auto_merge_enabled: false, is_in_merge_queue: false,
+            has_conflicts: false, needs_reply: false,
+            last_commenter: None, recent_activity: vec![],
+            additions: 0, deletions: 0,
+        }
+    }
+
+    #[test]
+    fn auto_merge_armed_is_not_queued() {
+        // REGRESSION: auto_merge_enabled used to render as "QUEUED" even
+        // though the PR was neither approved nor actually in the queue.
+        // Now it renders as AutoMerge (distinct from Queued).
+        let mut t = base();
+        t.auto_merge_enabled = true;
+        t.review = ReviewStatus::None;
+        t.is_in_merge_queue = false;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::AutoMerge);
+        assert_ne!(StatusTag::for_task(&t), StatusTag::Queued);
+    }
+
+    #[test]
+    fn actually_in_merge_queue_is_queued() {
+        let mut t = base();
+        t.is_in_merge_queue = true;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Queued);
+    }
+
+    #[test]
+    fn approved_plus_green_ci_is_ready() {
+        let mut t = base();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Ready);
+    }
+
+    #[test]
+    fn conflict_trumps_everything() {
+        let mut t = base();
+        t.has_conflicts = true;
+        t.ci = CiStatus::Failure;
+        t.review = ReviewStatus::ChangesRequested;
+        t.is_in_merge_queue = true;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Conflict);
+    }
+
+    #[test]
+    fn ci_failed_beats_everything_but_conflict() {
+        let mut t = base();
+        t.ci = CiStatus::Failure;
+        t.review = ReviewStatus::Approved;
+        t.is_in_merge_queue = true;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::CiFailed);
+    }
+
+    #[test]
+    fn changes_requested_shown_before_queue_hints() {
+        let mut t = base();
+        t.review = ReviewStatus::ChangesRequested;
+        t.auto_merge_enabled = true;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::ChangesRequested);
+    }
+
+    #[test]
+    fn queue_beats_ready_when_both_apply() {
+        // If it's actually in the queue, that's the more specific fact.
+        let mut t = base();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
+        t.is_in_merge_queue = true;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Queued);
+    }
+
+    #[test]
+    fn draft_only_shows_when_nothing_else_applies() {
+        let mut t = base();
+        t.state = TaskState::Draft;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Draft);
+        // But CI failure still wins.
+        t.ci = CiStatus::Failure;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::CiFailed);
+    }
+
+    #[test]
+    fn no_tag_for_plain_open_pr() {
+        assert_eq!(StatusTag::for_task(&base()), StatusTag::None);
+    }
+
+    #[test]
+    fn labels_match_expectations() {
+        assert_eq!(StatusTag::Conflict.label(), "CONFLICT");
+        assert_eq!(StatusTag::CiFailed.label(), "CI FAIL");
+        assert_eq!(StatusTag::Queued.label(), "QUEUED");
+        assert_eq!(StatusTag::AutoMerge.label(), "AUTO");
+        assert_eq!(StatusTag::Ready.label(), "READY");
+        assert_eq!(StatusTag::None.label(), "");
     }
 }

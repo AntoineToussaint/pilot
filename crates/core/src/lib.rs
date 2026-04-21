@@ -6,10 +6,12 @@
 pub mod agent;
 pub mod provider;
 mod session;
+mod session_key;
 mod task;
 pub mod time;
 
 pub use agent::AgentConfig;
 pub use provider::{ProviderError, TaskProvider};
 pub use session::*;
+pub use session_key::SessionKey;
 pub use task::*;

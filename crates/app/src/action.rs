@@ -1,9 +1,15 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyEvent, MouseEvent};
+use pilot_core::SessionKey;
 use pilot_events::Event;
 
 /// All actions the app can perform, funnelled through a single channel.
+///
+/// `Event` and `CollaboratorsLoaded` are boxed because they're significantly
+/// larger (~384 bytes) than the other variants (~16-80 bytes). Without the
+/// box, every `Action` sitting in the mpsc queue would pay that space —
+/// wasteful for the common `Tick`/`Key`/`Mouse` traffic.
 #[derive(Debug, Clone)]
 pub enum Action {
     // -- Terminal events --
@@ -14,7 +20,7 @@ pub enum Action {
     Tick,
 
     // -- External events from providers --
-    ExternalEvent(Event),
+    ExternalEvent(Box<Event>),
 
     // -- Session navigation --
     SelectNext,
@@ -29,6 +35,7 @@ pub enum Action {
     FocusPaneLeft,
     FocusPaneRight,
     FocusPaneNext,
+    FocusPanePrev,
     ResizePane(i16),
     FullscreenToggle,
 
@@ -41,7 +48,7 @@ pub enum Action {
     // -- Session management --
     OpenSession(ShellKind),
     WorktreeReady {
-        session_key: String,
+        session_key: SessionKey,
         path: PathBuf,
     },
     MarkRead,
@@ -62,24 +69,16 @@ pub enum Action {
     /// Draft a reply to selected comments.
     ReplyWithClaude,
 
-    // -- MCP confirmation --
-    McpConfirmRequest {
-        tool: String,
-        display: String,
-        /// Channel to send the approval/rejection response back.
-        response_tx: std::sync::mpsc::Sender<bool>,
-    },
-    ApproveMcpAction,
-    RejectMcpAction,
-
     // -- PR actions --
     MergePr,
     /// Merge succeeded — set state to Merged and clean up.
-    MergeCompleted { session_key: String },
+    MergeCompleted { session_key: SessionKey },
     /// Open PR in browser.
     OpenInBrowser,
     /// Send a Slack reminder to reviewers.
     SlackNudge,
+    /// Approve the selected PR (only when user's role is Reviewer or Assignee).
+    ApprovePr,
 
     // -- Snooze --
     /// Snooze the selected session for N hours.
@@ -89,21 +88,26 @@ pub enum Action {
     /// Toggle monitor mode for the selected session.
     ToggleMonitor,
     /// Internal: drive the monitor state machine for a session.
-    MonitorTick { session_key: String },
+    MonitorTick { session_key: SessionKey },
+    /// Result of a `Command::CheckNeedsRebase`. Reduce decides what to do.
+    NeedsRebaseResult {
+        session_key: SessionKey,
+        needs_rebase: bool,
+        wt_path: std::path::PathBuf,
+        default_branch: String,
+    },
+    /// Result of `Command::RefreshLiveTmuxSessions`. Set of active tmux
+    /// session names.
+    TmuxSessionsRefreshed {
+        sessions: std::collections::HashSet<String>,
+    },
 
     // -- Picker (reviewer/assignee editing) --
     EditReviewers,
     EditAssignees,
     PickerConfirm,
     PickerCancel,
-    CollaboratorsLoaded {
-        repo: String,
-        kind: PickerKind,
-        session_key: String,
-        pr_number: String,
-        collaborators: Vec<String>,
-        current: Vec<String>,
-    },
+    CollaboratorsLoaded(Box<CollaboratorsLoaded>),
 
     // -- Help --
     ToggleHelp,
@@ -156,4 +160,16 @@ pub enum ShellKind {
 pub enum PickerKind {
     Reviewer,
     Assignee,
+}
+
+/// Payload for `Action::CollaboratorsLoaded`. Boxed in the enum to keep
+/// the Action size down.
+#[derive(Debug, Clone)]
+pub struct CollaboratorsLoaded {
+    pub repo: String,
+    pub kind: PickerKind,
+    pub session_key: SessionKey,
+    pub pr_number: String,
+    pub collaborators: Vec<String>,
+    pub current: Vec<String>,
 }

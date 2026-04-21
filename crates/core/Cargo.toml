@@ -5,5 +5,5 @@ edition.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive", "rc"] }
 thiserror = { workspace = true }

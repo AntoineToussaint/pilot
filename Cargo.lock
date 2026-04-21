@@ -1644,6 +1644,7 @@ dependencies = [
  "crossterm",
  "futures",
  "libc",
+ "parking_lot",
  "pilot-auth",
  "pilot-config",
  "pilot-core",
@@ -1727,22 +1728,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pilot-mcp"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "pilot-store"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "parking_lot",
  "pilot-core",
  "rusqlite",
  "serde",
@@ -1759,6 +1749,7 @@ dependencies = [
  "portable-pty",
  "ratatui",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

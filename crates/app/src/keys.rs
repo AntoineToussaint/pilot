@@ -24,12 +24,11 @@ pub fn map_key(key: KeyEvent, mode: KeyMode) -> Action {
         }
         // In terminal mode: double Ctrl-C within 1s = force quit.
         let mut last = LAST_CTRL_C.lock().unwrap();
-        if let Some(prev) = *last {
-            if prev.elapsed().as_millis() < 1000 {
+        if let Some(prev) = *last
+            && prev.elapsed().as_millis() < 1000 {
                 *last = None;
                 return Action::Quit;
             }
-        }
         *last = Some(std::time::Instant::now());
         // Single Ctrl-C goes to PTY (handled by Action::None below).
     }
@@ -45,11 +44,10 @@ pub fn map_key(key: KeyEvent, mode: KeyMode) -> Action {
     }
 
     // Number keys 1-9: switch tabs (Normal and Detail).
-    if let KeyCode::Char(c @ '1'..='9') = key.code {
-        if key.modifiers.is_empty() {
+    if let KeyCode::Char(c @ '1'..='9') = key.code
+        && key.modifiers.is_empty() {
             return Action::GoToTab((c as usize) - ('0' as usize));
         }
-    }
 
     // Look up in the keymap. First match for the current mode wins.
     for (_category, bindings) in BINDINGS {
@@ -83,41 +81,44 @@ fn matches_key(event: KeyEvent, code: KeyCode, modifiers: KeyModifiers) -> bool 
     // For NONE modifiers, accept any modifier state (so Shift doesn't block).
     if modifiers == KeyModifiers::NONE {
         // But for chars with shift (like 'M'), we need exact match.
-        if let KeyCode::Char(c) = code {
-            if c.is_uppercase() {
+        if let KeyCode::Char(c) = code
+            && c.is_uppercase() {
                 return event.modifiers.contains(KeyModifiers::SHIFT)
                     || event.code == KeyCode::Char(c);
             }
-        }
         true
     } else {
         event.modifiers.contains(modifiers)
     }
 }
 
-/// Terminal mode: almost everything → PTY.
+/// Terminal mode: almost everything → PTY, EXCEPT the escape keys below.
+///
+/// Escape keys (chosen because Claude Code doesn't use them):
+/// - `Tab` — cycle to next pane (we rely on Claude using Shift-Tab / C-i / C-o
+///   for its own Tab-like functions). This is the "get me out" key.
+/// - `Ctrl-Space`, `Ctrl-]` — also cycle panes.
 fn map_terminal(key: KeyEvent) -> Action {
-    // Tab — always cycles panes, never sent to PTY.
-    // Note: Claude Code doesn't use Tab for anything critical.
-    if key.code == KeyCode::Tab && key.modifiers.is_empty() {
-        return Action::FocusPaneNext;
-    }
-    // Backtab (Shift+Tab) also exits.
-    if key.code == KeyCode::BackTab {
-        return Action::FocusPaneNext;
-    }
     if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Action::WaitingPrefix;
     }
-    // Ctrl-] — escape terminal (may arrive as Char(']') or raw byte).
+    // Plain Tab — escape. This overrides the tab-goes-to-PTY rule because the
+    // user desperately needs a reliable "get out of terminal" key.
+    if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+        return Action::FocusPaneNext;
+    }
+    // Ctrl-Space — universal pane cycle.
+    if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Action::FocusPaneNext;
+    }
+    // Ctrl-] — legacy pane cycle (may arrive as Char(']') or raw byte).
     if key.code == KeyCode::Char(']') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Action::FocusPaneNext;
     }
-    if let KeyCode::Char(c @ '1'..='9') = key.code {
-        if key.modifiers.contains(KeyModifiers::ALT) {
+    if let KeyCode::Char(c @ '1'..='9') = key.code
+        && key.modifiers.contains(KeyModifiers::ALT) {
             return Action::GoToTab((c as usize) - ('0' as usize));
         }
-    }
     Action::None
 }
 
@@ -155,6 +156,7 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Esc => Some(vec![0x1b]),
         KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Up => Some(b"\x1b[A".to_vec()),
         KeyCode::Down => Some(b"\x1b[B".to_vec()),
         KeyCode::Right => Some(b"\x1b[C".to_vec()),

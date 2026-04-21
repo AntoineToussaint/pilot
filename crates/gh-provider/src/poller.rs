@@ -116,6 +116,10 @@ impl GhPoller {
                             created_at: chrono::Utc::now(),
                             kind: pilot_core::ActivityKind::StatusChange,
                             node_id: None,
+                            path: None,
+                            line: None,
+                            diff_hunk: None,
+                            thread_id: None,
                         },
                     }));
                     changed = true;
@@ -154,13 +158,12 @@ impl GhPoller {
 
         // Detect removed tasks.
         for key in self.prev.keys() {
-            if !current.contains_key(key) {
-                if let Some(prev_task) = self.prev.get(key) {
+            if !current.contains_key(key)
+                && let Some(prev_task) = self.prev.get(key) {
                     self.producer.send(Event::new(
                         "github", EventKind::TaskRemoved(prev_task.id.clone()),
                     ));
                 }
-            }
         }
 
         self.prev = current;

@@ -25,6 +25,7 @@ query($query: String!, $first: Int!) {
         mergeable
         reviewDecision
         autoMergeRequest { enabledAt }
+        isInMergeQueue
         author { login }
         commits(last: 1) {
           nodes {
@@ -79,14 +80,22 @@ query($query: String!, $first: Int!) {
         }
         reviewThreads(first: 50) {
           nodes {
+            id
             isResolved
             isOutdated
+            path
+            line
+            originalLine
             comments(first: 10) {
               nodes {
                 id
                 author { login }
                 body
                 createdAt
+                path
+                line
+                originalLine
+                diffHunk
               }
             }
           }
@@ -158,6 +167,8 @@ pub struct GqlPr {
     pub review_decision: Option<String>, // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED
     #[serde(rename = "autoMergeRequest")]
     pub auto_merge_request: Option<GqlAutoMerge>,
+    #[serde(default, rename = "isInMergeQueue")]
+    pub is_in_merge_queue: bool,
     pub author: Option<GqlAuthor>,
     pub labels: GqlLabels,
     pub assignees: GqlAssignees,
@@ -277,6 +288,14 @@ pub struct GqlComment {
     pub body: String,
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default, rename = "originalLine")]
+    pub original_line: Option<u32>,
+    #[serde(default, rename = "diffHunk")]
+    pub diff_hunk: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -300,10 +319,18 @@ pub struct GqlReviewThreads {
 
 #[derive(Deserialize, Debug)]
 pub struct GqlReviewThread {
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(rename = "isResolved")]
     pub is_resolved: bool,
     #[serde(rename = "isOutdated")]
     pub is_outdated: bool,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default, rename = "originalLine")]
+    pub original_line: Option<u32>,
     pub comments: GqlComments,
 }
 
@@ -381,11 +408,22 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             created_at: c.created_at,
             kind: ActivityKind::Comment,
             node_id: c.id.clone(),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
         });
     }
 
     // Review threads (with resolution + outdated status).
     for thread in &pr.review_threads.nodes {
+        // Thread-level path/line fall back to the first comment's values.
+        let thread_path = thread.path.clone()
+            .or_else(|| thread.comments.nodes.first().and_then(|c| c.path.clone()));
+        let thread_line = thread.line
+            .or(thread.original_line)
+            .or_else(|| thread.comments.nodes.first().and_then(|c| c.line.or(c.original_line)));
+
         for (i, c) in thread.comments.nodes.iter().enumerate() {
             let author = c.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "?".into());
             if c.body.trim().is_empty() { continue; }
@@ -401,12 +439,28 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
                 body = format!("↳ {body}");
             }
 
+            // Only the first comment in a thread carries the diff hunk;
+            // replies inherit file/line for display context.
+            let (path, line, diff_hunk) = if i == 0 {
+                (
+                    c.path.clone().or_else(|| thread_path.clone()),
+                    c.line.or(c.original_line).or(thread_line),
+                    c.diff_hunk.clone(),
+                )
+            } else {
+                (thread_path.clone(), thread_line, None)
+            };
+
             activities.push(Activity {
                 author,
                 body,
                 created_at: c.created_at,
                 kind: ActivityKind::Review,
                 node_id: c.id.clone(),
+                path,
+                line,
+                diff_hunk,
+                thread_id: thread.id.clone(),
             });
         }
     }
@@ -428,6 +482,10 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             created_at: r.submitted_at.unwrap_or(pr.updated_at),
             kind: ActivityKind::Review,
             node_id: None, // Reviews don't have reply-to IDs.
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
         });
     }
 
@@ -467,7 +525,8 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         assignees: pr.assignees.nodes.iter()
             .map(|a| a.login.clone())
             .collect(),
-        in_merge_queue: pr.auto_merge_request.is_some(),
+        auto_merge_enabled: pr.auto_merge_request.is_some(),
+        is_in_merge_queue: pr.is_in_merge_queue,
         has_conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
         needs_reply,
         last_commenter,
@@ -486,13 +545,11 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
         if t.is_resolved || t.is_outdated {
             continue;
         }
-        if let Some(last) = t.comments.nodes.last() {
-            if let Some(author) = &last.author {
-                if author.login != my_username {
+        if let Some(last) = t.comments.nodes.last()
+            && let Some(author) = &last.author
+                && author.login != my_username {
                     return true;
                 }
-            }
-        }
     }
 
     // 2. Latest issue comment is from someone else (and after our last response).
@@ -504,11 +561,10 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
         .filter(|c| c.author.as_ref().map(|a| a.login != my_username).unwrap_or(false))
         .map(|c| c.created_at)
         .max();
-    if let Some(other) = last_others_comment {
-        if my_last_comment.map(|m| other > m).unwrap_or(true) {
+    if let Some(other) = last_others_comment
+        && my_last_comment.map(|m| other > m).unwrap_or(true) {
             return true;
         }
-    }
 
     // 3. Latest review with body from someone else (after our last review/comment).
     let last_others_review = pr.reviews.nodes.iter()

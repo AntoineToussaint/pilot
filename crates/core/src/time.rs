@@ -1,8 +1,16 @@
 use chrono::{DateTime, Utc};
 
 /// Human-readable relative time ("2h ago", "3d ago", "just now").
+///
+/// Reads the system clock directly — intended for display-side code (UI
+/// render). Business logic should prefer `time_ago_at` with an injected `now`.
 pub fn time_ago(dt: &DateTime<Utc>) -> String {
-    let now = Utc::now();
+    time_ago_at(dt, Utc::now())
+}
+
+/// `time_ago` with an explicit reference point. Pure — used by callers that
+/// already have a `now` available (reducer, tests).
+pub fn time_ago_at(dt: &DateTime<Utc>, now: DateTime<Utc>) -> String {
     let diff = now.signed_duration_since(dt);
 
     let secs = diff.num_seconds();
@@ -44,8 +52,11 @@ pub enum Staleness {
     Abandoned { open_days: i64, idle_days: i64 },
 }
 
-pub fn staleness(created_at: &DateTime<Utc>, updated_at: &DateTime<Utc>) -> Staleness {
-    let now = Utc::now();
+pub fn staleness(
+    created_at: &DateTime<Utc>,
+    updated_at: &DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Staleness {
     let open_days = now.signed_duration_since(created_at).num_days();
     let idle_days = now.signed_duration_since(updated_at).num_days();
 

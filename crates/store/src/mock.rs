@@ -24,35 +24,40 @@ impl Default for MemoryStore {
     }
 }
 
+impl MemoryStore {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionRecord>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 impl Store for MemoryStore {
     fn get_session(&self, task_id: &TaskId) -> Result<Option<SessionRecord>, StoreError> {
         let key = task_id.to_string();
-        Ok(self.sessions.lock().unwrap().get(&key).cloned())
+        Ok(self.lock().get(&key).cloned())
     }
 
     fn save_session(&self, record: &SessionRecord) -> Result<(), StoreError> {
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(record.task_id.clone(), record.clone());
+        self.lock().insert(record.task_id.clone(), record.clone());
         Ok(())
     }
 
     fn mark_read(&self, task_id: &TaskId, seen_count: i64) -> Result<(), StoreError> {
         let key = task_id.to_string();
-        if let Some(record) = self.sessions.lock().unwrap().get_mut(&key) {
+        if let Some(record) = self.lock().get_mut(&key) {
             record.seen_count = seen_count;
         }
         Ok(())
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
-        Ok(self.sessions.lock().unwrap().values().cloned().collect())
+        Ok(self.lock().values().cloned().collect())
     }
 
     fn delete_session(&self, task_id: &TaskId) -> Result<(), StoreError> {
         let key = task_id.to_string();
-        self.sessions.lock().unwrap().remove(&key);
+        self.lock().remove(&key);
         Ok(())
     }
 }

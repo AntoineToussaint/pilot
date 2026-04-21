@@ -1,24 +1,42 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
-use pilot_tui_term::TermSession;
+use pilot_tui_term::{Terminal, TermSession};
 
 use crate::action::ShellKind;
 
+/// Pure helper: given an iterator of `(key, &dyn Terminal)`, return the
+/// keys whose underlying PTY has finished. Separated from the struct so
+/// it's unit-testable with a fake Terminal.
+pub(crate) fn finished_keys<'a, I, T>(items: I) -> Vec<String>
+where
+    I: IntoIterator<Item = (&'a String, &'a T)>,
+    T: Terminal + 'a,
+{
+    items
+        .into_iter()
+        .filter(|(_, t)| t.is_finished())
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 /// Owns all terminal-related state (TermSessions, kinds, tabs) and
 /// enforces invariants — e.g. closing a terminal cleans up ALL maps.
+///
+/// Uses `HashMap` rather than `BTreeMap` because we don't need key ordering
+/// (tab order is tracked separately in `tab_order`) and O(1) lookup is
+/// preferable on the hot key-to-terminal path.
 pub struct TerminalManager {
-    terminals: BTreeMap<String, TermSession>,
-    kinds: BTreeMap<String, ShellKind>,
+    terminals: HashMap<String, TermSession>,
+    kinds: HashMap<String, ShellKind>,
     tab_order: Vec<String>,
     active_tab: usize,
 }
 
-#[allow(dead_code)]
 impl TerminalManager {
     pub fn new() -> Self {
         Self {
-            terminals: BTreeMap::new(),
-            kinds: BTreeMap::new(),
+            terminals: HashMap::new(),
+            kinds: HashMap::new(),
             tab_order: Vec::new(),
             active_tab: 0,
         }
@@ -42,28 +60,8 @@ impl TerminalManager {
         self.kinds.get(key)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &TermSession)> {
-        self.terminals.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut TermSession)> {
-        self.terminals.iter_mut()
-    }
-
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.terminals.keys()
-    }
-
-    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut TermSession> {
-        self.terminals.values_mut()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.terminals.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.terminals.len()
     }
 
     pub fn tab_order(&self) -> &[String] {
@@ -116,32 +114,57 @@ impl TerminalManager {
 
     /// Collect and remove finished terminals. Returns their keys.
     pub fn collect_finished(&mut self) -> Vec<String> {
-        let exited: Vec<String> = self
-            .terminals
-            .iter()
-            .filter(|(_, t)| t.is_finished())
-            .map(|(k, _)| k.clone())
-            .collect();
+        let exited = finished_keys(self.terminals.iter());
         for key in &exited {
             self.close(key);
         }
         exited
     }
 
-    /// Cycle to the next tab. Returns the new active index.
-    pub fn next_tab(&mut self) -> usize {
-        if !self.tab_order.is_empty() {
-            self.active_tab = (self.active_tab + 1) % self.tab_order.len();
-        }
-        self.active_tab
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    struct FakeTerm {
+        finished: bool,
     }
 
-    /// Cycle to the previous tab. Returns the new active index.
-    pub fn prev_tab(&mut self) -> usize {
-        if !self.tab_order.is_empty() {
-            self.active_tab =
-                (self.active_tab + self.tab_order.len() - 1) % self.tab_order.len();
+    impl Terminal for FakeTerm {
+        fn is_finished(&self) -> bool {
+            self.finished
         }
-        self.active_tab
+        fn process_pending(&mut self) {}
+    }
+
+    #[test]
+    fn finished_keys_picks_out_exited() {
+        let mut map: BTreeMap<String, FakeTerm> = BTreeMap::new();
+        map.insert("alive".into(), FakeTerm { finished: false });
+        map.insert("dead".into(), FakeTerm { finished: true });
+        map.insert("alive2".into(), FakeTerm { finished: false });
+
+        let exited = finished_keys(map.iter());
+        assert_eq!(exited, vec!["dead".to_string()]);
+    }
+
+    #[test]
+    fn finished_keys_empty_when_all_alive() {
+        let mut map: BTreeMap<String, FakeTerm> = BTreeMap::new();
+        map.insert("a".into(), FakeTerm { finished: false });
+        map.insert("b".into(), FakeTerm { finished: false });
+        assert!(finished_keys(map.iter()).is_empty());
+    }
+
+    #[test]
+    fn finished_keys_all_when_all_dead() {
+        let mut map: BTreeMap<String, FakeTerm> = BTreeMap::new();
+        map.insert("a".into(), FakeTerm { finished: true });
+        map.insert("b".into(), FakeTerm { finished: true });
+        let mut got = finished_keys(map.iter());
+        got.sort();
+        assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
     }
 }

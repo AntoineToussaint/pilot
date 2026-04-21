@@ -1,8 +1,8 @@
 use chrono::Utc;
+use parking_lot::Mutex;
 use pilot_core::TaskId;
 use rusqlite::Connection;
 use std::path::Path;
-use std::sync::Mutex;
 
 use crate::traits::{SessionRecord, Store, StoreError};
 
@@ -11,6 +11,13 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// Lock the connection. `parking_lot::Mutex::lock` is infallible — no
+    /// poisoning, no `PoisonError` handling, faster under contention than
+    /// `std::sync::Mutex`.
+    fn conn(&self) -> parking_lot::MutexGuard<'_, Connection> {
+        self.conn.lock()
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path).map_err(|e| StoreError::Backend(e.to_string()))?;
         let store = Self {
@@ -38,7 +45,7 @@ impl SqliteStore {
     }
 
     fn migrate(&self) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 task_id       TEXT PRIMARY KEY,
@@ -62,7 +69,7 @@ impl SqliteStore {
 
 impl Store for SqliteStore {
     fn get_session(&self, task_id: &TaskId) -> Result<Option<SessionRecord>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let key = task_id.to_string();
         let mut stmt = conn
             .prepare(
@@ -94,7 +101,7 @@ impl Store for SqliteStore {
     }
 
     fn save_session(&self, record: &SessionRecord) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.execute(
             "INSERT INTO sessions (task_id, seen_count, last_viewed_at, created_at, session_json, metadata)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -117,7 +124,7 @@ impl Store for SqliteStore {
     }
 
     fn mark_read(&self, task_id: &TaskId, seen_count: i64) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let key = task_id.to_string();
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -129,7 +136,7 @@ impl Store for SqliteStore {
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn
             .prepare(
                 "SELECT task_id, seen_count, last_viewed_at, created_at, session_json, metadata
@@ -163,7 +170,7 @@ impl Store for SqliteStore {
     }
 
     fn delete_session(&self, task_id: &TaskId) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let key = task_id.to_string();
         conn.execute("DELETE FROM sessions WHERE task_id = ?1", [&key])
             .map_err(|e| StoreError::Backend(e.to_string()))?;

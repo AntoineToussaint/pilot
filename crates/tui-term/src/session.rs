@@ -21,6 +21,11 @@ pub enum TermError {
 /// PTY reader runs on a background thread, sends bytes via channel.
 /// Call `process_pending()` from the main thread to feed bytes into
 /// the terminal (libghostty is !Send + !Sync).
+///
+/// This type is intentionally `!Send + !Sync`: libghostty holds raw pointers
+/// that are unsound to share across threads. The `_not_send` marker makes
+/// that constraint explicit in the type, so cross-thread use is caught at
+/// compile time with a clear error instead of an auto-trait failure.
 pub struct TermSession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
@@ -36,6 +41,11 @@ pub struct TermSession {
     last_output_at: Instant,
     /// Rolling buffer of recent PTY output (last ~4KB) for callers to inspect.
     recent_output: Vec<u8>,
+    /// True when the viewport has been scrolled up into scrollback history.
+    /// Used to display the "[SCROLLBACK]" indicator.
+    scrolled_back: bool,
+    /// Explicit `!Send + !Sync` marker — see struct doc.
+    _not_send: std::marker::PhantomData<*mut ()>,
 }
 
 impl TermSession {
@@ -85,21 +95,34 @@ impl TermSession {
             .try_clone_reader()
             .map_err(|e| TermError::PtyOpen(e.into()))?;
 
-        let reader_thread = std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if pty_tx.send(buf[..n].to_vec()).is_err() {
+        let reader_thread = std::thread::Builder::new()
+            .name("pty-reader".into())
+            .spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => {
+                            tracing::debug!("PTY reader: EOF");
+                            break;
+                        }
+                        Ok(n) => {
+                            if pty_tx.send(buf[..n].to_vec()).is_err() {
+                                tracing::debug!("PTY reader: receiver dropped");
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            tracing::warn!("PTY reader error: {e}");
                             break;
                         }
                     }
-                    Err(_) => break,
                 }
-            }
-            reader_finished.store(true, std::sync::atomic::Ordering::Relaxed);
-        });
+                // Release so `is_finished()` using Acquire sees everything the
+                // reader did before setting the flag.
+                reader_finished.store(true, std::sync::atomic::Ordering::Release);
+            })
+            .map_err(|e| TermError::Spawn(Box::new(e)))?;
 
         let terminal = libghostty_vt::Terminal::new(libghostty_vt::TerminalOptions {
             cols: size.cols,
@@ -128,6 +151,8 @@ impl TermSession {
             cell_iter,
             last_output_at: Instant::now(),
             recent_output: Vec::with_capacity(4096),
+            scrolled_back: false,
+            _not_send: std::marker::PhantomData,
         })
     }
 
@@ -182,7 +207,9 @@ impl TermSession {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.finished.load(std::sync::atomic::Ordering::Relaxed)
+        // Acquire pairs with the reader thread's Release on exit — guarantees
+        // we see everything the reader did before it set the flag.
+        self.finished.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn size(&self) -> PtySize {
@@ -206,19 +233,32 @@ impl TermSession {
         )
     }
 
-    pub fn scroll_up(&mut self, _lines: usize) {
-        // TODO: libghostty scrollback
+    /// Scroll the viewport up by N lines (into the scrollback history).
+    pub fn scroll_up(&mut self, lines: usize) {
+        if lines == 0 { return; }
+        self.terminal
+            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(-(lines as isize)));
+        self.scrolled_back = true;
     }
 
-    pub fn scroll_down(&mut self, _lines: usize) {
-        // TODO
+    /// Scroll the viewport down by N lines (back toward the live area).
+    pub fn scroll_down(&mut self, lines: usize) {
+        if lines == 0 { return; }
+        self.terminal
+            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines as isize));
+        // If we scrolled all the way back to the bottom, clear the flag.
+        if let Ok(rows) = self.terminal.scrollback_rows()
+            && rows == 0 { self.scrolled_back = false; }
     }
 
+    /// Jump back to the live (bottom) area.
     pub fn scroll_reset(&mut self) {
-        // TODO
+        self.terminal
+            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Bottom);
+        self.scrolled_back = false;
     }
 
     pub fn is_scrolled(&self) -> bool {
-        false
+        self.scrolled_back
     }
 }

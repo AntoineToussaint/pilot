@@ -91,15 +91,14 @@ impl PaneManager {
     /// Resolve the tree into a flat list of (id, content, rect) for rendering.
     pub fn resolve(&self, area: Rect) -> Vec<ResolvedPane> {
         // If fullscreened, only render that one pane.
-        if let Some(fs_id) = self.fullscreen {
-            if let Some(content) = self.find_content(fs_id) {
+        if let Some(fs_id) = self.fullscreen
+            && let Some(content) = self.find_content(fs_id) {
                 return vec![ResolvedPane {
                     id: fs_id,
                     content,
                     area,
                 }];
             }
-        }
         let mut result = Vec::new();
         resolve_node(&self.root, area, &mut result);
         result
@@ -158,6 +157,69 @@ impl PaneManager {
     pub fn close_focused(&mut self) -> bool {
         let id = self.focused;
         self.close(id)
+    }
+
+    /// Focus a specific pane by ID. No-op if the ID doesn't exist.
+    pub fn focus(&mut self, pane_id: PaneId) {
+        let leaves = collect_leaf_ids(&self.root);
+        if leaves.contains(&pane_id) {
+            self.focused = pane_id;
+        }
+    }
+
+    /// Replace any `Terminal(key)` leaves where `key` is NOT in `live_keys`
+    /// with `Empty`. Call after closing terminals so the tree doesn't keep
+    /// pointing at dead sessions — stale leaves cause phantom "TERM" mode
+    /// and an empty pane the user can't escape from.
+    pub fn prune_dead_terminals(&mut self, live_keys: &std::collections::BTreeSet<String>) {
+        prune_node(&mut self.root, live_keys);
+    }
+
+    /// Enforce the pane <-> terminal invariant:
+    ///   1. Every `Terminal(k)` leaf must have `k ∈ live_keys`.
+    ///   2. If `active_key` is Some and no leaf shows it, either retarget an
+    ///      existing Terminal leaf to `active_key` or split the detail pane
+    ///      to create one. Result: the active terminal is always visible.
+    ///
+    /// Pure in the sense that it only depends on pane tree + the two input
+    /// sets; no side channels. Unit-tested.
+    pub fn enforce_terminal_invariant(
+        &mut self,
+        live_keys: &std::collections::BTreeSet<String>,
+        active_key: Option<&str>,
+    ) {
+        // 1. Prune dead leaves.
+        prune_node(&mut self.root, live_keys);
+
+        // 2. Make sure the active key is visible.
+        let Some(key) = active_key else { return };
+        if !live_keys.contains(key) {
+            return; // active_key isn't actually live; nothing to do.
+        }
+        let already_visible = find_pane_node(&self.root, &|c| {
+            matches!(c, PaneContent::Terminal(k) if k == key)
+        })
+        .is_some();
+        if already_visible {
+            return;
+        }
+
+        // An existing Terminal leaf (for some other session) → retarget it.
+        if let Some(term_id) =
+            find_pane_node(&self.root, &|c| matches!(c, PaneContent::Terminal(_)))
+        {
+            set_content_node(&mut self.root, term_id, PaneContent::Terminal(key.to_string()));
+            self.focused = term_id;
+            return;
+        }
+
+        // No Terminal leaf exists at all → split the detail pane.
+        if let Some(detail_id) =
+            find_pane_node(&self.root, &|c| matches!(c, PaneContent::Detail(_)))
+        {
+            self.focused = detail_id;
+            self.split_vertical(PaneContent::Terminal(key.to_string()));
+        }
     }
 
     /// Move focus to the next pane (cycles through all leaves).
@@ -331,7 +393,7 @@ fn replace_node_inner<F: FnOnce(PaneNode) -> PaneNode>(
                         content: PaneContent::Empty,
                     },
                 );
-                *left = Box::new(f(old));
+                **left = f(old);
                 return Some(());
             }
             if matches!(**right, PaneNode::Leaf { id, .. } if id == target_id) {
@@ -343,7 +405,7 @@ fn replace_node_inner<F: FnOnce(PaneNode) -> PaneNode>(
                         content: PaneContent::Empty,
                     },
                 );
-                *right = Box::new(f(old));
+                **right = f(old);
                 return Some(());
             }
             replace_node_inner(left.as_mut(), target_id, f)
@@ -359,7 +421,7 @@ fn replace_node_inner<F: FnOnce(PaneNode) -> PaneNode>(
                         content: PaneContent::Empty,
                     },
                 );
-                *top = Box::new(f(old));
+                **top = f(old);
                 return Some(());
             }
             if matches!(**bottom, PaneNode::Leaf { id, .. } if id == target_id) {
@@ -371,7 +433,7 @@ fn replace_node_inner<F: FnOnce(PaneNode) -> PaneNode>(
                         content: PaneContent::Empty,
                     },
                 );
-                *bottom = Box::new(f(old));
+                **bottom = f(old);
                 return Some(());
             }
             replace_node_inner(top.as_mut(), target_id, f)
@@ -505,6 +567,25 @@ fn set_content_node(node: &mut PaneNode, target_id: PaneId, new_content: PaneCon
     }
 }
 
+fn prune_node(node: &mut PaneNode, live: &std::collections::BTreeSet<String>) {
+    match node {
+        PaneNode::Leaf { content, .. } => {
+            if let PaneContent::Terminal(key) = content
+                && !live.contains(key) {
+                    *content = PaneContent::Empty;
+                }
+        }
+        PaneNode::HSplit { left, right, .. } => {
+            prune_node(left, live);
+            prune_node(right, live);
+        }
+        PaneNode::VSplit { top, bottom, .. } => {
+            prune_node(top, live);
+            prune_node(bottom, live);
+        }
+    }
+}
+
 fn find_pane_node(node: &PaneNode, predicate: &impl Fn(&PaneContent) -> bool) -> Option<PaneId> {
     match node {
         PaneNode::Leaf { id, content } if predicate(content) => Some(*id),
@@ -515,5 +596,173 @@ fn find_pane_node(node: &PaneNode, predicate: &impl Fn(&PaneContent) -> bool) ->
             find_pane_node(top, predicate).or_else(|| find_pane_node(bottom, predicate))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_layout_has_inbox_and_detail() {
+        let p = PaneManager::default_layout();
+        assert!(p.find_pane(|c| matches!(c, PaneContent::Inbox)).is_some());
+        assert!(p.find_pane(|c| matches!(c, PaneContent::Detail(_))).is_some());
+    }
+
+    #[test]
+    fn find_pane_then_focus() {
+        let mut p = PaneManager::default_layout();
+        let detail_id = p.find_pane(|c| matches!(c, PaneContent::Detail(_))).unwrap();
+        p.focus(detail_id);
+        assert!(matches!(p.focused_content(), Some(PaneContent::Detail(_))));
+    }
+
+    #[test]
+    fn focus_nonexistent_is_noop() {
+        let mut p = PaneManager::default_layout();
+        let before = p.focused;
+        p.focus(9999);
+        assert_eq!(p.focused, before);
+    }
+
+    #[test]
+    fn split_vertical_adds_terminal_pane() {
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("key1".into()));
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "key1"))
+            .is_some());
+        // The new pane becomes focused.
+        assert!(matches!(p.focused_content(), Some(PaneContent::Terminal(_))));
+    }
+
+    #[test]
+    fn focus_next_cycles_through_leaves() {
+        let mut p = PaneManager::default_layout();
+        let first = p.focused;
+        p.focus_next();
+        assert_ne!(p.focused, first);
+        p.focus_next();
+        assert_eq!(p.focused, first);
+    }
+
+    #[test]
+    fn prune_replaces_dead_terminal_with_empty() {
+        // Regression: if a pane points at a closed terminal key and nothing
+        // rewrites it, determine_mode sees Terminal content → stays stuck in
+        // TERM mode even though no terminal is rendered. prune_dead_terminals
+        // is the fix.
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("dead-key".into()));
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "dead-key"))
+            .is_some());
+
+        let live = std::collections::BTreeSet::new(); // no terminals alive
+        p.prune_dead_terminals(&live);
+
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+            .is_none());
+        assert!(p.find_pane(|c| matches!(c, PaneContent::Empty)).is_some());
+    }
+
+    fn keys(ks: &[&str]) -> std::collections::BTreeSet<String> {
+        ks.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn enforce_invariant_creates_pane_when_terminal_active_but_not_shown() {
+        // REGRESSION: user pressed `f` → prompt was sent to Claude → but
+        // the terminal map had the terminal and no Terminal pane existed,
+        // so the user saw DETAIL mode with no terminal visible.
+        let mut p = PaneManager::default_layout();
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+            .is_none());
+
+        p.enforce_terminal_invariant(&keys(&["sess-a"]), Some("sess-a"));
+
+        let term_id = p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "sess-a"))
+            .expect("Terminal pane should have been created");
+        // It must be the focused pane.
+        assert_eq!(p.focused, term_id);
+    }
+
+    #[test]
+    fn enforce_invariant_retargets_existing_pane_for_different_session() {
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("old".into()));
+        // Switch active session to "new".
+        p.enforce_terminal_invariant(&keys(&["new"]), Some("new"));
+        // "old" was pruned (not in live_keys), "new" took over.
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "new"))
+            .is_some());
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "old"))
+            .is_none());
+    }
+
+    #[test]
+    fn enforce_invariant_noop_when_active_already_visible() {
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("a".into()));
+        let before_focused = p.focused;
+        let before_tree = format!("{:?}", p.root);
+        p.enforce_terminal_invariant(&keys(&["a"]), Some("a"));
+        // Tree unchanged, focus unchanged.
+        assert_eq!(format!("{:?}", p.root), before_tree);
+        assert_eq!(p.focused, before_focused);
+    }
+
+    #[test]
+    fn enforce_invariant_prunes_dead_without_active_key() {
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("zombie".into()));
+        p.enforce_terminal_invariant(&keys(&[]), None);
+        // Dead pane replaced with Empty, no new pane created.
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+            .is_none());
+    }
+
+    #[test]
+    fn enforce_invariant_ignores_stale_active_key() {
+        // If active_key points at a session that isn't actually alive,
+        // don't create a pane for it — that would be a lie.
+        let mut p = PaneManager::default_layout();
+        p.enforce_terminal_invariant(&keys(&[]), Some("stale"));
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+            .is_none());
+    }
+
+    #[test]
+    fn prune_keeps_live_terminals() {
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("alive".into()));
+        let mut live = std::collections::BTreeSet::new();
+        live.insert("alive".to_string());
+        p.prune_dead_terminals(&live);
+        assert!(p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "alive"))
+            .is_some());
+    }
+
+    #[test]
+    fn close_removes_pane_and_refocuses() {
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("k".into()));
+        let term_id = p
+            .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+            .unwrap();
+        assert_eq!(p.focused, term_id);
+        assert!(p.close(term_id));
+        assert!(p.find_pane(|c| matches!(c, PaneContent::Terminal(_))).is_none());
+        // Focus must land somewhere valid.
+        assert!(p.focused_content().is_some());
     }
 }

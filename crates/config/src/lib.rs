@@ -18,6 +18,7 @@ pub enum ConfigError {
 /// Top-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub providers: ProvidersConfig,
     pub display: DisplayConfig,
@@ -26,32 +27,15 @@ pub struct Config {
     pub shell: ShellSection,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            providers: ProvidersConfig::default(),
-            display: DisplayConfig::default(),
-            slack: SlackConfig::default(),
-            agent: AgentSection::default(),
-            shell: ShellSection::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AgentSection {
     #[serde(flatten)]
     pub config: pilot_core::AgentConfig,
 }
 
-impl Default for AgentSection {
-    fn default() -> Self {
-        Self {
-            config: pilot_core::AgentConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -108,17 +92,11 @@ impl Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ProvidersConfig {
     pub github: GithubConfig,
 }
 
-impl Default for ProvidersConfig {
-    fn default() -> Self {
-        Self {
-            github: GithubConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -169,11 +147,7 @@ impl Filter {
     pub fn to_search_qualifier(&self) -> Option<String> {
         if let Some(org) = &self.org {
             Some(format!("org:{org}"))
-        } else if let Some(repo) = &self.repo {
-            Some(format!("repo:{repo}"))
-        } else {
-            None
-        }
+        } else { self.repo.as_ref().map(|repo| format!("repo:{repo}")) }
     }
 
     /// If this is a "watch" filter, return the repo to watch.
@@ -221,16 +195,12 @@ pub enum SortMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct SlackConfig {
     /// Slack incoming webhook URL for sending messages.
     pub webhook_url: Option<String>,
 }
 
-impl Default for SlackConfig {
-    fn default() -> Self {
-        Self { webhook_url: None }
-    }
-}
 
 // ─── Serde helper for Duration as seconds ──────────────────────────────────
 

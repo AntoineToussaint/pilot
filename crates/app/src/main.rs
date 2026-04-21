@@ -2,18 +2,19 @@ use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 mod action;
-mod actions;
 mod app;
 mod agent_state;
+mod command;
+mod reduce;
 pub mod input;
 pub mod keymap;
 mod keys;
-mod monitor;
 mod nav;
 mod notify;
 pub mod pane;
 mod picker;
 mod session_manager;
+mod state;
 mod terminal_manager;
 mod ui;
 
@@ -25,8 +26,14 @@ async fn main() -> Result<()> {
     {
         use std::os::unix::io::AsRawFd;
         if let Ok(devnull) = std::fs::File::open("/dev/null") {
-            unsafe {
-                libc::dup2(devnull.as_raw_fd(), 2);
+            // SAFETY: dup2 duplicates devnull's fd into slot STDERR_FILENO
+            // *before* we return. It only needs the source fd alive for the
+            // duration of the call — `devnull` is dropped right after, which
+            // closes the source fd but leaves the duplicate (stderr) open.
+            let ret = unsafe { libc::dup2(devnull.as_raw_fd(), libc::STDERR_FILENO) };
+            if ret == -1 {
+                // Can't report to stderr (we were trying to redirect it) — log it
+                // after the subscriber is set up; for now, just eat it silently.
             }
         }
     }

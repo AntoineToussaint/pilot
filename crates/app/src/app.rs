@@ -8,7 +8,6 @@ use pilot_config::Config;
 use pilot_core::{Session, SessionState};
 use pilot_events::{event_bus, EventProducer};
 use pilot_gh::{GhClient, GhPoller};
-use pilot_git_ops::WorktreeManager;
 use pilot_store::{SqliteStore, Store};
 use pilot_tui_term::{PtySize, TermSession};
 use std::sync::Arc;
@@ -17,113 +16,39 @@ use tokio::sync::mpsc;
 use crate::action::{Action, ShellKind};
 use crate::input::{InputMode, TextInputKind};
 use crate::keys;
-use crate::monitor::{check_needs_rebase, handle_monitor_tick, run_rebase};
 use crate::nav::{
-    apply_search_filter, nav_items, resort_sessions, selected_nav_item,
-    selected_session_from_nav, handle_sidebar_click, NavItem,
+    resort_sessions, selected_session_from_nav, handle_sidebar_click,
 };
-use crate::pane::{Direction, PaneContent, PaneManager};
-use crate::picker::{build_picker_items, fetch_collaborators, PickerState};
+use crate::pane::PaneContent;
 use crate::session_manager::SessionManager;
 use crate::terminal_manager::TerminalManager;
 use crate::ui;
 
-/// Tracks an active mouse drag for pane resizing.
-/// Tracks mouse drag for sidebar resize. Fields unused directly but
-/// presence of Some(DragState) indicates an active drag.
-#[derive(Debug, Clone)]
-pub struct DragState;
-
 /// Top-level application state.
+/// The application. Split into:
+/// - `state: State` — all pure model data (testable without IO, see `state.rs`).
+/// - IO / shell fields below — PTYs, store, channels, shared Arc handles.
+///
+/// The intent: business logic reads/writes `app.state`; only the shell touches
+/// the IO fields. Long-term, `handle_action` should become `let cmds =
+/// reduce(&mut self.state, action); for c in cmds { self.execute(c); }`.
 pub struct App {
-    // ── Sessions ──
-    pub sessions: SessionManager,
+    /// Pure model. Everything the reducer needs — and nothing else.
+    pub state: crate::state::State,
+
+    // ── IO / shell resources ──
+    /// Live PTY sessions. Non-Send, holds reader threads. Shell-only.
     pub terminals: TerminalManager,
-    pub selected: usize,
-
-    // ── Panes ──
-    pub panes: PaneManager,
-
-    // ── Input ──
-    /// The single source of truth for what mode the app is in.
-    /// Determines which handler processes key events.
-    pub input_mode: InputMode,
-
-    // ── Search/filter ──
-    pub search_active: bool,
-    pub search_query: String,
-    pub filtered_keys: Option<Vec<String>>,
-    /// Time filter: only show sessions with activity within this many days.
-    /// 0 = show all.
-    pub activity_days_filter: u32,
-
-    // ── Detail pane ──
-    /// Which activity items are selected (checked) in the detail pane.
-    pub selected_comments: std::collections::HashSet<usize>,
-    /// Cursor position within the detail pane's comment list.
-    pub detail_cursor: usize,
-    /// When the current session started being viewed (for auto-mark-read).
-    pub viewing_since: Option<(String, std::time::Instant)>,
-
-    // ── UI state ──
-    pub notifications: Vec<String>,
-    pub detail_scroll: u16,
-    pub last_term_area: (u16, u16),
-    pub status: String,
-    pub should_quit: bool,
-    /// Whether we're waiting for quit confirmation (double-q).
-    pub quit_pending: bool,
-    /// Session key awaiting merge confirmation (double-M).
-    pub merge_pending: Option<String>,
-    /// Whether the first poll has completed.
-    pub loaded: bool,
-    pub purged_stale: bool,
-    pub first_poll_keys: std::collections::HashSet<String>,
-    /// Tick counter for spinner animation.
-    pub tick_count: u64,
-    /// Collapsed repos in the sidebar tree.
-    pub collapsed_repos: std::collections::HashSet<String>,
-    /// Collapsed sessions (don't show messages).
-    pub collapsed_sessions: std::collections::HashSet<String>,
-    /// Mouse drag state for resize.
-    pub drag_resize: Option<DragState>,
-    /// Pending MCP action awaiting user confirmation.
-    pub pending_mcp: Option<PendingMcpAction>,
-    /// Active picker overlay (reviewer/assignee editing).
-    pub picker: Option<PickerState>,
-    /// Cached collaborators per repo.
-    pub collaborators_cache: std::collections::HashMap<String, Vec<String>>,
-    /// Debounce timestamp for fix/reply Claude sends.
-    pub last_claude_send: Option<std::time::Instant>,
-    /// Whether the help overlay is shown.
-    pub show_help: bool,
-    /// Sidebar width as percentage (adjustable by mouse drag).
-    pub sidebar_pct: u16,
-
-    // ── Infrastructure ──
+    /// Persistent store (SQLite).
     pub store: Arc<dyn Store>,
+    /// Event bus producer — providers push events, app pulls them.
     pub event_tx: EventProducer,
-    pub config: Config,
-    pub username: String,
-    /// Session keys with active monitors — shared with MCP socket for auto-approve.
-    pub monitored_sessions: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Session keys currently in monitor mode. Shared so helper tasks
+    /// can check membership without going through the action loop.
+    /// `state.monitored_sessions` is the canonical mirror.
+    pub monitored_sessions: crate::state::SharedMonitoredSessions,
     /// Wake handle to trigger an immediate GitHub poll.
     pub poller_wake: Option<Arc<tokio::sync::Notify>>,
-    /// Sessions that have already fired a macOS notification for "asking".
-    pub notified_asking: std::collections::HashSet<String>,
-    /// Pending prompts to inject when Claude becomes idle.
-    pub pending_prompts: std::collections::HashMap<String, String>,
-    /// Detected Claude state per terminal session.
-    pub agent_states: std::collections::HashMap<String, crate::agent_state::AgentState>,
-    /// Cached default branch per repo (e.g. "main" or "master").
-    pub default_branch_cache: std::collections::HashMap<String, String>,
-    /// Text input for new session description overlay.
-    pub new_session_input: Option<String>,
-    /// Quick reply input: (session_key, text).
-    /// (session_key, text, comment_index) for quick reply.
-    pub quick_reply_input: Option<(String, String, usize)>,
-    /// Whether GitHub credentials resolved successfully.
-    pub credentials_ok: bool,
 }
 
 impl App {
@@ -142,52 +67,20 @@ impl App {
             tracing::info!("Restored {} cached sessions from SQLite", sessions.len());
         }
 
+        let mut state = crate::state::State::with_config(config, String::new());
+        state.sessions = sessions;
+        state.loaded = loaded;
+        state.sidebar_pct = 50;
+        state.status = "Loading…".into();
+        state.credentials_ok = true;
+
         Ok(Self {
-            sessions,
+            state,
             terminals: TerminalManager::new(),
-            selected: 0,
-            panes: PaneManager::default_layout(),
-            input_mode: InputMode::Normal,
-            search_active: false,
-            search_query: String::new(),
-            filtered_keys: None,
-            activity_days_filter: config.display.activity_days,
-            selected_comments: std::collections::HashSet::new(),
-            detail_cursor: 0,
-            viewing_since: None,
-            notifications: Vec::new(),
             store,
             event_tx,
-            detail_scroll: 0,
-            last_term_area: (80, 24),
-            status: "Loading…".into(),
-            should_quit: false,
-            quit_pending: false,
-            merge_pending: None,
-            loaded,
-            purged_stale: false,
-            first_poll_keys: std::collections::HashSet::new(),
-            tick_count: 0,
-            collapsed_repos: std::collections::HashSet::new(),
-            collapsed_sessions: std::collections::HashSet::new(),
-            drag_resize: None,
-            pending_mcp: None,
-            picker: None,
-            collaborators_cache: std::collections::HashMap::new(),
-            last_claude_send: None,
-            show_help: false,
-            sidebar_pct: 50,
-            config,
-            username: String::new(),
-            monitored_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            monitored_sessions: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
             poller_wake: None,
-            notified_asking: std::collections::HashSet::new(),
-            pending_prompts: std::collections::HashMap::new(),
-            agent_states: std::collections::HashMap::new(),
-            default_branch_cache: std::collections::HashMap::new(),
-            new_session_input: None,
-            quick_reply_input: None,
-            credentials_ok: true,
         })
     }
 
@@ -196,35 +89,554 @@ impl App {
         selected_session_from_nav(self)
     }
 
-    pub fn active_tab_key(&self) -> Option<&String> {
-        self.terminals.active_tab_key()
+    /// The session key of the terminal shown in the *focused* pane, if any.
+    /// This is the destination for keystrokes, paste, and mouse scroll when
+    /// the user is interacting with the terminal — NOT `active_tab_key`,
+    /// which tracks the tab-bar's selected tab and can diverge from the
+    /// visible pane after pane-focus changes.
+    pub fn focused_terminal_key(&self) -> Option<String> {
+        match self.state.panes.focused_content() {
+            Some(crate::pane::PaneContent::Terminal(k)) => Some(k),
+            _ => None,
+        }
     }
 
     /// Get the currently selected session (if cursor is on one).
     #[allow(dead_code)]
     pub fn selected_session(&self) -> Option<&Session> {
-        self.selected_session_key().and_then(|k| self.sessions.get(&k))
+        self.selected_session_key().and_then(|k| self.state.sessions.get(&k))
     }
 
-    /// Close a terminal and clean up all associated state.
+    /// Close a terminal and clean up ALL associated state — including the
+    /// pane tree. Without pane cleanup, leaves would keep pointing at dead
+    /// terminal keys, causing phantom "TERM" mode and empty panes the user
+    /// can't escape.
     pub fn close_terminal(&mut self, key: &str) {
         self.terminals.close(key);
-        self.agent_states.remove(key);
-        self.pending_prompts.remove(key);
-        self.notified_asking.remove(key);
+        self.state.agent_states.remove(key);
+        self.state.pending_prompts.remove(key);
+        self.state.notified_asking.remove(key);
+        // Sweep any pane leaves still pointing at dead terminal keys.
+        let live: std::collections::BTreeSet<String> =
+            self.terminals.keys().cloned().collect();
+        self.state.panes.prune_dead_terminals(&live);
+        // Recompute input_mode from the (now-pruned) pane tree.
+        apply_determined_mode(self);
+    }
+
+    /// Refresh `state.terminal_index` — the pure projection of the live
+    /// `TerminalManager`. Called after any terminal mutation so reduce sees
+    /// up-to-date tab info.
+    pub fn refresh_terminal_index(&mut self) {
+        self.state.terminal_index.tab_order = self.terminals.tab_order().to_vec();
+        self.state.terminal_index.active_tab = if self.terminals.tab_order().is_empty() {
+            None
+        } else {
+            Some(self.terminals.active_tab())
+        };
+        self.state.terminal_index.keys = self.terminals.keys().cloned().collect();
+    }
+
+    /// Execute a `Command` emitted by `reduce`. This is the ONLY place in
+    /// the app where side effects happen (PTY spawns, store writes, shell
+    /// commands, HTTP, notifications). `reduce` stays pure.
+    pub fn execute(
+        &mut self,
+        cmd: crate::command::Command,
+        action_tx: &mpsc::UnboundedSender<Action>,
+    ) {
+        use crate::command::Command as C;
+        match cmd {
+            C::SetStatus(msg) => self.state.status = msg,
+            C::DispatchAction(action) => {
+                let _ = action_tx.send(action);
+            }
+            C::WakePoller => {
+                if let Some(notify) = &self.poller_wake {
+                    notify.notify_one();
+                }
+            }
+
+            // ── Store ──
+            C::StoreSaveSession { session_key } => {
+                if let Some(session) = self.state.sessions.get(session_key.as_str()) {
+                    let json = serde_json::to_string(session).ok();
+                    let record = pilot_store::SessionRecord {
+                        task_id: session_key.to_string(),
+                        seen_count: session.seen_count as i64,
+                        last_viewed_at: session.last_viewed_at,
+                        created_at: session.created_at,
+                        session_json: json,
+                        metadata: None,
+                    };
+                    if let Err(e) = self.store.save_session(&record) {
+                        tracing::error!("save_session {session_key}: {e}");
+                    }
+                }
+            }
+            C::StoreDeleteSession { task_id } => {
+                if let Err(e) = self.store.delete_session(&task_id) {
+                    tracing::error!("delete_session: {e}");
+                }
+            }
+            C::StoreDeleteStaleSessions { task_ids } => {
+                for id in task_ids {
+                    if let Err(e) = self.store.delete_session(&id) {
+                        tracing::error!("delete stale: {e}");
+                    }
+                }
+            }
+            C::StoreMarkRead { task_id, seen_count } => {
+                if let Err(e) = self.store.mark_read(&task_id, seen_count) {
+                    tracing::warn!("mark_read: {e}");
+                }
+            }
+
+            // ── External services ──
+            C::OpenUrl { url } => {
+                crate::notify::open_url(&url);
+            }
+            C::Notify { title, body } => {
+                tokio::spawn(async move {
+                    crate::notify::send_notification(&title, &body).await;
+                });
+            }
+            C::HttpPostJson { url, body } => {
+                tokio::spawn(async move {
+                    let out = tokio::process::Command::new("curl")
+                        .args([
+                            "-s", "-X", "POST",
+                            "-H", "Content-Type: application/json",
+                            "-d", &serde_json::to_string(&body).unwrap_or_default(),
+                            &url,
+                        ])
+                        .output()
+                        .await;
+                    if let Err(e) = out {
+                        tracing::error!("http post: {e}");
+                    }
+                });
+            }
+
+            // ── gh CLI ──
+            C::RunGhMerge { repo, pr_number, session_key } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let out = tokio::process::Command::new("gh")
+                        .args(["pr", "merge", &pr_number, "--squash", "--repo", &repo])
+                        .output()
+                        .await;
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let _ = tx.send(Action::MergeCompleted { session_key });
+                            let _ = tx.send(Action::StatusMessage(format!("Merged {repo}#{pr_number}")));
+                        }
+                        Ok(o) => {
+                            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                            let _ = tx.send(Action::StatusMessage(format!("Merge failed: {err}")));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::StatusMessage(format!("Merge error: {e}")));
+                        }
+                    }
+                });
+            }
+            C::RunGhApprove { repo, pr_number } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let out = tokio::process::Command::new("gh")
+                        .args(["pr", "review", &pr_number, "--approve", "--repo", &repo])
+                        .output()
+                        .await;
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let _ = tx.send(Action::StatusMessage(format!("Approved {repo}#{pr_number}")));
+                        }
+                        Ok(o) => {
+                            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                            let _ = tx.send(Action::StatusMessage(format!("Approve failed: {err}")));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::StatusMessage(format!("Approve error: {e}")));
+                        }
+                    }
+                });
+            }
+            C::RunGhComment { repo, pr_number, body, reply_to_node_id } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let mut args = vec![
+                        "pr".to_string(), "comment".to_string(),
+                        pr_number, "--body".to_string(), body,
+                        "--repo".to_string(), repo,
+                    ];
+                    if let Some(id) = reply_to_node_id {
+                        args.push("--reply-to".into());
+                        args.push(id);
+                    }
+                    let out = tokio::process::Command::new("gh").args(&args).output().await;
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let _ = tx.send(Action::StatusMessage("Reply posted".into()));
+                        }
+                        Ok(o) => {
+                            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                            let _ = tx.send(Action::StatusMessage(format!("Error: {err}")));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::StatusMessage(format!("Error: {e}")));
+                        }
+                    }
+                });
+            }
+            C::RunGhEditCollaborators { repo, pr_number, kind, added, removed } => {
+                use crate::action::PickerKind;
+                let (add_flag, remove_flag) = match kind {
+                    PickerKind::Reviewer => ("--add-reviewer", "--remove-reviewer"),
+                    PickerKind::Assignee => ("--add-assignee", "--remove-assignee"),
+                };
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let mut args = vec![
+                        "pr".to_string(), "edit".to_string(), pr_number,
+                        "--repo".to_string(), repo,
+                    ];
+                    for user in &added { args.push(add_flag.into()); args.push(user.clone()); }
+                    for user in &removed { args.push(remove_flag.into()); args.push(user.clone()); }
+                    let out = tokio::process::Command::new("gh").args(&args).output().await;
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let _ = tx.send(Action::StatusMessage("Collaborators updated".into()));
+                        }
+                        Ok(o) => {
+                            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                            let _ = tx.send(Action::StatusMessage(format!("Error: {err}")));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::StatusMessage(format!("Error: {e}")));
+                        }
+                    }
+                });
+            }
+            C::FetchCollaborators { repo, kind, session_key, pr_number } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    // Fetch repo collaborators via gh CLI.
+                    let out = tokio::process::Command::new("gh")
+                        .args(["api", &format!("repos/{repo}/collaborators"), "--jq", ".[].login"])
+                        .output()
+                        .await;
+                    let collaborators: Vec<String> = match out {
+                        Ok(o) if o.status.success() => {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        }
+                        _ => vec![],
+                    };
+                    let _ = tx.send(Action::CollaboratorsLoaded(Box::new(
+                        crate::action::CollaboratorsLoaded {
+                            repo,
+                            kind,
+                            session_key,
+                            pr_number,
+                            collaborators,
+                            current: vec![], // populated by reducer
+                        },
+                    )));
+                });
+            }
+            C::CheckoutWorktree { owner, repo, branch, session_key, then } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let worktrees = pilot_git_ops::WorktreeManager::default_base();
+                    match worktrees.checkout(&owner, &repo, &branch).await {
+                        Ok(wt) => {
+                            let _ = tx.send(Action::WorktreeReady { session_key, path: wt.path });
+                            if let Some(a) = then { let _ = tx.send(*a); }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::StatusMessage(format!("Worktree checkout failed: {e}")));
+                        }
+                    }
+                });
+            }
+            C::FetchDefaultBranch { owner, repo } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let out = tokio::process::Command::new("gh")
+                        .args([
+                            "api", &format!("repos/{owner}/{repo}"),
+                            "--jq", ".default_branch",
+                        ])
+                        .output()
+                        .await;
+                    if let Ok(o) = out
+                        && o.status.success() {
+                            let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if !b.is_empty() {
+                                let _ = tx.send(Action::CacheDefaultBranch {
+                                    repo: format!("{owner}/{repo}"),
+                                    branch: b,
+                                });
+                            }
+                        }
+                });
+            }
+
+            // ── Terminal ──
+            C::WriteToTerminal { session_key, bytes } => {
+                if let Some(term) = self.terminals.get_mut(&session_key)
+                    && let Err(e) = term.write(&bytes) {
+                        tracing::error!("terminal write: {e}");
+                    }
+            }
+            C::ResizeTerminal { session_key, cols, rows } => {
+                if let Some(term) = self.terminals.get_mut(&session_key) {
+                    let _ = term.resize(pilot_tui_term::PtySize {
+                        cols, rows, pixel_width: 0, pixel_height: 0,
+                    });
+                }
+            }
+            C::ScrollTerminal { session_key, delta } => {
+                if let Some(term) = self.terminals.get_mut(&session_key) {
+                    match delta.cmp(&0) {
+                        std::cmp::Ordering::Less => term.scroll_up((-delta) as usize),
+                        std::cmp::Ordering::Greater => term.scroll_down(delta as usize),
+                        std::cmp::Ordering::Equal => term.scroll_reset(),
+                    }
+                }
+            }
+            C::CloseTerminal { session_key } => {
+                self.close_terminal(&session_key);
+            }
+            C::SetActiveTab { idx } => {
+                self.terminals.set_active_tab(idx);
+            }
+            C::SpawnTerminal { session_key, cwd, kind } => {
+                spawn_terminal(self, &session_key, cwd, kind);
+            }
+
+            // ── Monitor IO ──
+            C::CheckNeedsRebase {
+                session_key,
+                repo,
+                pr_number,
+                wt_path,
+                default_branch,
+            } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let out = tokio::process::Command::new("gh")
+                        .args([
+                            "pr", "view", &pr_number,
+                            "--repo", &repo,
+                            "--json", "mergeable",
+                        ])
+                        .output()
+                        .await;
+                    let needs = match out {
+                        Ok(o) if o.status.success() => {
+                            let json: serde_json::Value =
+                                serde_json::from_slice(&o.stdout).unwrap_or_default();
+                            json.get("mergeable").and_then(|v| v.as_str())
+                                == Some("CONFLICTING")
+                        }
+                        _ => false,
+                    };
+                    let _ = tx.send(Action::NeedsRebaseResult {
+                        session_key,
+                        needs_rebase: needs,
+                        wt_path,
+                        default_branch,
+                    });
+                });
+            }
+            C::RunRebase {
+                session_key,
+                wt_path,
+                default_branch,
+            } => {
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    let fetch = tokio::process::Command::new("git")
+                        .current_dir(&wt_path)
+                        .args(["fetch", "origin", &default_branch])
+                        .output()
+                        .await;
+                    if !fetch.map(|o| o.status.success()).unwrap_or(false) {
+                        tracing::error!("Monitor: git fetch failed for {session_key}");
+                        return;
+                    }
+                    let rebase_target = format!("origin/{default_branch}");
+                    let rebase = tokio::process::Command::new("git")
+                        .current_dir(&wt_path)
+                        .args(["rebase", &rebase_target])
+                        .output()
+                        .await;
+                    match rebase {
+                        Ok(o) if o.status.success() => {
+                            let push = tokio::process::Command::new("git")
+                                .current_dir(&wt_path)
+                                .args(["push", "--force-with-lease"])
+                                .output()
+                                .await;
+                            if let Ok(p) = push
+                                && p.status.success() {
+                                    let _ = tx.send(Action::MonitorTick { session_key });
+                                } else {
+                                    tracing::error!("Monitor: push after rebase failed");
+                                }
+                        }
+                        _ => {
+                            tracing::warn!("Monitor: rebase failed, aborting");
+                            let _ = tokio::process::Command::new("git")
+                                .current_dir(&wt_path)
+                                .args(["rebase", "--abort"])
+                                .output()
+                                .await;
+                        }
+                    }
+                });
+            }
+            C::RefreshLiveTmuxSessions => {
+                let tx = action_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let sessions: std::collections::HashSet<String> =
+                        list_tmux_sessions().into_iter().collect();
+                    let _ = tx.send(Action::TmuxSessionsRefreshed { sessions });
+                });
+            }
+            C::WriteMonitorContext { session_key, content } => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                let context_dir = std::path::PathBuf::from(&home)
+                    .join(".pilot")
+                    .join("context");
+                if let Err(e) = std::fs::create_dir_all(&context_dir) {
+                    tracing::error!("Failed to create context dir: {e}");
+                } else {
+                    let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+                    let safe_key = session_key.replace([':', '/'], "_");
+                    let context_file = context_dir.join(format!("{safe_key}_monitor_{timestamp}.md"));
+                    if let Err(e) = std::fs::write(&context_file, &content) {
+                        tracing::error!("Failed to write monitor context: {e}");
+                    } else {
+                        let latest = context_dir.join(format!("{safe_key}.md"));
+                        let _ = std::fs::remove_file(&latest);
+                        let _ = std::fs::copy(&context_file, &latest);
+                    }
+                }
+            }
+
+            // ── Shared state write-through ──
+            C::UpdateMonitoredSet { session_key, monitored } => {
+                let mut set = lock_monitored(&self.monitored_sessions);
+                if monitored {
+                    set.insert(session_key.to_string());
+                } else {
+                    set.remove(session_key.as_str());
+                }
+            }
+        }
+    }
+
+    /// Fully forget a session: memory AND persistent store. Use this in
+    /// every path that wants a session gone for good (merged, closed, stale
+    /// purge, user-driven removal). Removing only from memory leaves SQLite
+    /// stale — on restart the session reloads and the user sees a "zombie".
+    pub fn forget_session(&mut self, key: &str) {
+        self.state.sessions.remove(key);
+        self.close_terminal(key);
+        lock_monitored(&self.monitored_sessions).remove(key);
+        if self.state.viewing_since.as_ref().map(|(k, _)| k.as_str()) == Some(key) {
+            self.state.viewing_since = None;
+        }
+        if let Some(task_id) = parse_task_id(key)
+            && let Err(e) = self.store.delete_session(&task_id) {
+                tracing::error!("Failed to delete session {key} from store: {e}");
+            }
+    }
+
+    /// Run cross-cutting invariants that repair the UI state. Called after
+    /// every handle_action so callers don't each have to remember to do it.
+    /// This is the centralized fix for the "forgot to call X after Y" class
+    /// of bugs.
+    ///
+    /// Enforces:
+    /// 1. Reap finished PTYs (e.g. Claude exited because credits ran out).
+    ///    Without this, the reader thread has EOF'd but we only swept in the
+    ///    Tick handler — so any action between Ticks could render a phantom
+    ///    TERM state with no visible terminal.
+    /// 2. Pane tree never points at a dead terminal key.
+    /// 3. The active terminal tab, if any, is visible in some pane.
+    /// 4. `selected` is within nav_items bounds.
+    /// 5. `input_mode` is consistent with the focused pane.
+    pub fn enforce_invariants(&mut self) {
+        // Keep the state's terminal projection fresh first. Reduce reads
+        // `state.terminal_index` to make tab/pane decisions; if it's stale,
+        // those decisions are wrong.
+        self.refresh_terminal_index();
+
+        // (1) Reap finished PTYs. This is the single place where terminal
+        // lifecycle cleanup happens — Tick-time cleanup was folded in here so
+        // there's no path where a PTY exits mid-frame and the state tied to
+        // it (pending prompts, monitor state, Claude "asking" flag) is left
+        // half-updated.
+        let exited = self.terminals.collect_finished();
+        for key in &exited {
+            if self.state.pending_prompts.contains_key(key) {
+                tracing::warn!("Pending prompt lost for {key} (terminal exited)");
+                self.state.status =
+                    "Warning: queued prompt lost — terminal exited".into();
+            }
+            self.state.agent_states.remove(key);
+            self.state.pending_prompts.remove(key);
+            self.state.notified_asking.remove(key);
+            if let Some(s) = self.state.sessions.get_mut(key) {
+                s.state = pilot_core::SessionState::Active;
+                // Monitor: Claude exited while fixing CI → transition to WaitingCi.
+                if let Some(pilot_core::MonitorState::CiFixing { attempt }) = &s.monitor {
+                    let attempt = *attempt;
+                    s.monitor = Some(pilot_core::MonitorState::WaitingCi {
+                        after_attempt: attempt,
+                    });
+                    tracing::info!(
+                        "Monitor: Claude exited for {key}, waiting for CI (attempt {attempt})"
+                    );
+                }
+            }
+        }
+        if !exited.is_empty() && !self.state.status.starts_with("Warning:") {
+            self.state.status = format!("Terminal exited: {}", exited.join(", "));
+        }
+
+        // (2-3) Pane tree cleanup.
+        let live: std::collections::BTreeSet<String> =
+            self.terminals.keys().cloned().collect();
+        let active = self.terminals.active_tab_key().cloned();
+        self.state.panes
+            .enforce_terminal_invariant(&live, active.as_deref());
+
+        // (4) Selection bounds.
+        crate::nav::clamp_selected(self);
+
+        // (5) Mode derivation from the now-healthy pane tree.
+        apply_determined_mode(self);
     }
 
     /// Report an error to the status bar.
     #[allow(dead_code)]
     pub fn report_error(&mut self, msg: impl std::fmt::Display) {
         tracing::error!("{msg}");
-        self.status = format!("Error: {msg}");
+        self.state.status = format!("Error: {msg}");
     }
 
     /// Report a status message.
     #[allow(dead_code)]
     pub fn report_status(&mut self, msg: impl Into<String>) {
-        self.status = msg.into();
+        self.state.status = msg.into();
     }
 }
 
@@ -272,7 +684,7 @@ pub async fn run(app: &mut App) -> Result<()> {
     match github_creds.resolve("github").await {
         Ok(cred) => {
             tracing::info!(source = %cred.source, "GitHub credential resolved");
-            let filters: Vec<String> = app
+            let filters: Vec<String> = app.state
                 .config
                 .providers
                 .github
@@ -280,11 +692,11 @@ pub async fn run(app: &mut App) -> Result<()> {
                 .iter()
                 .filter_map(|f| f.to_search_qualifier())
                 .collect();
-            let poll_interval = app.config.providers.github.poll_interval;
+            let poll_interval = app.state.config.providers.github.poll_interval;
 
             match GhClient::from_credential(cred).await {
                 Ok(gh) => {
-                    let watch_repos: Vec<String> = app
+                    let watch_repos: Vec<String> = app.state
                         .config
                         .providers
                         .github
@@ -293,8 +705,8 @@ pub async fn run(app: &mut App) -> Result<()> {
                         .filter_map(|f| f.watch_repo().map(|r| r.to_string()))
                         .collect();
                     let gh = gh.with_filters(filters).with_watch_repos(watch_repos);
-                    app.username = gh.username().to_string();
-                    app.status = format!(
+                    app.state.username = gh.username().to_string();
+                    app.state.status = format!(
                         "Connected as {} ({})",
                         gh.username(),
                         gh.credential_source()
@@ -307,29 +719,34 @@ pub async fn run(app: &mut App) -> Result<()> {
                     });
                     tokio::spawn(async move {
                         while let Some(event) = consumer.recv().await {
-                            if tx.send(Action::ExternalEvent(event)).is_err() {
+                            if tx.send(Action::ExternalEvent(Box::new(event))).is_err() {
                                 break;
                             }
                         }
                     });
                 }
                 Err(e) => {
-                    app.status = format!("GitHub auth failed: {e}");
-                    app.credentials_ok = false;
+                    app.state.status = format!("GitHub auth failed: {e}");
+                    app.state.credentials_ok = false;
                 }
             }
         }
         Err(e) => {
-            app.status = format!("No GitHub credential: {e}");
-            app.credentials_ok = false;
+            app.state.status = format!("No GitHub credential: {e}");
+            app.state.credentials_ok = false;
         }
     }
 
 
-    // ── TUI setup ──
-    // Start MCP Unix socket listener for Claude Code confirmations.
-    start_mcp_socket_listener(action_tx.clone(), Arc::clone(&app.monitored_sessions));
+    // ── Reattach tmux sessions that survived the last pilot quit ──
+    //
+    // On clean quit, pilot doesn't send Ctrl-C to tmux — it just drops the
+    // PTY. Tmux sessions keep running detached. Here we look for tmux
+    // sessions whose name matches one of our loaded pilot sessions, and
+    // spawn a pilot terminal for each (which attaches via `tmux -A`).
+    resume_tmux_sessions(app);
 
+    // ── TUI setup ──
     let mut terminal = ratatui::init();
     crossterm::execute!(
         std::io::stdout(),
@@ -341,21 +758,28 @@ pub async fn run(app: &mut App) -> Result<()> {
     loop {
         while let Ok(action) = action_rx.try_recv() {
             handle_action(app, action, &action_tx);
+            app.enforce_invariants();
         }
-        if app.should_quit {
+        if app.state.should_quit {
             break;
         }
 
+        // Invariants must hold at render time too, not just after actions —
+        // otherwise async events (PTY exit on its own thread) can leave us
+        // with a stale "TERM" mode between the Tick that reaped the PTY
+        // and the next user action.
+        app.enforce_invariants();
+
         terminal.draw(|frame| {
-            // Keep last_term_area in sync with actual terminal size.
-            app.last_term_area = (frame.area().width, frame.area().height);
+            app.state.last_term_area = (frame.area().width, frame.area().height);
             ui::render(app, frame);
         })?;
 
         if let Some(action) = action_rx.recv().await {
             handle_action(app, action, &action_tx);
+            app.enforce_invariants();
         }
-        if app.should_quit {
+        if app.state.should_quit {
             break;
         }
     }
@@ -370,36 +794,26 @@ pub async fn run(app: &mut App) -> Result<()> {
 }
 
 fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSender<Action>) {
-    match action {
-        Action::Quit => {
-            if app.terminals.is_empty() || app.quit_pending {
-                // Graceful shutdown: send Ctrl-C to all running terminals.
-                for (key, term) in app.terminals.iter_mut() {
-                    tracing::info!("Sending Ctrl-C to terminal {key}");
-                    if let Err(e) = term.write(&[0x03]) {
-                        tracing::error!("Failed to send Ctrl-C to terminal {key}: {e}");
-                    }
-                }
-                app.sessions.save_all(app.store.as_ref());
-                app.should_quit = true;
-            } else {
-                app.quit_pending = true;
-                app.status = format!(
-                    "Quit? {} terminal{} running. Press q again to confirm.",
-                    app.terminals.len(),
-                    if app.terminals.len() == 1 { "" } else { "s" }
-                );
-            }
+    // During the MVC migration, try the pure reducer first. If it handles
+    // the action, execute any emitted commands and return. Otherwise fall
+    // through to the legacy handler below.
+    if crate::reduce::handled_by_reduce(&action) {
+        let clock = crate::reduce::Clock::now();
+        let cmds = crate::reduce::reduce(&mut app.state, action, &clock);
+        for cmd in cmds {
+            app.execute(cmd, action_tx);
         }
-
+        return;
+    }
+    match action {
         Action::Tick => {
-            app.tick_count += 1;
+            app.state.tick_count += 1;
             // Process pending PTY output for all terminals (needed for ghostty backend).
             app.terminals.process_pending();
             // Update Claude state detection for each Claude terminal.
             {
                 use crate::agent_state::{AgentState, detect_state};
-                let asking_patterns = &app.config.agent.config.asking_patterns;
+                let asking_patterns = &app.state.config.agent.config.asking_patterns;
                 let claude_keys: Vec<String> = app.terminals.keys()
                     .filter(|k| app.terminals.kind(k)
                         .map(|kind| matches!(kind, ShellKind::Claude))
@@ -409,7 +823,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
                 for key in &claude_keys {
                     if let Some(term) = app.terminals.get(key) {
-                        let prev = app.agent_states.get(key).copied()
+                        let prev = app.state.agent_states.get(key).copied()
                             .unwrap_or(AgentState::Active);
                         let new_state = detect_state(
                             term.last_output_at(),
@@ -420,14 +834,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         // Handle transitions.
                         if new_state != prev {
                             if new_state == AgentState::Active {
-                                app.notified_asking.remove(key);
+                                app.state.notified_asking.remove(key);
                             }
-                            if new_state == AgentState::Asking && !app.notified_asking.contains(key) {
-                                app.notified_asking.insert(key.clone());
-                                let title = app.sessions.get(key)
+                            if new_state == AgentState::Asking && !app.state.notified_asking.contains(key) {
+                                app.state.notified_asking.insert(key.clone());
+                                let title = app.state.sessions.get(key)
                                     .map(|s| s.display_name.clone())
                                     .unwrap_or_else(|| key.clone());
-                                app.status = format!("Claude needs input: {title}");
+                                app.state.status = format!("Claude needs input: {title}");
                                 let title_clone = title.clone();
                                 tokio::spawn(async move {
                                     crate::notify::send_notification(
@@ -437,24 +851,24 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 });
                             }
                         }
-                        app.agent_states.insert(key.clone(), new_state);
+                        app.state.agent_states.insert(key.clone(), new_state);
                     }
                 }
 
                 // Clean up states for removed terminals.
-                app.agent_states.retain(|k, _| app.terminals.contains_key(k));
+                app.state.agent_states.retain(|k, _| app.terminals.contains_key(k));
             }
             // Inject pending prompts when Claude becomes idle (or after 5s timeout).
             {
                 use crate::agent_state::AgentState;
-                let ready_keys: Vec<String> = app.pending_prompts.keys()
+                let ready_keys: Vec<String> = app.state.pending_prompts.keys()
                     .filter(|key| {
-                        let is_idle = app.agent_states.get(*key)
+                        let is_idle = app.state.agent_states.get(*key)
                             .map(|s| *s == AgentState::Idle)
                             .unwrap_or(false);
                         // Also inject if terminal exists and we've waited 5+ seconds.
-                        let has_terminal = app.terminals.contains_key(*key);
-                        let waited_long = app.last_claude_send
+                        let has_terminal = app.terminals.contains_key(key);
+                        let waited_long = app.state.last_claude_send
                             .map(|t| t.elapsed().as_secs() >= 5)
                             .unwrap_or(false);
                         is_idle || (has_terminal && waited_long)
@@ -462,18 +876,17 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     .cloned()
                     .collect();
                 for key in ready_keys {
-                    if let Some(prompt) = app.pending_prompts.remove(&key) {
-                        if let Some(term) = app.terminals.get_mut(&key) {
+                    if let Some(prompt) = app.state.pending_prompts.remove(&key)
+                        && let Some(term) = app.terminals.get_mut(&key) {
                             if let Err(e) = term.write(prompt.as_bytes()) {
                                 tracing::error!("Terminal write failed for prompt injection into {key}: {e}");
                             } else if let Err(e) = term.write(b"\r") {
                                 tracing::error!("Terminal write failed for prompt newline into {key}: {e}");
                             } else {
                                 tracing::info!("Injected pending prompt into {key}");
-                                app.status = "Prompt sent to Claude".into();
+                                app.state.status = "Prompt sent to Claude".into();
                             }
                         }
-                    }
                 }
             }
 
@@ -482,188 +895,143 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
             // Auto-mark-read: if viewing a session for 2+ seconds, mark it read.
             if let Some(key) = app.selected_session_key() {
-                match &app.viewing_since {
+                match &app.state.viewing_since {
                     Some((viewed_key, since)) if viewed_key == &key => {
-                        if since.elapsed().as_secs() >= 2 {
-                            if let Some(session) = app.sessions.get_mut(&key) {
-                                if session.unread_count() > 0 {
-                                    session.mark_read();
+                        if since.elapsed().as_secs() >= 2
+                            && let Some(session) = app.state.sessions.get_mut(&key)
+                                && session.unread_count() > 0 {
+                                    session.mark_read(chrono::Utc::now());
                                 }
-                            }
-                        }
                     }
                     _ => {
-                        app.viewing_since = Some((key, std::time::Instant::now()));
+                        app.state.viewing_since = Some((key, std::time::Instant::now()));
                     }
                 }
             } else {
-                app.viewing_since = None;
+                app.state.viewing_since = None;
             }
 
             // Save all sessions every ~3s (30 ticks at 100ms).
-            if app.tick_count % 30 == 0 && !app.sessions.is_empty() {
-                app.sessions.save_all(app.store.as_ref());
+            if app.state.tick_count.is_multiple_of(30) && !app.state.sessions.is_empty() {
+                app.state.sessions.save_all(app.store.as_ref());
+            }
+            // Refresh live tmux sessions every ~5s so the sidebar indicator
+            // stays honest as sessions come and go outside pilot.
+            if app.state.tick_count.is_multiple_of(50) {
+                app.execute(crate::command::Command::RefreshLiveTmuxSessions, action_tx);
             }
             // Purge stale SQLite sessions ~5s after first load (50 ticks).
             // This delay ensures all first-poll TaskUpdated events have been processed.
-            if app.loaded && !app.purged_stale && app.tick_count >= 50 && !app.first_poll_keys.is_empty() {
-                app.purged_stale = true;
-                let stale: Vec<String> = app.sessions.order().iter()
-                    .filter(|k| k.starts_with("github:") && !app.first_poll_keys.contains(*k))
+            if app.state.loaded && !app.state.purged_stale && app.state.tick_count >= 50 && !app.state.first_poll_keys.is_empty() {
+                app.state.purged_stale = true;
+                let stale: Vec<String> = app.state.sessions.order().iter()
+                    .filter(|k| k.starts_with("github:") && !app.state.first_poll_keys.contains(*k))
                     .cloned()
                     .collect();
                 for key in &stale {
                     tracing::info!("Purging stale session: {key}");
-                    app.sessions.remove(key);
-                    app.terminals.close(key);
+                    app.forget_session(key);
                 }
-                app.first_poll_keys.clear(); // Free memory.
+                app.state.first_poll_keys.clear(); // Free memory.
                 if !stale.is_empty() {
                     resort_sessions(app);
                 }
-                app.selected = 0;
+                app.state.selected = 0;
                 update_detail_pane(app);
-                app.status = format!(
+                app.state.status = format!(
                     "Loaded — {} as {}",
-                    app.config.providers.github.filters.iter()
+                    app.state.config.providers.github.filters.iter()
                         .filter_map(|f| f.org.as_ref())
                         .next()
                         .unwrap_or(&"all repos".to_string()),
-                    app.username
+                    app.state.username
                 );
             }
-            // MCP confirmations now come via Unix socket (no polling needed).
-            let exited = app.terminals.collect_finished();
-            for key in exited {
-                if app.pending_prompts.contains_key(&key) {
-                    tracing::warn!("Pending prompt lost for {key} (terminal exited)");
-                    app.status = format!("Warning: queued prompt lost — terminal exited");
-                }
-                // Clean up app-level state associated with the terminal.
-                app.agent_states.remove(&key);
-                app.pending_prompts.remove(&key);
-                app.notified_asking.remove(&key);
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    session.state = SessionState::Active;
-                    // If monitored and fixing CI, Claude exited — wait for CI.
-                    if let Some(pilot_core::MonitorState::CiFixing { attempt }) = &session.monitor {
-                        let attempt = *attempt;
-                        session.monitor = Some(pilot_core::MonitorState::WaitingCi { after_attempt: attempt });
-                        tracing::info!("Monitor: Claude exited for {key}, waiting for CI (attempt {attempt})");
-                    }
-                }
-            }
+            // Terminal reaping + all associated cleanup happens in
+            // `enforce_invariants()`, which runs right after this handler
+            // returns. Keeping it there means every async-exited PTY
+            // (between ticks, from anywhere) gets the full treatment.
 
             // Periodic merge conflict check for monitored sessions (~30s).
-            if app.tick_count % 300 == 0 {
-                let rebase_candidates: Vec<_> = app.sessions.iter()
+            if app.state.tick_count.is_multiple_of(300) {
+                let rebase_candidates: Vec<_> = app.state.sessions.iter()
                     .filter(|(_, s)| matches!(s.monitor, Some(pilot_core::MonitorState::Idle)))
-                    .filter(|(_, s)| s.worktree_path.is_some())
-                    .map(|(k, s)| {
-                        let repo = s.primary_task.repo.clone().unwrap_or_default();
-                        let pr_num = s.primary_task.id.key.rsplit_once('#')
-                            .map(|(_, n)| n.to_string())
-                            .unwrap_or_default();
-                        let wt_path = s.worktree_path.clone().unwrap();
-                        (k.clone(), repo, pr_num, wt_path)
+                    .filter_map(|(k, s)| {
+                        let wt_path = s.worktree_path.clone()?;
+                        let repo = s.primary_task.repo.clone()?;
+                        let (_, pr) = s.primary_task.id.key.rsplit_once('#')?;
+                        Some((k.clone(), repo, pr.to_string(), wt_path))
                     })
-                    .filter(|(_, repo, pr, _)| !repo.is_empty() && !pr.is_empty())
                     .collect();
 
                 for (key, repo, pr_num, wt_path) in rebase_candidates {
-                    // Look up default branch from cache; if missing, spawn a fetch and skip this cycle.
-                    let default_branch = match app.default_branch_cache.get(&repo) {
-                        Some(branch) => branch.clone(),
-                        None => {
-                            let repo_clone = repo.clone();
-                            let cache_tx = action_tx.clone();
-                            tokio::spawn(async move {
-                                let output = tokio::process::Command::new("gh")
-                                    .args(["api", &format!("repos/{repo_clone}"), "--jq", ".default_branch"])
-                                    .output()
-                                    .await;
-                                if let Ok(o) = output {
-                                    if o.status.success() {
-                                        let branch = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                        let _ = cache_tx.send(Action::CacheDefaultBranch {
-                                            repo: repo_clone,
-                                            branch,
-                                        });
-                                    }
-                                }
-                            });
-                            continue; // Skip this cycle; will rebase on the next 30s tick.
+                    let Some(default_branch) = app.state.default_branch_cache.get(&repo).cloned()
+                    else {
+                        // Cache miss — fire a fetch via execute() and skip this cycle.
+                        if let Some((owner, r)) = repo.split_once('/') {
+                            app.execute(
+                                crate::command::Command::FetchDefaultBranch {
+                                    owner: owner.to_string(),
+                                    repo: r.to_string(),
+                                },
+                                action_tx,
+                            );
                         }
+                        continue;
                     };
-                    // Transition to Rebasing BEFORE spawning async task.
-                    if let Some(session) = app.sessions.get_mut(&key) {
-                        session.monitor = Some(pilot_core::MonitorState::Rebasing);
-                    }
-                    let tx = action_tx.clone();
-                    tokio::spawn(async move {
-                        if check_needs_rebase(&repo, &pr_num).await {
-                            tracing::info!("Monitor: {key} needs rebase");
-                            run_rebase(&wt_path, tx, key, &default_branch).await;
-                        }
-                    });
+                    app.execute(
+                        crate::command::Command::CheckNeedsRebase {
+                            session_key: key.into(),
+                            repo,
+                            pr_number: pr_num,
+                            wt_path,
+                            default_branch,
+                        },
+                        action_tx,
+                    );
                 }
             }
         }
 
         Action::Key(key) => {
             use crossterm::event::KeyCode;
-            tracing::debug!("KEY {:?} in mode {:?}", key.code, app.input_mode);
+            tracing::debug!("KEY {:?} in mode {:?}", key.code, app.state.input_mode);
 
             // ── Confirmation clearing ──
             // quit_pending and merge_pending are "double-press" guards.
             // Clear them on any key that isn't the confirming key.
             // This runs BEFORE mode dispatch so the guard resets regardless
             // of which overlay is active.
-            if app.quit_pending && key.code != KeyCode::Char('q') {
-                app.quit_pending = false;
-                app.status = String::new();
+            if app.state.quit_pending && key.code != KeyCode::Char('q') {
+                app.state.quit_pending = false;
+                app.state.status = String::new();
             }
-            if app.merge_pending.is_some() && key.code != KeyCode::Char('M') {
-                app.merge_pending = None;
-                app.status = String::new();
+            if app.state.merge_pending.is_some() && key.code != KeyCode::Char('M') {
+                app.state.merge_pending = None;
+                app.state.status = String::new();
             }
             // ── Input mode state machine ──
             // Exactly one arm runs per key event. No fallthrough.
-            match app.input_mode {
+            match app.state.input_mode {
 
                 // 1. Help overlay -- any key dismisses.
                 InputMode::Help => {
-                    app.show_help = false;
-                    app.input_mode = determine_mode(app);
+                    app.state.show_help = false;
+                    app.state.input_mode = determine_mode(app);
                 }
 
-                // 2. MCP confirmation -- y/n only.
-                InputMode::McpConfirm => {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => {
-                            handle_action(app, Action::ApproveMcpAction, action_tx);
-                            app.input_mode = determine_mode(app);
-                        }
-                        KeyCode::Char('n') | KeyCode::Esc => {
-                            handle_action(app, Action::RejectMcpAction, action_tx);
-                            app.input_mode = determine_mode(app);
-                        }
-                        _ => {} // swallow other keys during confirmation
-                    }
-                }
-
-                // 3. Text input overlays -- search, new session, quick reply.
+                // 2. Text input overlays -- search, new session, quick reply.
                 InputMode::TextInput(ref kind) => {
                     match kind {
                         TextInputKind::Search => {
                             match key.code {
                                 KeyCode::Esc => {
                                     handle_action(app, Action::SearchClear, action_tx);
-                                    app.input_mode = determine_mode(app);
+                                    app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Enter => {
-                                    app.search_active = false; // keep filter, exit typing
-                                    app.input_mode = determine_mode(app);
+                                    app.state.search_active = false; // keep filter, exit typing
+                                    app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Backspace => {
                                     handle_action(app, Action::SearchBackspace, action_tx);
@@ -678,22 +1046,22 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             match key.code {
                                 KeyCode::Esc => {
                                     handle_action(app, Action::NewSessionCancel, action_tx);
-                                    app.input_mode = determine_mode(app);
+                                    app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Enter => {
-                                    let desc = app.new_session_input.clone().unwrap_or_default();
+                                    let desc = app.state.new_session_input.clone().unwrap_or_default();
                                     if !desc.trim().is_empty() {
                                         handle_action(app, Action::NewSessionConfirm { description: desc }, action_tx);
                                     }
-                                    app.input_mode = determine_mode(app);
+                                    app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Backspace => {
-                                    if let Some(ref mut input) = app.new_session_input {
+                                    if let Some(ref mut input) = app.state.new_session_input {
                                         input.pop();
                                     }
                                 }
                                 KeyCode::Char(c) => {
-                                    if let Some(ref mut input) = app.new_session_input {
+                                    if let Some(ref mut input) = app.state.new_session_input {
                                         input.push(c);
                                     }
                                 }
@@ -704,22 +1072,22 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             match key.code {
                                 KeyCode::Esc => {
                                     handle_action(app, Action::QuickReplyCancel, action_tx);
-                                    app.input_mode = determine_mode(app);
+                                    app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Enter => {
-                                    let body = app.quick_reply_input.as_ref().map(|(_, t, _)| t.clone()).unwrap_or_default();
+                                    let body = app.state.quick_reply_input.as_ref().map(|(_, t, _)| t.clone()).unwrap_or_default();
                                     if !body.trim().is_empty() {
                                         handle_action(app, Action::QuickReplyConfirm { body }, action_tx);
                                     }
-                                    app.input_mode = determine_mode(app);
+                                    app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Backspace => {
-                                    if let Some((_, ref mut text, _)) = app.quick_reply_input {
+                                    if let Some((_, ref mut text, _)) = app.state.quick_reply_input {
                                         text.pop();
                                     }
                                 }
                                 KeyCode::Char(c) => {
-                                    if let Some((_, ref mut text, _)) = app.quick_reply_input {
+                                    if let Some((_, ref mut text, _)) = app.state.quick_reply_input {
                                         text.push(c);
                                     }
                                 }
@@ -734,11 +1102,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     match key.code {
                         KeyCode::Esc => {
                             handle_action(app, Action::PickerCancel, action_tx);
-                            app.input_mode = determine_mode(app);
+                            app.state.input_mode = determine_mode(app);
                         }
                         KeyCode::Enter => {
                             // If nothing was changed yet, toggle the current item first.
-                            if let Some(ref mut picker) = app.picker {
+                            if let Some(ref mut picker) = app.state.picker {
                                 let any_changed = picker.items.iter().any(|i| i.selected != i.was_selected);
                                 if !any_changed {
                                     let filtered = picker.filtered_indices();
@@ -748,10 +1116,10 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 }
                             }
                             handle_action(app, Action::PickerConfirm, action_tx);
-                            app.input_mode = determine_mode(app);
+                            app.state.input_mode = determine_mode(app);
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
-                            if let Some(ref mut picker) = app.picker {
+                            if let Some(ref mut picker) = app.state.picker {
                                 let count = picker.filtered_indices().len();
                                 if count > 0 {
                                     picker.cursor = (picker.cursor + 1) % count;
@@ -759,7 +1127,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             }
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
-                            if let Some(ref mut picker) = app.picker {
+                            if let Some(ref mut picker) = app.state.picker {
                                 let count = picker.filtered_indices().len();
                                 if count > 0 {
                                     picker.cursor = if picker.cursor == 0 { count - 1 } else { picker.cursor - 1 };
@@ -767,7 +1135,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             }
                         }
                         KeyCode::Char(' ') => {
-                            if let Some(ref mut picker) = app.picker {
+                            if let Some(ref mut picker) = app.state.picker {
                                 let filtered = picker.filtered_indices();
                                 if let Some(&real_idx) = filtered.get(picker.cursor) {
                                     picker.items[real_idx].selected = !picker.items[real_idx].selected;
@@ -775,13 +1143,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             }
                         }
                         KeyCode::Backspace => {
-                            if let Some(ref mut picker) = app.picker {
+                            if let Some(ref mut picker) = app.state.picker {
                                 picker.filter.pop();
                                 picker.cursor = 0;
                             }
                         }
                         KeyCode::Char(c) => {
-                            if let Some(ref mut picker) = app.picker {
+                            if let Some(ref mut picker) = app.state.picker {
                                 picker.filter.push(c);
                                 picker.cursor = 0;
                             }
@@ -793,7 +1161,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 // 5. Pane prefix -- one-shot pane operation after Ctrl-w.
                 InputMode::PanePrefix => {
                     let mapped = keys::map_pane_prefix(key);
-                    app.input_mode = determine_mode(app);
+                    app.state.input_mode = determine_mode(app);
                     if !matches!(mapped, Action::None) {
                         handle_action(app, mapped, action_tx);
                     }
@@ -801,34 +1169,47 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
                 // 6. Terminal / Normal / Detail -- regular key mapping.
                 InputMode::Normal | InputMode::Detail | InputMode::Terminal => {
-                    let effective_mode = app.input_mode.to_key_mode();
-                    if app.input_mode == InputMode::Terminal {
-                        tracing::debug!("TERM key: {:?} -> effective_mode: {:?}", key.code, effective_mode);
+                    // ALWAYS derive the mode fresh from the pane tree here —
+                    // `app.state.input_mode` may be stale if async state changed
+                    // since the last `enforce_invariants()`. The pane tree
+                    // is the source of truth; trust it.
+                    let derived = determine_mode(app);
+                    if derived != app.state.input_mode {
+                        app.state.input_mode = derived.clone();
                     }
+                    let effective_mode = derived.to_key_mode();
                     let mapped = keys::map_key(key, effective_mode);
                     match mapped {
                         Action::WaitingPrefix => {
-                            app.input_mode = InputMode::PanePrefix;
+                            app.state.input_mode = InputMode::PanePrefix;
                         }
-                        Action::None if app.input_mode == InputMode::Terminal => {
-                            // Forward to PTY.
-                            if let Some(tab_key) = app.active_tab_key().cloned() {
-                                if let Some(term) = app.terminals.get_mut(&tab_key) {
+                        Action::None if derived == InputMode::Terminal => {
+                            // Forward to the terminal shown in the focused pane —
+                            // NOT `active_tab_key()`, which tracks the tab bar and
+                            // can point at a different (invisible) PTY after the
+                            // user switches panes.
+                            let focused_key = app.focused_terminal_key();
+                            if let Some(term_key) = focused_key {
+                                if let Some(term) = app.terminals.get_mut(&term_key) {
                                     term.scroll_reset();
-                                    if let Some(bytes) = keys::key_to_bytes(&key) {
-                                        if let Err(e) = term.write(&bytes) {
-                                            tracing::error!("PTY write failed: {e}");
-                                            app.status = format!("Error: terminal write failed: {e}");
-                                        }
+                                    if let Some(bytes) = keys::key_to_bytes(&key)
+                                        && let Err(e) = term.write(&bytes)
+                                    {
+                                        tracing::error!("PTY write failed: {e}");
+                                        app.state.status =
+                                            format!("Error: terminal write failed: {e}");
                                     }
                                 } else {
-                                    tracing::warn!("Terminal mode but no terminal for tab: {tab_key}");
-                                    app.input_mode = InputMode::Normal;
-                                    app.status = "Terminal disconnected — returned to sidebar".into();
+                                    tracing::warn!(
+                                        "Terminal mode but no terminal for focused pane: {term_key}"
+                                    );
+                                    app.state.input_mode = InputMode::Normal;
+                                    app.state.status =
+                                        "Terminal disconnected — returned to sidebar".into();
                                 }
                             } else {
-                                tracing::warn!("Terminal mode but no active tab");
-                                app.input_mode = InputMode::Normal;
+                                tracing::warn!("Terminal mode but focused pane is not a terminal");
+                                app.state.input_mode = InputMode::Normal;
                             }
                         }
                         other => {
@@ -839,200 +1220,18 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             }
         }
 
-        // ── Navigation ──
-        Action::SelectNext => {
-            let nav_count = nav_items(app).len();
-            if nav_count > 0 {
-                app.selected = (app.selected + 1).min(nav_count - 1);
-            }
-            reset_detail_state(app);
-        }
-        Action::SelectPrev => {
-            app.selected = app.selected.saturating_sub(1);
-            reset_detail_state(app);
-        }
-
-        // ── Pane operations ──
-        Action::SplitVertical => {
-            let content = current_detail_content(app);
-            app.panes.split_vertical(content);
-            apply_determined_mode(app);
-        }
-        Action::SplitHorizontal => {
-            let content = current_detail_content(app);
-            app.panes.split_horizontal(content);
-            apply_determined_mode(app);
-        }
-        Action::ClosePane => {
-            app.panes.close_focused();
-            apply_determined_mode(app);
-        }
-        Action::FocusPaneNext => {
-            // Clear terminal mode so determine_mode re-evaluates from the new pane.
-            if app.input_mode == InputMode::Terminal {
-                set_mode(app, InputMode::Normal);
-            }
-            app.panes.focus_next();
-            apply_determined_mode(app);
-        }
-        Action::FocusPaneUp | Action::FocusPaneDown
-        | Action::FocusPaneLeft | Action::FocusPaneRight => {
-            // Clear terminal mode so determine_mode re-evaluates from the new pane.
-            if app.input_mode == InputMode::Terminal {
-                set_mode(app, InputMode::Normal);
-            }
-            let dir = match action {
-                Action::FocusPaneUp => Direction::Up,
-                Action::FocusPaneDown => Direction::Down,
-                Action::FocusPaneLeft => Direction::Left,
-                _ => Direction::Right,
-            };
-            app.panes.focus_direction(dir, ratatui::prelude::Rect::default());
-            apply_determined_mode(app);
-        }
-        Action::ResizePane(delta) => {
-            app.panes.resize_focused(delta);
-        }
-        Action::FullscreenToggle => {
-            app.panes.fullscreen_toggle();
-        }
-
-        // ── Tabs ──
-        Action::NextTab => {
-            if !app.terminals.tab_order().is_empty() {
-                app.terminals.next_tab();
-                sync_selected_to_tab(app);
-                set_mode(app, InputMode::Terminal);
-            }
-        }
-        Action::PrevTab => {
-            if !app.terminals.tab_order().is_empty() {
-                app.terminals.prev_tab();
-                sync_selected_to_tab(app);
-                set_mode(app, InputMode::Terminal);
-            }
-        }
-        Action::GoToTab(n) => {
-            let idx = n - 1;
-            if idx < app.terminals.tab_order().len() {
-                app.terminals.set_active_tab(idx);
-                sync_selected_to_tab(app);
-                set_mode(app, InputMode::Terminal);
-            }
-        }
-        Action::CloseTab => {
-            if let Some(key) = app.active_tab_key().cloned() {
-                // Kill terminal but keep session.
-                app.close_terminal(&key);
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    session.state = SessionState::Active;
-                }
-                apply_determined_mode(app);
-            }
-        }
-
-        // ── Session management ──
-        Action::MarkRead => {
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    session.mark_read();
-                    session.primary_task.needs_reply = false;
-                    if let Err(e) = app.store.mark_read(&session.task_id, session.seen_count as i64)
-                    {
-                        tracing::warn!("Failed to persist mark_read: {e}");
-                    }
-                }
-                // Re-sort but keep cursor on the same session.
-                let prev_input_mode = app.input_mode.clone();
-                resort_sessions(app);
-                // Stay in current mode (don't jump away from detail).
-                app.input_mode = prev_input_mode;
-                update_detail_pane(app);
-                app.status = "Marked as read".into();
-            }
-        }
-
-
-        Action::OpenSession(shell_kind) => {
-            crate::actions::session::handle_open_session(app, shell_kind, action_tx);
-        }
-
-        Action::WorktreeReady { session_key, path } => {
-            if let Some(session) = app.sessions.get_mut(&session_key) {
-                session.worktree_path = Some(path);
-                session.state = SessionState::Active;
-                app.status = format!("Worktree ready: {}", session.display_name);
-                // If this session is monitored, kick the state machine now that worktree is ready.
-                if session.monitor.is_some() {
-                    let _ = action_tx.send(Action::MonitorTick { session_key: session_key.clone() });
-                }
-            }
-        }
-
-        Action::ExternalEvent(event) => {
-            crate::actions::events::handle_external_event(app, event, action_tx);
-        }
-
-        Action::ToggleRepo(repo) => {
-            // Determine which repo to toggle.
-            let repo = if repo.is_empty() {
-                // Use the current nav item to find the repo.
-                match selected_nav_item(app) {
-                    Some(NavItem::Repo(r)) => r,
-                    Some(NavItem::Session(k)) => {
-                        app.sessions.get(&k).map(|s| s.repo.clone()).unwrap_or_default()
-                    }
-                    None => String::new(),
-                }
-            } else {
-                repo
-            };
-            if !repo.is_empty() {
-                let repo_for_lookup = repo.clone();
-                if app.collapsed_repos.contains(&repo) {
-                    app.collapsed_repos.remove(&repo);
-                } else {
-                    app.collapsed_repos.insert(repo);
-                }
-                // Keep cursor on the repo header after collapse.
-                let items = nav_items(app);
-                if let Some(idx) = items.iter().position(|i| matches!(i, NavItem::Repo(r) if r == &repo_for_lookup)) {
-                    app.selected = idx;
-                }
-                // Clamp.
-                let nav_count = nav_items(app).len();
-                if app.selected >= nav_count && nav_count > 0 {
-                    app.selected = nav_count - 1;
-                }
-            }
-        }
-        Action::ToggleSession(key) => {
-            // If key is empty, use the currently selected session.
-            let key = if key.is_empty() {
-                app.selected_session_key().unwrap_or_default()
-            } else {
-                key
-            };
-            if !key.is_empty() {
-                if app.collapsed_sessions.contains(&key) {
-                    app.collapsed_sessions.remove(&key);
-                } else {
-                    app.collapsed_sessions.insert(key);
-                }
-            }
-        }
 
         Action::Mouse(mouse) => {
             use crossterm::event::{MouseEventKind, MouseButton};
-            let (term_w, _term_h) = app.last_term_area;
+            let (term_w, _term_h) = app.state.last_term_area;
             // The sidebar border is at sidebar_pct% of the terminal width.
-            let border_col = (term_w as u32 * app.sidebar_pct as u32 / 100) as u16;
+            let border_col = (term_w as u32 * app.state.sidebar_pct as u32 / 100) as u16;
 
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     // Check if clicking on the sidebar/detail divider (±1 col).
                     if mouse.column.abs_diff(border_col) <= 1 {
-                        app.drag_resize = Some(DragState);
+                        app.state.drag_resize = true;
                         return;
                     }
 
@@ -1053,7 +1252,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         let right_area_height = _term_h;
                         let detail_cutoff = right_area_height * 30 / 100; // 30% for detail
                         if has_term && mouse.row > detail_cutoff {
-                            set_mode(app, InputMode::Terminal);
+                            focus_terminal_pane(app);
+                            apply_determined_mode(app);
                         } else {
                             set_mode(app, InputMode::Detail);
                         }
@@ -1061,55 +1261,35 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    if app.drag_resize.is_some() {
+                    if app.state.drag_resize {
                         // Resize sidebar by mouse position.
                         if term_w > 0 {
                             let new_pct = (mouse.column as u32 * 100 / term_w as u32) as u16;
-                            app.sidebar_pct = new_pct.clamp(20, 80);
+                            app.state.sidebar_pct = new_pct.clamp(20, 80);
                         }
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
-                    app.drag_resize = None;
+                    app.state.drag_resize = false;
                 }
                 MouseEventKind::ScrollUp => {
-                    if app.input_mode == InputMode::Terminal {
-                        // Send mouse scroll events to the PTY.
-                        // SGR encoding: \x1b[<64;col;rowM for scroll up, \x1b[<65;col;rowM for scroll down.
-                        if let Some(tab_key) = app.active_tab_key().cloned() {
-                            if let Some(term) = app.terminals.get_mut(&tab_key) {
-                                let col = mouse.column + 1;
-                                let row = mouse.row + 1;
-                                for _ in 0..3 {
-                                    let seq = format!("\x1b[<64;{col};{row}M");
-                                    if let Err(e) = term.write(seq.as_bytes()) {
-                                        tracing::error!("Terminal scroll write failed: {e}");
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                    // Scroll whatever terminal pane currently has focus (not
+                    // the active tab — those can differ).
+                    if let Some(term_key) = app.focused_terminal_key()
+                        && let Some(term) = app.terminals.get_mut(&term_key)
+                    {
+                        term.scroll_up(3);
                     } else {
-                        app.detail_scroll = app.detail_scroll.saturating_sub(3);
+                        app.state.detail_scroll = app.state.detail_scroll.saturating_sub(3);
                     }
                 }
                 MouseEventKind::ScrollDown => {
-                    if app.input_mode == InputMode::Terminal {
-                        if let Some(tab_key) = app.active_tab_key().cloned() {
-                            if let Some(term) = app.terminals.get_mut(&tab_key) {
-                                let col = mouse.column + 1;
-                                let row = mouse.row + 1;
-                                for _ in 0..3 {
-                                    let seq = format!("\x1b[<65;{col};{row}M");
-                                    if let Err(e) = term.write(seq.as_bytes()) {
-                                        tracing::error!("Terminal scroll write failed: {e}");
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                    if let Some(term_key) = app.focused_terminal_key()
+                        && let Some(term) = app.terminals.get_mut(&term_key)
+                    {
+                        term.scroll_down(3);
                     } else {
-                        app.detail_scroll = app.detail_scroll.saturating_add(3);
+                        app.state.detail_scroll = app.state.detail_scroll.saturating_add(3);
                     }
                 }
                 _ => {}
@@ -1117,77 +1297,22 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::Paste(text) => {
-            // Forward paste to the active terminal using bracketed paste mode.
-            if app.input_mode == InputMode::Terminal {
-                if let Some(tab_key) = app.active_tab_key().cloned() {
-                    if let Some(term) = app.terminals.get_mut(&tab_key) {
-                        // Bracketed paste: \x1b[200~ ... \x1b[201~
-                        if let Err(e) = term.write(b"\x1b[200~")
-                            .and_then(|_| term.write(text.as_bytes()))
-                            .and_then(|_| term.write(b"\x1b[201~"))
-                        {
-                            tracing::error!("Terminal paste write failed: {e}");
-                        }
-                    }
+            // Forward paste to the FOCUSED terminal (bracketed paste mode).
+            if let Some(term_key) = app.focused_terminal_key()
+                && let Some(term) = app.terminals.get_mut(&term_key)
+            {
+                // Bracketed paste: wrap in \x1b[200~ ... \x1b[201~
+                let result = term
+                    .write(b"\x1b[200~")
+                    .and_then(|()| term.write(text.as_bytes()))
+                    .and_then(|()| term.write(b"\x1b[201~"));
+                if let Err(e) = result {
+                    tracing::error!("Terminal paste write failed: {e}");
                 }
             }
         }
 
         // ── Detail pane ──
-        Action::DetailCursorUp => {
-            app.detail_cursor = app.detail_cursor.saturating_sub(1);
-            // Auto-mark current comment as read when navigating to it.
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    if session.is_activity_unread(app.detail_cursor) {
-                        session.mark_activity_read(app.detail_cursor);
-                    }
-                }
-            }
-        }
-        Action::DetailCursorDown => {
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get(&key) {
-                    let max = session.activity.len().saturating_sub(1);
-                    app.detail_cursor = (app.detail_cursor + 1).min(max);
-                }
-            }
-            // Auto-mark current comment as read when navigating to it.
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    if session.is_activity_unread(app.detail_cursor) {
-                        session.mark_activity_read(app.detail_cursor);
-                    }
-                }
-            }
-        }
-        Action::ToggleCommentSelect => {
-            let idx = app.detail_cursor;
-            if app.selected_comments.contains(&idx) {
-                app.selected_comments.remove(&idx);
-            } else {
-                app.selected_comments.insert(idx);
-            }
-            // Mark as read.
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    if session.is_activity_unread(idx) {
-                        session.mark_activity_read(idx);
-                    }
-                }
-            }
-        }
-        Action::SelectAllComments => {
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get(&key) {
-                    if app.selected_comments.len() == session.activity.len() {
-                        app.selected_comments.clear();
-                    } else {
-                        app.selected_comments = (0..session.activity.len()).collect();
-                    }
-                }
-            }
-        }
         Action::FixWithClaude => {
             fix_or_reply_with_claude(app, action_tx, "fix");
         }
@@ -1195,430 +1320,101 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             fix_or_reply_with_claude(app, action_tx, "reply");
         }
 
-        // ── Search ──
-        Action::SearchActivate => {
-            app.search_active = true;
-            app.input_mode = InputMode::TextInput(TextInputKind::Search);
+        // Everything else is handled by `reduce` at the top of this function.
+        // If we fall here, it's a logic bug — log and swallow.
+        other => {
+            tracing::warn!("handle_action fallthrough: {other:?} — should have been reduced");
         }
-        Action::SearchInput(c) => {
-            app.search_query.push(c);
-            apply_search_filter(app);
-        }
-        Action::SearchBackspace => {
-            app.search_query.pop();
-            if app.search_query.is_empty() {
-                app.filtered_keys = None;
-            } else {
-                apply_search_filter(app);
-            }
-        }
-        Action::SearchClear => {
-            app.search_query.clear();
-            app.filtered_keys = None;
-            app.search_active = false;
-            if matches!(app.input_mode, InputMode::TextInput(TextInputKind::Search)) {
-                app.input_mode = determine_mode(app);
-            }
-        }
-
-        // ── Picker (reviewer/assignee) ──
-        Action::EditReviewers | Action::EditAssignees => {
-            let kind = if matches!(action, Action::EditReviewers) {
-                crate::action::PickerKind::Reviewer
-            } else {
-                crate::action::PickerKind::Assignee
-            };
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get(&key) {
-                    let task = &session.primary_task;
-                    let repo = task.repo.as_deref().unwrap_or("").to_string();
-                    let pr_number = task.id.key.rsplit_once('#')
-                        .map(|(_, n)| n.to_string())
-                        .unwrap_or_default();
-
-                    if repo.is_empty() || pr_number.is_empty() {
-                        app.status = "No PR info available".into();
-                        return;
-                    }
-
-                    let current: Vec<String> = match kind {
-                        crate::action::PickerKind::Reviewer => task.reviewers.clone(),
-                        crate::action::PickerKind::Assignee => task.assignees.clone(),
-                    };
-
-                    if let Some(collabs) = app.collaborators_cache.get(&repo) {
-                        let items = build_picker_items(collabs, &current);
-                        app.picker = Some(PickerState {
-                            kind,
-                            items,
-                            cursor: 0,
-                            filter: String::new(),
-                            session_key: key,
-                            repo,
-                            pr_number,
-                        });
-                        app.input_mode = InputMode::Picker;
-                    } else {
-                        app.status = format!("Loading collaborators for {repo}…");
-                        let repo_clone = repo.clone();
-                        let tx = action_tx.clone();
-                        tokio::spawn(async move {
-                            let collabs = fetch_collaborators(&repo_clone).await;
-                            let _ = tx.send(Action::CollaboratorsLoaded {
-                                repo: repo_clone,
-                                kind,
-                                session_key: key,
-                                pr_number,
-                                collaborators: collabs,
-                                current,
-                            });
-                        });
-                    }
-                }
-            }
-        }
-
-        Action::CollaboratorsLoaded { repo, kind, session_key, pr_number, collaborators, current } => {
-            app.collaborators_cache.insert(repo.clone(), collaborators.clone());
-            let items = build_picker_items(&collaborators, &current);
-            app.picker = Some(PickerState {
-                kind,
-                items,
-                cursor: 0,
-                filter: String::new(),
-                session_key,
-                repo,
-                pr_number,
-            });
-            app.input_mode = InputMode::Picker;
-            app.status = String::new();
-        }
-
-        Action::PickerCancel => {
-            app.picker = None;
-            if matches!(app.input_mode, InputMode::Picker) {
-                app.input_mode = determine_mode(app);
-            }
-        }
-
-        Action::PickerConfirm => {
-            if matches!(app.input_mode, InputMode::Picker) {
-                app.input_mode = determine_mode(app);
-            }
-            if let Some(picker) = app.picker.take() {
-                let added: Vec<String> = picker.items.iter()
-                    .filter(|i| i.selected && !i.was_selected)
-                    .map(|i| i.login.clone())
-                    .collect();
-                let removed: Vec<String> = picker.items.iter()
-                    .filter(|i| !i.selected && i.was_selected)
-                    .map(|i| i.login.clone())
-                    .collect();
-
-                if added.is_empty() && removed.is_empty() {
-                    return;
-                }
-
-                let label = match picker.kind {
-                    crate::action::PickerKind::Reviewer => "reviewer",
-                    crate::action::PickerKind::Assignee => "assignee",
-                };
-                app.status = format!("Updating {label}s…");
-
-                // Optimistic update.
-                if let Some(session) = app.sessions.get_mut(&picker.session_key) {
-                    let people = match picker.kind {
-                        crate::action::PickerKind::Reviewer => &mut session.primary_task.reviewers,
-                        crate::action::PickerKind::Assignee => &mut session.primary_task.assignees,
-                    };
-                    people.retain(|p| !removed.contains(p));
-                    for user in &added {
-                        if !people.contains(user) {
-                            people.push(user.clone());
-                        }
-                    }
-                }
-
-                let repo = picker.repo;
-                let pr = picker.pr_number;
-                let kind = picker.kind;
-                let tx = action_tx.clone();
-                tokio::spawn(async move {
-                    let (add_flag, remove_flag) = match kind {
-                        crate::action::PickerKind::Reviewer => ("--add-reviewer", "--remove-reviewer"),
-                        crate::action::PickerKind::Assignee => ("--add-assignee", "--remove-assignee"),
-                    };
-                    let mut args = vec![
-                        "pr".to_string(), "edit".to_string(), pr,
-                        "--repo".to_string(), repo,
-                    ];
-                    for user in &added {
-                        args.push(add_flag.to_string());
-                        args.push(user.clone());
-                    }
-                    for user in &removed {
-                        args.push(remove_flag.to_string());
-                        args.push(user.clone());
-                    }
-                    tracing::info!("Running: gh {}", args.join(" "));
-                    let output = tokio::process::Command::new("gh")
-                        .args(&args)
-                        .output()
-                        .await;
-                    match output {
-                        Ok(o) if o.status.success() => {
-                            let label = match kind {
-                                crate::action::PickerKind::Reviewer => "reviewers",
-                                crate::action::PickerKind::Assignee => "assignees",
-                            };
-                            tracing::info!("Updated {label}: +{added:?} -{removed:?}");
-                            let _ = tx.send(Action::StatusMessage(format!("Updated {label}")));
-                        }
-                        Ok(o) => {
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            let stdout = String::from_utf8_lossy(&o.stdout);
-                            tracing::error!("gh pr edit failed (exit {}): stderr={stderr} stdout={stdout}", o.status);
-                            let _ = tx.send(Action::StatusMessage(format!("Error: {}", stderr.trim())));
-                        }
-                        Err(e) => {
-                            tracing::error!("gh pr edit error: {e}");
-                            let _ = tx.send(Action::StatusMessage(format!("Error: {e}")));
-                        }
-                    }
-                });
-            }
-        }
-
-        Action::Resize { width, height } => {
-            app.last_term_area = (width, height);
-        }
-        Action::CollapseSelected => {
-            match selected_nav_item(app) {
-                Some(NavItem::Repo(repo)) => {
-                    // Collapse this repo.
-                    app.collapsed_repos.insert(repo);
-                }
-                Some(NavItem::Session(key)) => {
-                    // Collapse the repo this session belongs to.
-                    if let Some(session) = app.sessions.get(&key) {
-                        let repo = session.repo.clone();
-                        app.collapsed_repos.insert(repo.clone());
-                        // Move cursor to the repo header.
-                        let items = nav_items(app);
-                        if let Some(idx) = items.iter().position(|i| matches!(i, NavItem::Repo(r) if r == &repo)) {
-                            app.selected = idx;
-                        }
-                    }
-                }
-                None => {}
-            }
-        }
-        Action::ExpandSelected => {
-            match selected_nav_item(app) {
-                Some(NavItem::Repo(repo)) => {
-                    // Expand this repo.
-                    app.collapsed_repos.remove(&repo);
-                }
-                Some(NavItem::Session(_key)) => {
-                    // Session is already visible — right arrow does nothing.
-                    // Only Enter goes to the detail pane.
-                }
-                None => {}
-            }
-        }
-
-        Action::OpenInBrowser => {
-            crate::actions::pr::handle_open_in_browser(app);
-        }
-
-        Action::MergePr => {
-            crate::actions::pr::handle_merge(app, action_tx);
-        }
-
-        Action::MergeCompleted { session_key } => {
-            crate::actions::pr::handle_merge_completed(app, &session_key);
-        }
-
-        Action::SlackNudge => {
-            crate::actions::pr::handle_slack_nudge(app, action_tx);
-        }
-
-        Action::ToggleMonitor => {
-            if let Some(key) = app.selected_session_key() {
-                if let Some(session) = app.sessions.get_mut(&key) {
-                    if session.monitor.is_some() {
-                        // Turn off monitor.
-                        session.monitor = None;
-                        app.monitored_sessions.lock().expect("monitored_sessions lock").remove(&key);
-                        app.status = format!("Monitor stopped: {}", session.display_name);
-                    } else {
-                        // Turn on monitor.
-                        session.monitor = Some(pilot_core::MonitorState::Idle);
-                        app.monitored_sessions.lock().expect("monitored_sessions lock").insert(key.clone());
-                        app.status = format!("Monitor started: {}", session.display_name);
-
-                        // Ensure worktree exists.
-                        if session.worktree_path.is_none() {
-                            let repo = session.primary_task.repo.clone();
-                            let branch = session.primary_task.branch.clone();
-                            session.state = SessionState::CheckingOut;
-
-                            if let (Some(repo_full), Some(branch)) = (repo, branch) {
-                                let parts: Vec<&str> = repo_full.splitn(2, '/').collect();
-                                if parts.len() == 2 {
-                                    let owner = parts[0].to_string();
-                                    let repo = parts[1].to_string();
-                                    let tx = action_tx.clone();
-                                    let session_key = key.clone();
-                                    let worktrees = WorktreeManager::default_base();
-                                    tokio::spawn(async move {
-                                        match worktrees.checkout(&owner, &repo, &branch).await {
-                                            Ok(wt) => {
-                                                let _ = tx.send(Action::WorktreeReady {
-                                                    session_key: session_key.clone(),
-                                                    path: wt.path,
-                                                });
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("Monitor worktree checkout failed: {e}");
-                                            }
-                                        }
-                                    });
-                                }
-                            }
-                        }
-
-                        // If CI is already failing and worktree is ready, trigger immediate fix.
-                        // If worktree isn't ready yet, WorktreeReady will trigger the tick.
-                        if session.primary_task.ci == pilot_core::CiStatus::Failure
-                            && session.worktree_path.is_some()
-                        {
-                            let _ = action_tx.send(Action::MonitorTick { session_key: key });
-                        }
-                    }
-                }
-            }
-        }
-
-        Action::MonitorTick { session_key } => {
-            handle_monitor_tick(app, &session_key, action_tx);
-        }
-
-        Action::ToggleHelp => {
-            app.show_help = !app.show_help;
-            if app.show_help {
-                app.input_mode = InputMode::Help;
-            } else {
-                app.input_mode = determine_mode(app);
-            }
-        }
-
-        Action::CycleTimeFilter => {
-            app.activity_days_filter = match app.activity_days_filter {
-                1 => 3,
-                3 => 7,
-                7 => 30,
-                30 => 0, // 0 = all
-                _ => 1,
-            };
-            let label = match app.activity_days_filter {
-                0 => "all time".to_string(),
-                d => format!("last {d}d"),
-            };
-            app.status = format!("Filter: {label}");
-            app.selected = 0;
-        }
-
-        Action::McpConfirmRequest { tool, display, response_tx } => {
-            app.pending_mcp = Some(PendingMcpAction {
-                tool: tool.clone(),
-                display,
-                response_tx: Some(response_tx),
-            });
-            app.input_mode = InputMode::McpConfirm;
-            app.status = format!("Claude wants to: {tool} — y/n");
-        }
-        Action::ApproveMcpAction => {
-            if let Some(action) = app.pending_mcp.take() {
-                if let Some(tx) = action.response_tx {
-                    let _ = tx.send(true);
-                }
-                app.status = format!("Approved: {}", action.tool);
-            }
-            // Re-detect the correct mode from pane content (e.g. back
-            // to Terminal if a terminal is active).
-            if matches!(app.input_mode, InputMode::McpConfirm) {
-                app.input_mode = InputMode::Normal; // clear overlay first
-                apply_determined_mode(app);
-            }
-        }
-        Action::RejectMcpAction => {
-            if let Some(action) = app.pending_mcp.take() {
-                if let Some(tx) = action.response_tx {
-                    let _ = tx.send(false);
-                }
-                app.status = format!("Rejected: {}", action.tool);
-            }
-            // Re-detect the correct mode from pane content (e.g. back
-            // to Terminal if a terminal is active).
-            if matches!(app.input_mode, InputMode::McpConfirm) {
-                app.input_mode = InputMode::Normal; // clear overlay first
-                apply_determined_mode(app);
-            }
-        }
-
-        Action::StatusMessage(msg) => {
-            app.status = msg;
-        }
-
-        Action::Snooze => {
-            crate::actions::pr::handle_snooze(app);
-        }
-
-        Action::QuickReply => {
-            crate::actions::pr::handle_quick_reply(app);
-        }
-
-        Action::QuickReplyCancel => {
-            crate::actions::pr::handle_quick_reply_cancel(app);
-        }
-
-        Action::QuickReplyConfirm { body } => {
-            crate::actions::pr::handle_quick_reply_confirm(app, body, action_tx);
-        }
-
-        Action::NewSession => {
-            crate::actions::session::handle_new_session(app);
-        }
-
-        Action::NewSessionCancel => {
-            crate::actions::session::handle_new_session_cancel(app);
-        }
-
-        Action::NewSessionConfirm { description } => {
-            crate::actions::session::handle_new_session_confirm(app, description);
-        }
-
-        Action::CacheDefaultBranch { repo, branch } => {
-            tracing::info!("Cached default branch for {repo}: {branch}");
-            app.default_branch_cache.insert(repo, branch);
-        }
-
-        Action::Refresh => {
-            if let Some(ref wake) = app.poller_wake {
-                wake.notify_one();
-                app.status = "Refreshing…".into();
-            }
-        }
-
-        Action::None | Action::WaitingPrefix => {}
     }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
+/// Compute the tmux session name we use for a pilot session key.
+/// Must match the naming inside `spawn_terminal`.
+fn tmux_name_for(session_key: &str) -> String {
+    session_key.replace([':', '/'], "_")
+}
+
+/// List active tmux sessions (via `tmux list-sessions -F '#{session_name}'`).
+/// Returns an empty vec on any error — tmux might not be installed, or no
+/// sessions are running. Neither case is a problem: we just skip auto-resume.
+fn list_tmux_sessions() -> Vec<String> {
+    match std::process::Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// On startup, find tmux sessions matching persisted pilot sessions and
+/// spawn a pilot terminal for each so the user can continue where they
+/// left off. Assumes `ShellKind::Claude` (the common case); users who were
+/// in a shell can close the pane and press `b` to reopen as a shell.
+fn resume_tmux_sessions(app: &mut App) {
+    let live_tmux: std::collections::HashSet<String> =
+        list_tmux_sessions().into_iter().collect();
+    app.state.live_tmux_sessions.clone_from(&live_tmux);
+    if live_tmux.is_empty() {
+        return;
+    }
+
+    // Iterate over persisted session keys, collecting the ones to resume.
+    let to_resume: Vec<(String, std::path::PathBuf)> = app
+        .state
+        .sessions
+        .iter()
+        .filter(|(_, s)| s.primary_task.state == pilot_core::TaskState::Open
+                      || s.primary_task.state == pilot_core::TaskState::Draft
+                      || s.primary_task.state == pilot_core::TaskState::InReview
+                      || s.primary_task.state == pilot_core::TaskState::InProgress)
+        .filter_map(|(key, s)| {
+            if !live_tmux.contains(&tmux_name_for(key)) {
+                return None;
+            }
+            let cwd = s
+                .worktree_path
+                .clone()
+                .unwrap_or_else(|| {
+                    std::path::PathBuf::from(
+                        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+                    )
+                });
+            Some((key.clone(), cwd))
+        })
+        .collect();
+
+    if to_resume.is_empty() {
+        return;
+    }
+
+    let count = to_resume.len();
+    for (key, cwd) in to_resume {
+        tracing::info!("Resuming tmux session for {key}");
+        spawn_terminal(app, &key, cwd, ShellKind::Claude);
+    }
+    app.state.status = format!(
+        "Resumed {count} tmux session{}",
+        if count == 1 { "" } else { "s" }
+    );
+}
+
 pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::PathBuf, kind: ShellKind) {
-    let (cols, rows) = app.last_term_area;
+    // Bail if the session was removed between the user action and here
+    // (e.g. PR got merged/closed mid-spawn). Without this, env vars would
+    // silently default and the terminal would come up disconnected from any PR.
+    if !app.state.sessions.contains_key(session_key) {
+        app.state.status = format!("spawn_terminal: session '{session_key}' no longer exists");
+        return;
+    }
+
+    let (cols, rows) = app.state.last_term_area;
     let size = PtySize {
         rows: rows.max(10),
         cols: cols.max(20),
@@ -1628,13 +1424,13 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
 
     // Build the inner command (claude or shell).
     let inner_cmd: Vec<String> = match kind {
-        ShellKind::Claude => app.config.agent.config.spawn_command(false),
-        ShellKind::Shell => vec![app.config.shell.command.clone()],
+        ShellKind::Claude => app.state.config.agent.config.spawn_command(false),
+        ShellKind::Shell => vec![app.state.config.shell.command.clone()],
     };
 
     // Wrap in tmux so the process survives pilot quit.
     // -A: attach if exists, create if not.
-    let tmux_name = session_key.replace(':', "_").replace('/', "_");
+    let tmux_name = tmux_name_for(session_key);
     let inner_joined = inner_cmd.join(" ");
     let cmd_strs: Vec<String> = vec![
         "tmux".into(),
@@ -1654,14 +1450,13 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         .status();
 
     // Mark that Claude has been used in this session.
-    if matches!(kind, ShellKind::Claude) {
-        if let Some(session) = app.sessions.get_mut(session_key) {
+    if matches!(kind, ShellKind::Claude)
+        && let Some(session) = app.state.sessions.get_mut(session_key) {
             session.had_claude = true;
         }
-    }
 
-    // Build env vars for the MCP server to use.
-    let session = app.sessions.get(session_key);
+    // Env vars that get inherited by the inner Claude / shell process.
+    let session = app.state.sessions.get(session_key);
     let task_id = session.map(|s| s.task_id.to_string()).unwrap_or_default();
     let pr_number = session
         .and_then(|s| s.primary_task.id.key.rsplit_once('#'))
@@ -1678,84 +1473,51 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
         ("PILOT_REPO".to_string(), repo),
     ];
 
-    // For Claude sessions, write .mcp.json in the worktree so Claude discovers our MCP server.
-    if matches!(kind, ShellKind::Claude) {
-        if let Ok(mcp_server_path) = which_pilot_mcp() {
-            let mcp_json = serde_json::json!({
-                "mcpServers": {
-                    "pilot": {
-                        "command": mcp_server_path,
-                        "args": [],
-                        "env": {
-                            "PILOT_SESSION": env[0].1.clone(),
-                            "PILOT_PR_NUMBER": env[1].1.clone(),
-                            "PILOT_REPO": env[2].1.clone(),
-                        }
-                    }
-                }
-            });
-            let mcp_path = cwd.join(".mcp.json");
-            if let Err(e) = std::fs::write(&mcp_path, serde_json::to_string_pretty(&mcp_json).unwrap()) {
-                tracing::warn!("Failed to write .mcp.json: {e}");
-            } else {
-                tracing::info!("Wrote .mcp.json to {}", mcp_path.display());
-                // Add .mcp.json to .gitignore if not already there.
-                let gitignore = cwd.join(".gitignore");
-                if let Ok(content) = std::fs::read_to_string(&gitignore) {
-                    if !content.contains(".mcp.json") {
-                        if let Err(e) = std::fs::write(&gitignore, format!("{content}\n.mcp.json\n")) {
-                            tracing::warn!("Failed to update .gitignore: {e}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     let term_result = TermSession::spawn(&cmd, size, Some(&cwd), env);
 
     match term_result {
         Ok(term) => {
             app.terminals.insert(session_key.to_string(), term, kind);
-            if let Some(session) = app.sessions.get_mut(session_key) {
+            if let Some(session) = app.state.sessions.get_mut(session_key) {
                 session.state = SessionState::Working;
             }
             // Auto-split: if no terminal pane exists, split the detail pane.
-            let has_term_pane = app
+            let has_term_pane = app.state
                 .panes
                 .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
                 .is_some();
             if !has_term_pane {
                 // Find the detail pane and split it.
-                if let Some(detail_id) = app
+                if let Some(detail_id) = app.state
                     .panes
                     .find_pane(|c| matches!(c, PaneContent::Detail(_)))
                 {
-                    app.panes.focused = detail_id;
-                    app.panes
+                    app.state.panes.focused = detail_id;
+                    app.state.panes
                         .split_vertical(PaneContent::Terminal(session_key.to_string()));
                 }
             } else {
                 // Update existing terminal pane to show new session.
-                if let Some(term_id) = app
+                if let Some(term_id) = app.state
                     .panes
                     .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
                 {
-                    app.panes
+                    app.state.panes
                         .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
                 }
             }
-            set_mode(app, InputMode::Terminal);
-            app.status = match kind {
+            focus_terminal_pane(app);
+            apply_determined_mode(app);
+            app.state.status = match kind {
                 ShellKind::Claude => format!("Claude Code started in {}", cwd.display()),
                 ShellKind::Shell => format!("Shell started in {}", cwd.display()),
             };
         }
         Err(e) => {
-            if let Some(session) = app.sessions.get_mut(session_key) {
+            if let Some(session) = app.state.sessions.get_mut(session_key) {
                 session.state = SessionState::Active;
             }
-            app.status = format!("Terminal spawn failed: {e}");
+            app.state.status = format!("Terminal spawn failed: {e}");
             tracing::error!("Terminal spawn failed: {e}");
         }
     }
@@ -1766,15 +1528,14 @@ pub(crate) fn spawn_terminal(app: &mut App, session_key: &str, cwd: std::path::P
 fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Action>, mode: &str) {
     // Debounce: ignore if we sent something in the last 1.5s.
     let now = std::time::Instant::now();
-    if let Some(last) = app.last_claude_send {
-        if now.duration_since(last).as_millis() < 1500 {
-            app.status = "Wait — Claude was just fed. Press again in a sec.".into();
+    if let Some(last) = app.state.last_claude_send
+        && now.duration_since(last).as_millis() < 1500 {
+            app.state.status = "Wait — Claude was just fed. Press again in a sec.".into();
             return;
         }
-    }
 
     let Some(session_key) = app.selected_session_key() else {
-        app.status = "No session selected".into();
+        app.state.status = "No session selected".into();
         return;
     };
 
@@ -1784,7 +1545,7 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
         handle_action(app, Action::OpenSession(ShellKind::Claude), action_tx);
     }
 
-    let Some(session) = app.sessions.get(&session_key) else {
+    let Some(session) = app.state.sessions.get(&session_key) else {
         return;
     };
 
@@ -1796,10 +1557,10 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     let has_conflicts = task.has_conflicts;
 
     // Gather selected comments (or all unread if none selected).
-    let indices: Vec<usize> = if app.selected_comments.is_empty() {
+    let indices: Vec<usize> = if app.state.selected_comments.is_empty() {
         (0..session.unread_count()).collect()
     } else {
-        let mut v: Vec<usize> = app.selected_comments.iter().copied().collect();
+        let mut v: Vec<usize> = app.state.selected_comments.iter().copied().collect();
         v.sort();
         v
     };
@@ -1808,7 +1569,7 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 
     // Must have SOMETHING to fix.
     if !ci_failing && !has_comments && !has_conflicts {
-        app.status = "Nothing to fix — CI green, no conflicts, no unread comments".into();
+        app.state.status = "Nothing to fix — CI green, no conflicts, no unread comments".into();
         return;
     }
 
@@ -1848,7 +1609,7 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
         prompt.push_str("This PR has merge conflicts with the base branch.\n");
         prompt.push_str("1. Run `git fetch origin main && git rebase origin/main`\n");
         prompt.push_str("2. Resolve any conflicts\n");
-        prompt.push_str("3. Use `pilot_push` to force-push the rebased branch\n\n");
+        prompt.push_str("3. Force-push the rebased branch (`git push --force-with-lease`)\n\n");
     }
 
     // CI failure details.
@@ -1859,14 +1620,14 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
             .collect();
         if failed.is_empty() {
             prompt.push_str("CI is failing but no individual check details available.\n");
-            prompt.push_str("Use `pilot_get_pr_state` to fetch the latest CI status and logs.\n");
+            prompt.push_str("Run `gh pr checks <num>` to see details.\n");
         } else {
             for check in &failed {
                 prompt.push_str(&format!("- **FAILED: {}**", check.name));
                 if let Some(ref url) = check.url {
                     prompt.push_str(&format!(" — [view logs]({url})"));
                 }
-                prompt.push_str("\n");
+                prompt.push('\n');
             }
         }
         prompt.push_str("\nInvestigate the failing checks, read the logs, and fix the code.\n");
@@ -1875,6 +1636,13 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     // Review comments (if any).
     if has_comments {
         prompt.push_str("\n## Review Comments\n\n");
+        prompt.push_str(
+            "Each inline comment below has a `thread_id`. Reply with a \
+             threaded GraphQL reply so it lands on the right file/line — \
+             use `gh api graphql -f query='mutation { \
+             addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \\\"THREAD_ID\\\", body: \\\"...\\\"}) { comment { id } } }'`. \
+             Address each comment individually.\n\n",
+        );
         for &idx in &indices {
             if let Some(activity) = session.activity.get(idx) {
                 let kind_label = match activity.kind {
@@ -1888,35 +1656,44 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
                     .collect::<Vec<_>>()
                     .join("\n");
                 prompt.push_str(&format!(
-                    "### {kind_label} from {} ({})\n\n{quoted_body}\n\n",
+                    "### {kind_label} from {} ({})\n\n",
                     activity.author,
                     pilot_core::time::time_ago(&activity.created_at),
                 ));
+                if let Some(path) = &activity.path {
+                    match activity.line {
+                        Some(n) => prompt.push_str(&format!("- **File:** `{path}:{n}`\n")),
+                        None => prompt.push_str(&format!("- **File:** `{path}`\n")),
+                    }
+                }
+                if let Some(tid) = &activity.thread_id {
+                    prompt.push_str(&format!("- **thread_id:** `{tid}`\n"));
+                }
+                if let Some(hunk) = &activity.diff_hunk
+                    && !hunk.is_empty() {
+                        prompt.push_str("\n```diff\n");
+                        prompt.push_str(hunk);
+                        if !hunk.ends_with('\n') { prompt.push('\n'); }
+                        prompt.push_str("```\n");
+                    }
+                prompt.push_str(&format!("\n{quoted_body}\n\n"));
             }
         }
     }
 
     prompt.push_str("\n## Instructions\n\n");
-    prompt.push_str("**IMPORTANT:** You have access to MCP tools provided by pilot. ");
-    prompt.push_str("Use these instead of raw `git` or `gh` commands so the user can ");
-    prompt.push_str("review your actions before they execute:\n\n");
-    prompt.push_str("- `pilot_get_pr_state` — fetch live PR state (CI, reviews) before/after changes\n");
-    prompt.push_str("- `pilot_push` — push your commits (user will confirm)\n");
-    prompt.push_str("- `pilot_reply` — post a comment reply (user will confirm)\n");
-    prompt.push_str("- `pilot_resolve_thread` — mark a review thread resolved\n");
-    prompt.push_str("- `pilot_request_changes` — request changes\n");
-    prompt.push_str("- `pilot_approve` — approve PR\n");
-    prompt.push_str("- `pilot_merge` — merge PR\n\n");
+    prompt.push_str("Use standard `git` and `gh` commands. Env vars in this shell:\n");
+    prompt.push_str("- `PILOT_REPO` (owner/repo), `PILOT_PR_NUMBER`, `PILOT_SESSION`\n\n");
 
     if mode == "fix" {
         prompt.push_str("After making code changes:\n");
         prompt.push_str("1. Make the changes locally (you're already in the worktree)\n");
-        prompt.push_str("2. Use `pilot_push` to push (NOT `git push`)\n");
-        prompt.push_str("3. Optionally use `pilot_get_pr_state` to confirm CI passed\n");
-        prompt.push_str("4. Use `pilot_reply` to respond to the comments\n");
+        prompt.push_str("2. `git push` (or `git push --force-with-lease` after a rebase)\n");
+        prompt.push_str("3. `gh pr checks` to confirm CI\n");
+        prompt.push_str("4. Reply to each comment via `gh api graphql` (threaded) as shown above\n");
     } else {
-        prompt.push_str("Draft concise, professional replies. ");
-        prompt.push_str("Use `pilot_reply` to post each reply (the user will review before posting).\n");
+        prompt.push_str("Draft concise, professional replies. Post each reply as a \
+threaded GraphQL reply using the thread_id above so it lands on the right file/line.\n");
     }
 
     // Write context to file with timestamp to avoid race conditions.
@@ -1924,14 +1701,14 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     let context_dir = std::path::PathBuf::from(&home).join(".pilot").join("context");
     if let Err(e) = std::fs::create_dir_all(&context_dir) {
         tracing::error!("Failed to create context dir: {e}");
-        app.status = format!("Failed to create context dir: {e}");
+        app.state.status = format!("Failed to create context dir: {e}");
         return;
     }
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
-    let safe_key = session_key.replace(':', "_").replace('/', "_");
+    let safe_key = session_key.replace([':', '/'], "_");
     let context_file = context_dir.join(format!("{safe_key}_{timestamp}.md"));
     if let Err(e) = std::fs::write(&context_file, &prompt) {
-        app.status = format!("Failed to write context file: {e}");
+        app.state.status = format!("Failed to write context file: {e}");
         return;
     }
     // Also write a stable "latest" symlink for pilot_get_context.
@@ -1943,18 +1720,20 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 
     // Queue the prompt — it will be injected when Claude is idle.
     tracing::info!("Queued prompt for {session_key} ({} bytes)", prompt.len());
-    app.pending_prompts.insert(session_key.clone(), prompt);
-    app.selected_comments.clear();
-    app.last_claude_send = Some(now);
+    app.state.pending_prompts.insert(session_key.clone(), prompt);
+    app.state.selected_comments.clear();
+    app.state.last_claude_send = Some(now);
 
     if let Some(idx) = app.terminals.tab_order().iter().position(|k| k == &session_key) {
         app.terminals.set_active_tab(idx);
     }
-    set_mode(app, InputMode::Terminal);
+    // Terminal may exist in the map but have no visible pane (e.g. user
+    // closed the pane earlier). ensure_terminal_pane_for puts it back.
+    ensure_terminal_pane_for(app, &session_key);
 
     {
         let n = indices.len();
-        app.status = format!(
+        app.state.status = format!(
             "Queued {n} comment{} for Claude to {mode}",
             if n == 1 { "" } else { "s" }
         );
@@ -1962,230 +1741,157 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 }
 
 
-/// Sync sidebar selection to the active tab.
-fn sync_selected_to_tab(app: &mut App) {
-    if let Some(tab_key) = app.active_tab_key().cloned() {
-        let items = nav_items(app);
-        if let Some(idx) = items.iter().position(|i| matches!(i, NavItem::Session(k) if k == &tab_key)) {
-            app.selected = idx;
-        }
-        update_detail_pane(app);
+/// Focus the terminal pane if one exists in the layout. Called after tab
+/// switches so the user ends up in Terminal mode consistently.
+pub(crate) fn focus_terminal_pane(app: &mut App) {
+    if let Some(id) = app.state.panes.find_pane(|c| matches!(c, PaneContent::Terminal(_))) {
+        app.state.panes.focus(id);
     }
+}
+
+/// Guarantee that a `Terminal(session_key)` pane is in the layout and focused.
+/// If a terminal pane already exists, retarget it to `session_key`. Otherwise
+/// split the detail pane to create one. This is the invariant: whenever a
+/// terminal exists in `app.terminals` and we want the user to see it, call
+/// this — otherwise you get the silent "prompt sent but no terminal" bug.
+pub(crate) fn ensure_terminal_pane_for(app: &mut App, session_key: &str) {
+    let existing = app.state
+        .panes
+        .find_pane(|c| matches!(c, PaneContent::Terminal(_)));
+    match existing {
+        Some(term_id) => {
+            app.state.panes
+                .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
+            app.state.panes.focus(term_id);
+        }
+        None => {
+            if let Some(detail_id) = app.state
+                .panes
+                .find_pane(|c| matches!(c, PaneContent::Detail(_)))
+            {
+                app.state.panes.focused = detail_id;
+                app.state.panes
+                    .split_vertical(PaneContent::Terminal(session_key.to_string()));
+            }
+        }
+    }
+    apply_determined_mode(app);
 }
 
 /// Update the detail pane content to match the selected session.
 pub(crate) fn update_detail_pane(app: &mut App) {
     if let Some(key) = app.selected_session_key() {
-        if let Some(detail_id) = app
+        if let Some(detail_id) = app.state
             .panes
             .find_pane(|c| matches!(c, PaneContent::Detail(_)))
         {
-            app.panes
+            app.state.panes
                 .set_content(detail_id, PaneContent::Detail(key.clone()));
         }
 
         // Update terminal pane if the session has a running terminal (don't auto-spawn).
-        if app.terminals.contains_key(&key) {
-            if let Some(term_id) = app
+        if app.terminals.contains_key(&key)
+            && let Some(term_id) = app.state
                 .panes
                 .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
             {
-                app.panes
+                app.state.panes
                     .set_content(term_id, PaneContent::Terminal(key));
             }
-        }
     }
 }
 
 
 
-/// Find the pilot-mcp-server binary. Check next to the pilot binary first, then PATH.
-fn which_pilot_mcp() -> Result<String, ()> {
-    // Check next to current executable.
-    if let Ok(exe) = std::env::current_exe() {
-        let Some(parent) = exe.parent() else { return Err(()) };
-        let sibling = parent.join("pilot-mcp-server");
-        if sibling.exists() {
-            return Ok(sibling.to_string_lossy().to_string());
-        }
-    }
-    // Check PATH.
-    let output = std::process::Command::new("which")
-        .arg("pilot-mcp-server")
-        .output();
-    if let Ok(o) = output {
-        if o.status.success() {
-            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(path);
-            }
-        }
-    }
-    tracing::warn!("pilot-mcp-server binary not found");
-    Err(())
+/// Parse a session key (`"source:key"`) back into a `TaskId` — used when
+/// the caller only has the string form but needs to talk to the store.
+fn parse_task_id(key: &str) -> Option<pilot_core::TaskId> {
+    key.split_once(':').map(|(source, k)| pilot_core::TaskId {
+        source: source.to_string(),
+        key: k.to_string(),
+    })
 }
 
-/// Start the Unix socket listener for MCP confirmations.
-/// Runs as a tokio task, sends McpConfirmRequest actions through the channel.
-pub fn start_mcp_socket_listener(
-    action_tx: mpsc::UnboundedSender<Action>,
-    monitored_sessions: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let socket_path = std::path::PathBuf::from(&home).join(".pilot").join("pilot.sock");
-
-    // Remove stale socket.
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::create_dir_all(socket_path.parent().unwrap());
-
-    tokio::spawn(async move {
-        let listener = match tokio::net::UnixListener::bind(&socket_path) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("Failed to bind MCP socket at {}: {e}", socket_path.display());
-                return;
-            }
-        };
-        tracing::info!("MCP socket listening at {}", socket_path.display());
-
-        loop {
-            let (mut stream, _) = match listener.accept().await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("MCP socket accept error: {e}");
-                    continue;
-                }
-            };
-
-            let tx = action_tx.clone();
-            let monitored = Arc::clone(&monitored_sessions);
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-                // Read length-prefixed JSON request.
-                let mut len_buf = [0u8; 4];
-                if stream.read_exact(&mut len_buf).await.is_err() {
-                    return;
-                }
-                let len = u32::from_be_bytes(len_buf) as usize;
-                let mut buf = vec![0u8; len];
-                if stream.read_exact(&mut buf).await.is_err() {
-                    return;
-                }
-
-                let req: serde_json::Value = match serde_json::from_slice(&buf) {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
-
-                let tool = req.get("tool").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                let display = req.get("display").and_then(|v| v.as_str()).unwrap_or(&tool).to_string();
-                let session_id = req.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-                // Auto-approve pilot_push for monitored sessions.
-                let auto_approve = tool == "pilot_push"
-                    && !session_id.is_empty()
-                    && monitored.lock().unwrap().contains(&session_id);
-
-                let approved = if auto_approve {
-                    tracing::info!("Monitor: auto-approving {tool} for {session_id}");
-                    // Notify the monitor state machine that a push happened.
-                    let _ = tx.send(Action::MonitorTick { session_key: session_id });
-                    true
-                } else {
-                    // Create a sync channel for the response (MCP handler blocks on this).
-                    let (resp_tx, resp_rx) = std::sync::mpsc::channel::<bool>();
-
-                    // Send to the TUI.
-                    let _ = tx.send(Action::McpConfirmRequest {
-                        tool: tool.clone(),
-                        display,
-                        response_tx: resp_tx,
-                    });
-
-                    // Wait for user approval (blocking on sync channel, in a tokio task).
-                    tokio::task::spawn_blocking(move || {
-                        resp_rx.recv_timeout(std::time::Duration::from_secs(120)).unwrap_or(false)
-                    })
-                    .await
-                    .unwrap_or(false)
-                };
-
-                // Send response back to MCP server.
-                let resp = serde_json::json!({ "approved": approved, "message": "" });
-                let resp_bytes = serde_json::to_vec(&resp).unwrap();
-                let len = (resp_bytes.len() as u32).to_be_bytes();
-                if let Err(e) = stream.write_all(&len).await {
-                    tracing::error!("MCP socket write (length) failed: {e}");
-                    return;
-                }
-                if let Err(e) = stream.write_all(&resp_bytes).await {
-                    tracing::error!("MCP socket write (body) failed: {e}");
-                    return;
-                }
-                if let Err(e) = stream.flush().await {
-                    tracing::error!("MCP socket flush failed: {e}");
-                }
-            });
-        }
-    });
-}
-
-/// A pending action from the MCP server awaiting user confirmation.
-#[derive(Debug, Clone)]
-pub struct PendingMcpAction {
-    pub tool: String,
-    pub display: String,
-    /// Channel to send approval/rejection back to the MCP server.
-    pub response_tx: Option<std::sync::mpsc::Sender<bool>>,
+/// Lock the shared monitored-sessions set, recovering from poisoning.
+///
+/// Helper tasks (worktree checkout, poller) run under tokio and a panic in
+/// any of them would poison this mutex forever. Recovering via
+/// `parking_lot::Mutex::lock` is infallible — no poisoning, no `PoisonError`
+/// handling, faster under contention than `std::sync::Mutex`.
+fn lock_monitored(
+    m: &crate::state::SharedMonitoredSessions,
+) -> parking_lot::MutexGuard<'_, std::collections::HashSet<String>> {
+    m.lock()
 }
 
 /// Reset detail pane state when switching sessions and auto-update detail.
-fn reset_detail_state(app: &mut App) {
-    app.detail_scroll = 0;
-    app.detail_cursor = 0;
-    app.selected_comments.clear();
+pub(crate) fn reset_detail_state(app: &mut App) {
+    app.state.detail_scroll = 0;
+    app.state.detail_cursor = 0;
+    app.state.selected_comments.clear();
     update_detail_pane(app);
 }
 
 /// Set the input mode, respecting overlay precedence.
-/// When an overlay is active (Help, McpConfirm, TextInput, Picker),
+/// When an overlay is active (Help, TextInput, Picker),
 /// input_mode is left alone -- the overlay owns it.
 fn set_mode(app: &mut App, mode: InputMode) {
-    if !app.input_mode.is_overlay() {
-        app.input_mode = mode;
+    if !app.state.input_mode.is_overlay() {
+        app.state.input_mode = mode;
     }
 }
 
 /// Determine the input mode from pane content and apply it.
-fn apply_determined_mode(app: &mut App) {
+pub(crate) fn apply_determined_mode(app: &mut App) {
     let mode = determine_mode(app);
     set_mode(app, mode);
 }
 
 /// Determine the input mode based on what the focused pane contains.
+///
+/// Mode is derived strictly from the focused pane. If the focused pane isn't
+/// a terminal, we are NOT in Terminal mode even if a terminal exists in some
+/// other tab/pane — otherwise keystrokes get swallowed by a PTY the user
+/// can't see.
 pub(crate) fn determine_mode(app: &App) -> InputMode {
-    // If we're in terminal mode, stay there unless explicitly exited.
-    // This prevents pane operations from accidentally resetting the mode.
-    if app.input_mode == InputMode::Terminal {
-        // Check if the terminal is still alive.
-        if let Some(key) = app.active_tab_key() {
-            if app.terminals.contains_key(key) {
-                return InputMode::Terminal;
+    match app.state.panes.focused_content() {
+        Some(PaneContent::Terminal(key)) => {
+            if app.terminals.contains_key(&key) {
+                InputMode::Terminal
+            } else {
+                InputMode::Normal
             }
         }
-    }
-    // Default: use pane content to determine mode.
-    match app.panes.focused_content() {
-        Some(PaneContent::Terminal(_)) => InputMode::Terminal,
         Some(PaneContent::Detail(_)) => InputMode::Detail,
         _ => InputMode::Normal,
     }
 }
 
 /// Get a PaneContent::Detail for the currently selected session.
-fn current_detail_content(app: &App) -> PaneContent {
-    app.selected_session_key()
-        .map(|k| PaneContent::Detail(k.clone()))
-        .unwrap_or(PaneContent::Empty)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_task_id_roundtrip() {
+        let tid = parse_task_id("github:owner/repo#123").unwrap();
+        assert_eq!(tid.source, "github");
+        assert_eq!(tid.key, "owner/repo#123");
+        // Round-trip through Display.
+        assert_eq!(tid.to_string(), "github:owner/repo#123");
+    }
+
+    #[test]
+    fn parse_task_id_with_colon_in_key() {
+        // Only the FIRST colon separates source/key — the rest is part of key.
+        let tid = parse_task_id("linear:ENG-123:extra").unwrap();
+        assert_eq!(tid.source, "linear");
+        assert_eq!(tid.key, "ENG-123:extra");
+    }
+
+    #[test]
+    fn parse_task_id_malformed() {
+        assert!(parse_task_id("no-colon").is_none());
+        assert!(parse_task_id("").is_none());
+    }
 }

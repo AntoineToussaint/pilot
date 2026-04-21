@@ -41,11 +41,6 @@ impl SessionManager {
         &self.order
     }
 
-    #[allow(dead_code)]
-    pub fn order_mut(&mut self) -> &mut Vec<String> {
-        &mut self.order
-    }
-
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
@@ -89,8 +84,8 @@ impl SessionManager {
     pub fn load_from_store(&mut self, store: &dyn Store) {
         if let Ok(records) = store.list_sessions() {
             for record in records {
-                if let Some(json) = &record.session_json {
-                    if let Ok(session) = serde_json::from_str::<Session>(json) {
+                if let Some(json) = &record.session_json
+                    && let Ok(session) = serde_json::from_str::<Session>(json) {
                         // Skip merged/closed — they're done.
                         if matches!(
                             session.primary_task.state,
@@ -101,7 +96,6 @@ impl SessionManager {
                         }
                         self.insert(record.task_id.clone(), session);
                     }
-                }
             }
         }
     }
@@ -128,5 +122,88 @@ impl SessionManager {
             }
         }
         tracing::info!("Saved {saved} sessions ({errors} errors)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pilot_core::{
+        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
+    };
+
+    fn task(title: &str, updated: chrono::DateTime<chrono::Utc>) -> Task {
+        Task {
+            id: TaskId { source: "test".into(), key: title.into() },
+            title: title.into(), body: None,
+            state: TaskState::Open, role: TaskRole::Author,
+            ci: CiStatus::None, review: ReviewStatus::None,
+            checks: vec![], unread_count: 0,
+            url: format!("https://github.com/o/r/pull/{title}"),
+            repo: Some("o/r".into()), branch: Some("f".into()),
+            updated_at: updated,
+            labels: vec![], reviewers: vec![], assignees: vec![],
+            auto_merge_enabled: false, is_in_merge_queue: false, has_conflicts: false,
+            needs_reply: false, last_commenter: None,
+            recent_activity: vec![], additions: 0, deletions: 0,
+        }
+    }
+
+    #[test]
+    fn insert_dedups_order() {
+        let mut m = SessionManager::new();
+        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.order(), &["a"]);
+    }
+
+    #[test]
+    fn remove_is_atomic() {
+        let mut m = SessionManager::new();
+        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert("b".into(), Session::new_at(task("b", chrono::Utc::now()), chrono::Utc::now()));
+        m.remove("a");
+        assert!(!m.contains_key("a"));
+        assert_eq!(m.order(), &["b"]);
+    }
+
+    #[test]
+    fn remove_missing_is_noop() {
+        let mut m = SessionManager::new();
+        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
+        m.remove("does-not-exist");
+        assert!(m.contains_key("a"));
+    }
+
+    #[test]
+    fn sort_by_updated_orders_newest_first() {
+        let mut m = SessionManager::new();
+        let older = chrono::Utc::now() - chrono::Duration::hours(2);
+        let newer = chrono::Utc::now();
+        m.insert("old".into(), Session::new_at(task("old", older), chrono::Utc::now()));
+        m.insert("new".into(), Session::new_at(task("new", newer), chrono::Utc::now()));
+        m.sort_by_updated();
+        assert_eq!(m.order(), &["new", "old"]);
+    }
+
+    #[test]
+    fn order_stays_in_sync_after_mixed_ops() {
+        // Regression guard — `order` and `sessions` must never diverge.
+        let mut m = SessionManager::new();
+        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert("b".into(), Session::new_at(task("b", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert("c".into(), Session::new_at(task("c", chrono::Utc::now()), chrono::Utc::now()));
+        m.remove("b");
+        m.insert("b".into(), Session::new_at(task("b2", chrono::Utc::now()), chrono::Utc::now()));
+        // Every ordered key must be gettable; every gettable key must be ordered.
+        for k in m.order() {
+            assert!(m.get(k).is_some(), "order key {k} has no session");
+        }
+        let mut ordered = m.order().to_vec();
+        ordered.sort();
+        let mut mapped: Vec<String> = m.iter().map(|(k, _)| k.clone()).collect();
+        mapped.sort();
+        assert_eq!(ordered, mapped);
     }
 }

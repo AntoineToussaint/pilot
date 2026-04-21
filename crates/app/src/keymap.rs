@@ -26,6 +26,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Char('j'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::DetailCursorDown, short: "j/↓", label: "next", description: "Move to next comment" },
         Binding { key: KeyCode::Char('k'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::DetailCursorUp, short: "k/↑", label: "prev", description: "Move to previous comment" },
         Binding { key: KeyCode::Tab, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::FocusPaneNext, short: "Tab", label: "pane", description: "Switch pane focus" },
+        Binding { key: KeyCode::Char(' '), modifiers: KeyModifiers::CONTROL, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::FocusPaneNext, short: "C-Space", label: "pane", description: "Next pane (works in terminal too)" },
         Binding { key: KeyCode::Esc, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::FocusPaneNext, short: "Esc", label: "back", description: "Back to sidebar" },
         Binding { key: KeyCode::Left, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Detail], action: || Action::FocusPaneLeft, short: "←", label: "sidebar", description: "Back to sidebar" },
     ]),
@@ -35,6 +36,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Char('b'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::OpenSession(ShellKind::Shell), short: "b", label: "shell", description: "Open shell in worktree" },
         Binding { key: KeyCode::Char('o'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::OpenInBrowser, short: "o", label: "open", description: "Open PR in browser" },
         Binding { key: KeyCode::Char('M'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::MergePr, short: "M", label: "merge", description: "Merge PR (requires double-press)" },
+        Binding { key: KeyCode::Char('V'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ApprovePr, short: "V", label: "approve", description: "Approve PR (only as Reviewer or Assignee)" },
         Binding { key: KeyCode::Char('w'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ToggleMonitor, short: "w", label: "watch", description: "Toggle automatic monitor (CI fix + rebase)" },
         Binding { key: KeyCode::Char('N'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::NewSession, short: "N", label: "new", description: "Create new standalone session" },
         Binding { key: KeyCode::Char('z'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::Snooze, short: "z", label: "snooze", description: "Snooze session for 4 hours" },
@@ -82,21 +84,40 @@ pub fn action_bar_for_mode(mode: KeyMode) -> Vec<(&'static str, &'static str)> {
     }
 }
 
+/// Snapshot of the selected PR's state used to drive contextual hints.
+/// Grouping these into a struct lets `contextual_hints` take a single
+/// argument instead of a 10-ary parameter list.
+pub struct HintContext {
+    pub ci: pilot_core::CiStatus,
+    pub review: pilot_core::ReviewStatus,
+    pub role: pilot_core::TaskRole,
+    pub has_conflicts: bool,
+    pub has_unread: bool,
+    pub is_ready: bool,
+    pub has_terminal: bool,
+    pub needs_reply: bool,
+    pub auto_merge_enabled: bool,
+    pub has_reviewers: bool,
+}
+
 /// Contextual action hints based on the current PR state.
 /// Shows only what's relevant RIGHT NOW.
 pub fn contextual_hints(
     mode: KeyMode,
-    ci: pilot_core::CiStatus,
-    _review: pilot_core::ReviewStatus,
-    role: pilot_core::TaskRole,
-    has_conflicts: bool,
-    has_unread: bool,
-    is_ready: bool,
-    has_terminal: bool,
-    needs_reply: bool,
-    in_merge_queue: bool,
-    has_reviewers: bool,
+    ctx: &HintContext,
 ) -> Vec<(&'static str, &'static str)> {
+    let HintContext {
+        ci,
+        review: _,
+        role,
+        has_conflicts,
+        has_unread,
+        is_ready,
+        has_terminal,
+        needs_reply,
+        auto_merge_enabled,
+        has_reviewers,
+    } = *ctx;
     let mut hints = Vec::with_capacity(8);
     let is_author = matches!(role, pilot_core::TaskRole::Author);
 
@@ -107,7 +128,7 @@ pub fn contextual_hints(
             hints.push(("Enter", "detail"));
 
             // Contextual actions based on PR state.
-            if is_ready && is_author && !in_merge_queue {
+            if is_ready && is_author && !auto_merge_enabled {
                 hints.push(("M", "MERGE"));
             }
             if has_conflicts && is_author {
@@ -165,9 +186,14 @@ pub fn contextual_hints(
 
 /// Get all bindings for the help page.
 /// Uses a cached result to avoid repeated String allocations.
-pub fn all_bindings() -> &'static Vec<(&'static str, Vec<(&'static str, &'static str, &'static str)>)> {
+/// One documented keybinding row: `(short, description, modes)`.
+pub type BindingHelp = (&'static str, &'static str, &'static str);
+/// A category in the help display: `(category_name, rows)`.
+pub type HelpCategory = (&'static str, Vec<BindingHelp>);
+
+pub fn all_bindings() -> &'static Vec<HelpCategory> {
     use std::sync::OnceLock;
-    static CACHE: OnceLock<Vec<(&str, Vec<(&str, &str, &str)>)>> = OnceLock::new();
+    static CACHE: OnceLock<Vec<HelpCategory>> = OnceLock::new();
     CACHE.get_or_init(|| {
         BINDINGS
             .iter()

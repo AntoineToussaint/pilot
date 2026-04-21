@@ -36,6 +36,9 @@ portable-pty = "0.8"
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Fast, poison-free mutex.
+parking_lot = "0.12"
+
 # Config
 serde_yaml = "0.9"
 
@@ -45,7 +48,6 @@ octocrab = "0.44"
 # Internal crates
 pilot-auth = { path = "crates/auth" }
 pilot-config = { path = "crates/config" }
-pilot-mcp = { path = "crates/mcp-server" }
 pilot-store = { path = "crates/store" }
 pilot-core = { path = "crates/core" }
 pilot-events = { path = "crates/events" }

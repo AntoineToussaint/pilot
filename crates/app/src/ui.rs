@@ -3,7 +3,7 @@ use pilot_core::{ActionPriority, CiStatus, ReviewStatus, TaskRole, TaskState};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
-use crate::app::{App, PendingMcpAction};
+use crate::app::App;
 use crate::input::InputMode;
 use crate::nav::{NavItem, nav_items, build_repo_groups};
 use crate::picker::PickerState;
@@ -50,28 +50,23 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_main(app, frame, outer[1]);
     render_status_bar(app, frame, outer[2]);
 
-    // MCP confirmation modal (overlay on top of everything).
-    if let Some(ref action) = app.pending_mcp {
-        render_mcp_confirmation(frame, frame.area(), action);
-    }
-
     // Picker overlay.
-    if let Some(ref picker) = app.picker {
+    if let Some(ref picker) = app.state.picker {
         render_picker_overlay(frame, frame.area(), picker);
     }
 
     // New session overlay.
-    if let Some(ref input) = app.new_session_input {
+    if let Some(ref input) = app.state.new_session_input {
         render_new_session_overlay(frame, frame.area(), input);
     }
 
     // Quick reply overlay.
-    if let Some((ref _key, ref text, _)) = app.quick_reply_input {
+    if let Some((ref _key, ref text, _)) = app.state.quick_reply_input {
         render_quick_reply_overlay(frame, frame.area(), text);
     }
 
     // Help overlay.
-    if app.show_help {
+    if app.state.show_help {
         render_help_overlay(frame, frame.area());
     }
 }
@@ -138,7 +133,7 @@ fn render_tab_bar(app: &App, frame: &mut Frame, area: Rect) {
         .enumerate()
         .flat_map(|(i, key)| {
             let is_active = i == app.terminals.active_tab();
-            let session = app.sessions.get(key);
+            let session = app.state.sessions.get(key);
             let label = session
                 .map(|s| s.primary_task.id.key.as_str())
                 .unwrap_or("?");
@@ -173,7 +168,7 @@ fn render_tab_bar(app: &App, frame: &mut Frame, area: Rect) {
 // ─── Main layout ──────────────────────────────────────────────────────────
 
 fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
-    let pct = app.sidebar_pct.clamp(20, 80);
+    let pct = app.state.sidebar_pct.clamp(20, 80);
     let chunks = Layout::horizontal([
         Constraint::Percentage(pct),
         Constraint::Percentage(100 - pct),
@@ -188,8 +183,8 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
 
 fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     // No border for the sidebar — use the full area.
-    let total_unread: usize = app.sessions.values().map(|s| s.unread_count()).sum();
-    let time_label = match app.activity_days_filter {
+    let total_unread: usize = app.state.sessions.values().map(|s| s.unread_count()).sum();
+    let time_label = match app.state.activity_days_filter {
         0 => "all".to_string(),
         d => format!("{d}d"),
     };
@@ -243,14 +238,14 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     );
 
     // ── Search bar ──
-    let search_style = if app.search_active {
+    let search_style = if app.state.search_active {
         Style::default().fg(C_TEXT_BRIGHT).bg(C_BG_HOVER)
     } else {
         Style::default().fg(C_TEXT_DIM)
     };
-    let cursor = if app.search_active { "|" } else { "" };
-    let search_text = if app.search_active || !app.search_query.is_empty() {
-        format!("  /{}{cursor}", app.search_query)
+    let cursor = if app.state.search_active { "|" } else { "" };
+    let search_text = if app.state.search_active || !app.state.search_query.is_empty() {
+        format!("  /{}{cursor}", app.state.search_query)
     } else {
         "  / filter (needs:reply ci:failed ...)".into()
     };
@@ -266,11 +261,11 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     let w = list_area.width as usize;
 
     // Loading spinner.
-    if !app.loaded {
+    if !app.state.loaded {
         let spinner = [
             "   ", ".  ", ".. ", "...", " ..", "  .", "   ", ".  ", ".. ", "...",
         ];
-        let s = spinner[(app.tick_count as usize / 2) % spinner.len()];
+        let s = spinner[(app.state.tick_count as usize / 2) % spinner.len()];
         lines.push(Line::from(vec![
             Span::styled(format!("  {s} "), Style::default().fg(C_ACCENT)),
             Span::styled("Loading", Style::default().fg(C_TEXT)),
@@ -282,12 +277,12 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .filter(|i| matches!(i, NavItem::Session(_)))
         .count();
-    if app.loaded && session_count == 0 {
-        let reason = if !app.search_query.is_empty() {
-            format!("  No matches for /{}", app.search_query)
-        } else if app.activity_days_filter > 0 {
-            format!("  No PRs active in last {}d", app.activity_days_filter)
-        } else if app.config.providers.github.filters.is_empty() {
+    if app.state.loaded && session_count == 0 {
+        let reason = if !app.state.search_query.is_empty() {
+            format!("  No matches for /{}", app.state.search_query)
+        } else if app.state.activity_days_filter > 0 {
+            format!("  No PRs active in last {}d", app.state.activity_days_filter)
+        } else if app.state.config.providers.github.filters.is_empty() {
             "  No PRs found.".to_string()
         } else {
             "  No PRs match your filters.".to_string()
@@ -298,7 +293,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(C_TEXT_DIM).italic(),
         )));
         lines.push(Line::raw(""));
-        if app.activity_days_filter > 0 {
+        if app.state.activity_days_filter > 0 {
             lines.push(Line::from(Span::styled(
                 "  Press 't' to widen the time filter.",
                 Style::default().fg(C_TEXT_DIM),
@@ -307,13 +302,16 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     // ── Priority summary bar (compact triage counts) ──
-    if app.loaded && session_count > 0 {
+    if app.state.loaded && session_count > 0 {
+        let render_now = chrono::Utc::now();
         let mut counts = std::collections::HashMap::<ActionPriority, usize>::new();
         for it in &items {
             if let NavItem::Session(k) = it
-                && let Some(s) = app.sessions.get(k)
+                && let Some(s) = app.state.sessions.get(k)
             {
-                *counts.entry(s.action_priority(&app.username)).or_insert(0) += 1;
+                *counts
+                    .entry(s.action_priority(&app.state.username, render_now))
+                    .or_insert(0) += 1;
             }
         }
 
@@ -349,7 +347,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     // Column header — matches the fixed-width layout below.
     // Left(9) + Title(flex) + Right(20) = w
-    if app.loaded && session_count > 0 {
+    if app.state.loaded && session_count > 0 {
         let title_w = w.saturating_sub(9 + 20);
         let header_title = format!("{:<width$}", "Title", width = title_w);
         lines.push(Line::from(vec![
@@ -365,7 +363,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         .map(|(repo, keys)| {
             let unread: usize = keys
                 .iter()
-                .filter_map(|k| app.sessions.get(k))
+                .filter_map(|k| app.state.sessions.get(k))
                 .map(|s| s.unread_count())
                 .sum();
             (repo.as_str(), (keys.len(), unread))
@@ -391,11 +389,11 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     // ── Render each nav item ──
     for (nav_idx, item) in items.iter().enumerate() {
-        let is_cursor = nav_idx == app.selected;
+        let is_cursor = nav_idx == app.state.selected;
 
         match item {
             NavItem::Repo(repo) => {
-                let collapsed = app.collapsed_repos.contains(repo);
+                let collapsed = app.state.collapsed_repos.contains(repo);
                 let (count, unread) = repo_stats.get(repo.as_str()).copied().unwrap_or((0, 0));
                 let repo_short = repo.rsplit('/').next().unwrap_or(repo);
 
@@ -451,31 +449,14 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 lines.push(Line::from(spans));
             }
             NavItem::Session(key) => {
-                let Some(session) = app.sessions.get(key) else { continue };
+                let Some(session) = app.state.sessions.get(key) else { continue };
                 let task = &session.primary_task;
                 let unread = session.unread_count();
                 let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
 
                 // ── Status label ──
-                let (label_text, label_fg, label_bg) = if task.has_conflicts {
-                    ("CONFLICT", Color::Rgb(15,17,23), C_RED)
-                } else if task.ci == CiStatus::Failure {
-                    ("CI FAIL", Color::Rgb(15,17,23), C_RED)
-                } else if task.review == ReviewStatus::ChangesRequested {
-                    ("CHANGES", Color::Rgb(15,17,23), C_ORANGE)
-                } else if task.in_merge_queue {
-                    ("QUEUED", Color::Rgb(15,17,23), C_MAGENTA)
-                } else if task.review == ReviewStatus::Approved && matches!(task.ci, CiStatus::Success | CiStatus::None) {
-                    ("READY", Color::Rgb(15,17,23), C_GREEN)
-                } else if task.review == ReviewStatus::Pending {
-                    ("REVIEW", Color::Rgb(15,17,23), C_YELLOW)
-                } else if matches!(task.ci, CiStatus::Running | CiStatus::Pending) {
-                    ("CI...", C_YELLOW, bg)
-                } else if matches!(task.state, TaskState::Draft) {
-                    ("DRAFT", C_TEXT_DIM, bg)
-                } else {
-                    ("", C_TEXT_DIM, bg)
-                };
+                let tag = pilot_core::StatusTag::for_task(task);
+                let (label_text, label_fg, label_bg) = status_tag_colors(tag, bg);
 
                 // ── PR number ──
                 let pr_num = task.id.key.rsplit_once('#')
@@ -495,6 +476,15 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 // ── Time ──
                 let time_str = time_ago_short(&task.updated_at);
 
+                // ── Tmux-alive indicator ──
+                // "⚡" if there's a live tmux session we could attach to
+                // but haven't yet. If pilot already has an active terminal
+                // for this session, the tab bar already shows it — no need
+                // for a duplicate indicator.
+                let tmux_name = key.replace([':', '/'], "_");
+                let tmux_alive = app.state.live_tmux_sessions.contains(&tmux_name)
+                    && !app.terminals.contains_key(key);
+
                 // ── Build right side FIRST with fixed total width ──
                 // unread(4) + status(10) + time(6) = 20 chars always
                 const RIGHT_W: usize = 20;
@@ -506,8 +496,8 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 };
                 let time_part = format!("{:>5}", time_str);
 
-                // ── Left side: cursor(2) + pr#(5) + role(2) = 9 ──
-                const LEFT_W: usize = 9;
+                // ── Left side: cursor(2) + pr#(5) + role(2) + tmux(2) = 11 ──
+                const LEFT_W: usize = 11;
 
                 // ── Title fills the gap ──
                 let title_w = w.saturating_sub(LEFT_W + RIGHT_W);
@@ -543,6 +533,13 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                         TaskRole::Assignee => Span::styled("A ", Style::default().fg(C_GREEN).bg(bg)),
                         TaskRole::Mentioned => Span::styled("  ", Style::default().bg(bg)),
                     },
+                    // Tmux-alive indicator (2 chars)
+                    if tmux_alive {
+                        Span::styled("⚡", Style::default().fg(C_YELLOW).bg(bg))
+                    } else {
+                        Span::styled("  ", Style::default().bg(bg))
+                    },
+                    Span::styled(" ", Style::default().bg(bg)),
                     // Title (padded to fill)
                     Span::styled(padded_title, title_style),
                     // Right side: unread(4) + status(10) + time(6) = 20
@@ -563,22 +560,24 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     // ── Action bar (bottom) — contextual based on selected PR ──
     let hints = if let Some(key) = app.selected_session_key() {
-        if let Some(session) = app.sessions.get(&key) {
+        if let Some(session) = app.state.sessions.get(&key) {
             let task = &session.primary_task;
             let ci_ok = matches!(task.ci, CiStatus::Success | CiStatus::None);
             let review_ok = task.review == ReviewStatus::Approved;
             crate::keymap::contextual_hints(
                 crate::keys::KeyMode::Normal,
-                task.ci,
-                task.review,
-                task.role,
-                task.has_conflicts,
-                session.unread_count() > 0,
-                ci_ok && review_ok && !task.has_conflicts,
-                app.terminals.contains_key(&key),
-                task.needs_reply,
-                task.in_merge_queue,
-                !task.reviewers.is_empty() || !task.assignees.is_empty(),
+                &crate::keymap::HintContext {
+                    ci: task.ci,
+                    review: task.review,
+                    role: task.role,
+                    has_conflicts: task.has_conflicts,
+                    has_unread: session.unread_count() > 0,
+                    is_ready: ci_ok && review_ok && !task.has_conflicts,
+                    has_terminal: app.terminals.contains_key(&key),
+                    needs_reply: task.needs_reply,
+                    auto_merge_enabled: task.auto_merge_enabled,
+                    has_reviewers: !task.reviewers.is_empty() || !task.assignees.is_empty(),
+                },
             )
         } else {
             crate::keymap::action_bar_for_mode(crate::keys::KeyMode::Normal)
@@ -621,11 +620,11 @@ fn render_right_pane(app: &mut App, frame: &mut Frame, area: Rect) {
 // ─── Detail pane (PR header + selectable comment thread) ──────────────────
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
-    let Some(session) = app.sessions.get(key) else {
+    let Some(session) = app.state.sessions.get(key) else {
         return;
     };
     let task = &session.primary_task;
-    let is_focused = app.input_mode == InputMode::Detail;
+    let is_focused = app.state.input_mode == InputMode::Detail;
     let border_color = if is_focused { C_BORDER_ACTIVE } else { C_BORDER };
 
     // Left border only to separate from sidebar.
@@ -648,7 +647,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
     .split(inner);
 
     // ── PR header ──
-    let staleness = time::staleness(&task.updated_at, &task.updated_at);
+    let staleness = time::staleness(&task.updated_at, &task.updated_at, chrono::Utc::now());
     let stale_span = match staleness {
         Staleness::Stale { idle_days } => Span::styled(
             format!("  idle {idle_days}d"),
@@ -767,12 +766,12 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
             Style::default().fg(C_TEXT_DIM).italic(),
         )));
     } else {
-        let any_selected = !app.selected_comments.is_empty();
+        let any_selected = !app.state.selected_comments.is_empty();
         let comment_width = chunks[1].width as usize;
 
         for (i, a) in session.activity.iter().enumerate() {
-            let is_cursor = is_focused && i == app.detail_cursor;
-            let is_checked = app.selected_comments.contains(&i);
+            let is_cursor = is_focused && i == app.state.detail_cursor;
+            let is_checked = app.state.selected_comments.contains(&i);
             let is_unread = session.is_activity_unread(i);
 
             let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
@@ -798,16 +797,45 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
             let author_color = if is_unread { C_TEXT_BRIGHT } else { C_TEXT_DIM };
             let body_color = if is_unread { C_TEXT } else { C_TEXT_DIM };
 
-            // Compact: one line per comment.
-            comment_lines.push(Line::from(vec![
+            // Compact: one line per comment. Inline review comments append file:line.
+            let mut summary_spans = vec![
                 Span::styled(prefix, Style::default().fg(prefix_color).bg(bg)),
                 Span::styled(&a.author, Style::default().fg(author_color).bold().bg(bg)),
                 Span::styled(format!(" {ago_str} ", ), Style::default().fg(C_TEXT_DIM).bg(bg)),
-                Span::styled(body_summary, Style::default().fg(body_color).bg(bg)),
-            ]));
+            ];
+            if let Some(path) = &a.path {
+                let loc = match a.line {
+                    Some(n) => format!("{path}:{n} "),
+                    None => format!("{path} "),
+                };
+                summary_spans.push(Span::styled(loc, Style::default().fg(C_ACCENT).bg(bg)));
+            }
+            summary_spans.push(Span::styled(body_summary, Style::default().fg(body_color).bg(bg)));
+            comment_lines.push(Line::from(summary_spans));
 
             // Expanded: if cursor is on this comment, show full body below.
             if is_cursor && !a.body.is_empty() {
+                // Diff hunk — show code context first.
+                if let Some(hunk) = &a.diff_hunk
+                    && !hunk.is_empty() {
+                        let hunk_width = comment_width.saturating_sub(6);
+                        for raw in hunk.lines().take(10) {
+                            let color = match raw.chars().next() {
+                                Some('+') => C_GREEN,
+                                Some('-') => C_RED,
+                                Some('@') => C_ACCENT,
+                                _ => C_TEXT_DIM,
+                            };
+                            let shown: String = raw.chars().take(hunk_width).collect();
+                            comment_lines.push(Line::from(vec![
+                                Span::styled("    \u{2502} ", Style::default().fg(C_ACCENT).bg(bg)),
+                                Span::styled(shown, Style::default().fg(color).bg(bg)),
+                            ]));
+                        }
+                        comment_lines.push(Line::from(vec![
+                            Span::styled("    \u{2502}", Style::default().fg(C_ACCENT).bg(bg)),
+                        ]));
+                    }
                 let wrap_width = comment_width.saturating_sub(6);
                 let cleaned = strip_html(&a.body);
                 let md_lines = render_markdown(&cleaned);
@@ -879,13 +907,13 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
 
     frame.render_widget(
         Paragraph::new(comment_lines)
-            .scroll((app.detail_scroll, 0))
+            .scroll((app.state.detail_scroll, 0))
             .style(Style::default().bg(C_BG)),
         chunks[1],
     );
 
     // ── Action bar ──
-    let n_selected = app.selected_comments.len();
+    let n_selected = app.state.selected_comments.len();
 
     // Contextual action bar for detail pane.
     let detail_hints = {
@@ -893,16 +921,18 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
         let review_ok = task.review == ReviewStatus::Approved;
         crate::keymap::contextual_hints(
             crate::keys::KeyMode::Detail,
-            task.ci,
-            task.review,
-            task.role,
-            task.has_conflicts,
-            session.unread_count() > 0,
-            ci_ok && review_ok && !task.has_conflicts,
-            app.terminals.contains_key(key),
-            task.needs_reply,
-            task.in_merge_queue,
-            !task.reviewers.is_empty() || !task.assignees.is_empty(),
+            &crate::keymap::HintContext {
+                ci: task.ci,
+                review: task.review,
+                role: task.role,
+                has_conflicts: task.has_conflicts,
+                has_unread: session.unread_count() > 0,
+                is_ready: ci_ok && review_ok && !task.has_conflicts,
+                has_terminal: app.terminals.contains_key(key),
+                needs_reply: task.needs_reply,
+                auto_merge_enabled: task.auto_merge_enabled,
+                has_reviewers: !task.reviewers.is_empty() || !task.assignees.is_empty(),
+            },
         )
     };
 
@@ -940,7 +970,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
 // ─── Terminal ─────────────────────────────────────────────────────────────
 
 fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
-    let is_focused = app.input_mode == InputMode::Terminal;
+    let is_focused = app.state.input_mode == InputMode::Terminal;
     let border_color = if is_focused { C_GREEN } else { C_BORDER };
 
     let shell_label = match app.terminals.kind(key) {
@@ -978,10 +1008,10 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
     frame.render_widget(block, area);
 
     let new_size = (inner.width, inner.height);
-    if new_size != app.last_term_area && new_size.0 > 0 && new_size.1 > 0 {
-        app.last_term_area = new_size;
-        if let Some(term) = app.terminals.get_mut(key) {
-            if let Err(e) = term.resize(pilot_tui_term::PtySize {
+    if new_size != app.state.last_term_area && new_size.0 > 0 && new_size.1 > 0 {
+        app.state.last_term_area = new_size;
+        if let Some(term) = app.terminals.get_mut(key)
+            && let Err(e) = term.resize(pilot_tui_term::PtySize {
                 rows: new_size.1,
                 cols: new_size.0,
                 pixel_width: 0,
@@ -989,7 +1019,6 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
             }) {
                 tracing::error!("Terminal resize failed: {e}");
             }
-        }
     }
 
     if let Some(term) = app.terminals.get_mut(key) {
@@ -1010,10 +1039,10 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 
     let spinner = [".", "..", "...", ".. ", ".  "];
-    let s = spinner[(app.tick_count as usize / 2) % spinner.len()];
+    let s = spinner[(app.state.tick_count as usize / 2) % spinner.len()];
 
-    let lines = if !app.loaded {
-        let filter = app
+    let lines = if !app.state.loaded {
+        let filter = app.state
             .config
             .providers
             .github
@@ -1048,10 +1077,10 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("Auth:  ", Style::default().fg(C_TEXT_DIM)),
-                Span::styled(&app.status, Style::default().fg(C_TEXT)),
+                Span::styled(&app.state.status, Style::default().fg(C_TEXT)),
             ]),
         ]
-    } else if app.sessions.is_empty() {
+    } else if app.state.sessions.is_empty() {
         vec![
             Line::raw(""),
             Line::from(Span::styled(
@@ -1120,28 +1149,35 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
 // ─── Status bar ───────────────────────────────────────────────────────────
 
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let (label, label_bg) = match app.input_mode {
+    // Derive the display mode from the pane tree for core modes so the label
+    // can never show "TERM" when no terminal pane is visible. Overlay modes
+    // (Help, TextInput, etc.) take precedence because they own the screen.
+    let effective_mode = if app.state.input_mode.is_overlay() {
+        app.state.input_mode.clone()
+    } else {
+        crate::app::determine_mode(app)
+    };
+    let (label, label_bg) = match effective_mode {
         InputMode::Normal => ("INBOX", C_ACCENT),
         InputMode::Detail => ("DETAIL", C_MAGENTA),
         InputMode::PanePrefix => ("PANE", C_ORANGE),
         InputMode::Terminal => ("TERM", C_GREEN),
         InputMode::TextInput(_) => ("INPUT", C_YELLOW),
         InputMode::Picker => ("PICKER", C_MAGENTA),
-        InputMode::McpConfirm => ("MCP", C_ORANGE),
         InputMode::Help => ("HELP", C_ACCENT),
     };
 
-    let total_unread: usize = app.sessions.values().map(|s| s.unread_count()).sum();
-    let notif = app
+    let total_unread: usize = app.state.sessions.values().map(|s| s.unread_count()).sum();
+    let notif = app.state
         .notifications
         .first()
         .map(|s| truncate_str(s, 40))
         .unwrap_or("");
 
-    let user_label = if app.username.is_empty() {
+    let user_label = if app.state.username.is_empty() {
         String::new()
     } else {
-        format!("{} (gh)", app.username)
+        format!("{} (gh)", app.state.username)
     };
 
     let bar = Line::from(vec![
@@ -1153,14 +1189,14 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 .bold(),
         ),
         Span::raw(" "),
-        if app.status.starts_with("Error") {
+        if app.state.status.starts_with("Error") {
             Span::styled(
-                format!("{} ", app.status),
+                format!("{} ", app.state.status),
                 Style::default().fg(C_RED).bold(),
             )
         } else {
             Span::styled(
-                format!("{} ", app.status),
+                format!("{} ", app.state.status),
                 Style::default().fg(C_TEXT_DIM),
             )
         },
@@ -1194,7 +1230,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             Span::raw("")
         },
-        if !app.credentials_ok {
+        if !app.state.credentials_ok {
             Span::styled(
                 "  !! No GitHub credentials",
                 Style::default().fg(C_RED).bold(),
@@ -1213,65 +1249,6 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
 /// Render terminal content using whatever backend is compiled.
 fn render_term_content(term: &mut pilot_tui_term::TermSession, frame: &mut Frame, area: Rect) {
     pilot_tui_term::render_to_frame(term, frame, area);
-}
-
-// ─── MCP Confirmation Modal ──────────────────────────────────────────────
-
-fn render_mcp_confirmation(frame: &mut Frame, area: Rect, action: &PendingMcpAction) {
-    let modal_w = 60u16.min(area.width.saturating_sub(4));
-    let modal_h = 8u16;
-    let x = (area.width.saturating_sub(modal_w)) / 2;
-    let y = (area.height.saturating_sub(modal_h)) / 2;
-    let modal_area = Rect::new(x, y, modal_w, modal_h);
-
-    frame.render_widget(Clear, modal_area);
-
-    let icon = match action.tool.as_str() {
-        "pilot_push" => "^",
-        "pilot_reply" => ">",
-        "pilot_merge" => "M",
-        "pilot_approve" => "+",
-        "pilot_resolve_thread" => "v",
-        "pilot_request_changes" => "x",
-        _ => "!",
-    };
-
-    let lines = vec![
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(
-                format!("  {icon} Claude wants to: "),
-                Style::default().fg(C_TEXT_BRIGHT).bold(),
-            ),
-            Span::styled(&action.tool, Style::default().fg(C_ACCENT).bold()),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            format!(
-                "  {}",
-                truncate_str(&action.display, modal_w as usize - 6)
-            ),
-            Style::default().fg(C_TEXT),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("  y/Enter", Style::default().fg(C_GREEN).bold()),
-            Span::styled(" approve   ", Style::default().fg(C_TEXT_DIM)),
-            Span::styled("n/Esc", Style::default().fg(C_RED).bold()),
-            Span::styled(" reject", Style::default().fg(C_TEXT_DIM)),
-        ]),
-    ];
-
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            " Confirm Action ",
-            Style::default().fg(C_YELLOW).bold(),
-        ))
-        .border_style(Style::default().fg(C_YELLOW))
-        .style(Style::default().bg(C_BG_ALT));
-
-    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
 }
 
 // ─── Picker Overlay ──────────────────────────────────────────────────────
@@ -1485,6 +1462,23 @@ fn time_ago_short(dt: &chrono::DateTime<chrono::Utc>) -> String {
     format!("{years}y")
 }
 
+fn status_tag_colors(tag: pilot_core::StatusTag, row_bg: Color) -> (&'static str, Color, Color) {
+    use pilot_core::StatusTag;
+    let dark_fg = Color::Rgb(15, 17, 23);
+    match tag {
+        StatusTag::Conflict => ("CONFLICT", dark_fg, C_RED),
+        StatusTag::CiFailed => ("CI FAIL", dark_fg, C_RED),
+        StatusTag::ChangesRequested => ("CHANGES", dark_fg, C_ORANGE),
+        StatusTag::Queued => ("QUEUED", dark_fg, C_MAGENTA),
+        StatusTag::Ready => ("READY", dark_fg, C_GREEN),
+        StatusTag::AutoMerge => ("AUTO", dark_fg, C_MAGENTA),
+        StatusTag::ReviewPending => ("REVIEW", dark_fg, C_YELLOW),
+        StatusTag::CiRunning => ("CI...", C_YELLOW, row_bg),
+        StatusTag::Draft => ("DRAFT", C_TEXT_DIM, row_bg),
+        StatusTag::None => ("", C_TEXT_DIM, row_bg),
+    }
+}
+
 /// Hash a PR number string to a distinctive color for visual identification.
 fn pr_number_color(pr_num: &str) -> Color {
     const PALETTE: &[Color] = &[
@@ -1520,11 +1514,10 @@ fn render_markdown(input: &str) -> Vec<Line<'static>> {
                         style = style.fg(C_TEXT);
                     }
                     // Make bold text bright.
-                    if style.add_modifier.contains(Modifier::BOLD) {
-                        if style.fg == Some(C_TEXT) {
+                    if style.add_modifier.contains(Modifier::BOLD)
+                        && style.fg == Some(C_TEXT) {
                             style = style.fg(C_TEXT_BRIGHT);
                         }
-                    }
                     // Style code spans distinctively.
                     if span.style.bg.is_some() {
                         style = style.bg(C_BG_ALT).fg(C_CYAN);
