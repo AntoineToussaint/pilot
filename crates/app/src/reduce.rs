@@ -23,6 +23,34 @@ use pilot_events::EventKind;
 /// Max attempts to auto-fix CI before giving up.
 pub(crate) const MONITOR_MAX_CI_RETRIES: u32 = 3;
 
+/// Auto-mark-read sweep. Called from the shell's Tick handler every frame.
+///
+/// Pure: only reads `state.selected_session_key()`-equivalent (derived from
+/// nav) and mutates `viewing_since` / the session's read state. Takes a
+/// `Clock` so the 2-second threshold is testable.
+///
+/// Rule: if the cursor has been sitting on the same session for ≥2 seconds,
+/// mark it read. Moving the cursor resets the timer.
+pub fn auto_mark_read_tick(state: &mut State, clock: &Clock) {
+    let Some(key) = selected_key(state) else {
+        state.viewing_since = None;
+        return;
+    };
+    match &state.viewing_since {
+        Some((viewed_key, since)) if viewed_key == &key => {
+            if clock.instant.saturating_duration_since(*since).as_secs() >= 2
+                && let Some(session) = state.sessions.get_mut(&key)
+                && session.unread_count() > 0
+            {
+                session.mark_read(clock.chrono);
+            }
+        }
+        _ => {
+            state.viewing_since = Some((key, clock.instant));
+        }
+    }
+}
+
 /// Bundle of "ambient" inputs the reducer needs but which would otherwise
 /// be IO / non-deterministic. Centralizing them here means tests can pin
 /// every time-and-environment-dependent decision to a known value.

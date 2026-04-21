@@ -31,6 +31,11 @@ const C_CYAN: Color = Color::Rgb(63, 185, 208);
 // ─── Main render ───────────────────────────────────────────────────────────
 
 pub fn render(app: &mut App, frame: &mut Frame) {
+    // Sample wall time ONCE per render and thread it through every sub-
+    // function. Avoids per-row `Utc::now()` syscalls (dozens of them for a
+    // sidebar with many sessions) and keeps all "N ago" columns consistent
+    // within a single frame.
+    let now = chrono::Utc::now();
     // Fill the entire background first.
     frame.render_widget(
         Block::default().style(Style::default().bg(C_BG)),
@@ -47,7 +52,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     if !app.terminals.tab_order().is_empty() {
         render_tab_bar(app, frame, outer[0]);
     }
-    render_main(app, frame, outer[1]);
+    render_main(app, frame, outer[1], now);
     render_status_bar(app, frame, outer[2]);
 
     // Picker overlay.
@@ -167,7 +172,7 @@ fn render_tab_bar(app: &App, frame: &mut Frame, area: Rect) {
 
 // ─── Main layout ──────────────────────────────────────────────────────────
 
-fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
+fn render_main(app: &mut App, frame: &mut Frame, area: Rect, now: chrono::DateTime<chrono::Utc>) {
     let pct = app.state.sidebar_pct.clamp(20, 80);
     let chunks = Layout::horizontal([
         Constraint::Percentage(pct),
@@ -175,13 +180,13 @@ fn render_main(app: &mut App, frame: &mut Frame, area: Rect) {
     ])
     .split(area);
 
-    render_sidebar(app, frame, chunks[0]);
-    render_right_pane(app, frame, chunks[1]);
+    render_sidebar(app, frame, chunks[0], now);
+    render_right_pane(app, frame, chunks[1], now);
 }
 
 // ─── Sidebar (borderless, clean table-like list) ──────────────────────────
 
-fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
+fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTime<chrono::Utc>) {
     // No border for the sidebar — use the full area.
     let total_unread: usize = app.state.sessions.values().map(|s| s.unread_count()).sum();
     let time_label = match app.state.activity_days_filter {
@@ -303,7 +308,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     // ── Priority summary bar (compact triage counts) ──
     if app.state.loaded && session_count > 0 {
-        let render_now = chrono::Utc::now();
+        let render_now = now;
         let mut counts = std::collections::HashMap::<ActionPriority, usize>::new();
         for it in &items {
             if let NavItem::Session(k) = it
@@ -474,7 +479,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 };
 
                 // ── Time ──
-                let time_str = time_ago_short(&task.updated_at);
+                let time_str = time_ago_short(&task.updated_at, now);
 
                 // ── Session state indicator ──
                 // ●  (green) pilot has an active terminal tab for this session
@@ -603,7 +608,12 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
 // ─── Right pane (detail or terminal or both) ───────────────────────────────
 
-fn render_right_pane(app: &mut App, frame: &mut Frame, area: Rect) {
+fn render_right_pane(
+    app: &mut App,
+    frame: &mut Frame,
+    area: Rect,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     let selected_key = app.selected_session_key();
 
     let Some(key) = selected_key else {
@@ -619,16 +629,22 @@ fn render_right_pane(app: &mut App, frame: &mut Frame, area: Rect) {
             Constraint::Percentage(70), // terminal
         ])
         .split(area);
-        render_detail(app, frame, chunks[0], &key);
+        render_detail(app, frame, chunks[0], &key, now);
         render_terminal(app, frame, chunks[1], &key);
     } else {
-        render_detail(app, frame, area, &key);
+        render_detail(app, frame, area, &key, now);
     }
 }
 
 // ─── Detail pane (PR header + selectable comment thread) ──────────────────
 
-fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
+fn render_detail(
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+    key: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     let Some(session) = app.state.sessions.get(key) else {
         return;
     };
@@ -656,7 +672,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
     .split(inner);
 
     // ── PR header ──
-    let staleness = time::staleness(&task.updated_at, &task.updated_at, chrono::Utc::now());
+    let staleness = time::staleness(&task.updated_at, &task.updated_at, now);
     let stale_span = match staleness {
         Staleness::Stale { idle_days } => Span::styled(
             format!("  idle {idle_days}d"),
@@ -785,7 +801,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect, key: &str) {
 
             let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
 
-            let ago_str = time_ago_short(&a.created_at);
+            let ago_str = time_ago_short(&a.created_at, now);
 
             // Prefix: checkbox or read indicator.
             let prefix = if any_selected || is_checked {
@@ -1444,8 +1460,9 @@ fn render_picker_overlay(frame: &mut Frame, area: Rect, picker: &PickerState) {
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 /// Short time-ago string without "ago" suffix: "2h", "3d", "1mo", "now".
-fn time_ago_short(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    let now = chrono::Utc::now();
+/// Takes `now` explicitly so render can sample wall time once and every row
+/// uses the same reference point (no per-row `Utc::now()` syscalls).
+fn time_ago_short(dt: &chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
     let diff = now.signed_duration_since(dt);
     let secs = diff.num_seconds();
     if secs < 60 {

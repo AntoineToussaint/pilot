@@ -893,23 +893,12 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             // Note: stale sessions are handled by TaskRemoved events from the poller.
             // We don't purge from SQLite on startup — the nav filters hide merged/closed PRs.
 
-            // Auto-mark-read: if viewing a session for 2+ seconds, mark it read.
-            if let Some(key) = app.selected_session_key() {
-                match &app.state.viewing_since {
-                    Some((viewed_key, since)) if viewed_key == &key => {
-                        if since.elapsed().as_secs() >= 2
-                            && let Some(session) = app.state.sessions.get_mut(&key)
-                                && session.unread_count() > 0 {
-                                    session.mark_read(chrono::Utc::now());
-                                }
-                    }
-                    _ => {
-                        app.state.viewing_since = Some((key, std::time::Instant::now()));
-                    }
-                }
-            } else {
-                app.state.viewing_since = None;
-            }
+            // Auto-mark-read: if cursor has been on the same session for 2+s,
+            // mark it read. Delegates to reduce so the Clock is the single
+            // time boundary (otherwise this touched `Instant::now()` and
+            // `chrono::Utc::now()` directly here).
+            let tick_clock = crate::reduce::Clock::now();
+            crate::reduce::auto_mark_read_tick(&mut app.state, &tick_clock);
 
             // Save all sessions every ~3s (30 ticks at 100ms).
             if app.state.tick_count.is_multiple_of(30) && !app.state.sessions.is_empty() {
