@@ -476,14 +476,14 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 // ── Time ──
                 let time_str = time_ago_short(&task.updated_at);
 
-                // ── Tmux-alive indicator ──
-                // "⚡" if there's a live tmux session we could attach to
-                // but haven't yet. If pilot already has an active terminal
-                // for this session, the tab bar already shows it — no need
-                // for a duplicate indicator.
+                // ── Session state indicator ──
+                // ●  (green) pilot has an active terminal tab for this session
+                // ⚡ (yellow) tmux session is alive on disk; press `c` to attach
+                // (blank) no session running
                 let tmux_name = key.replace([':', '/'], "_");
-                let tmux_alive = app.state.live_tmux_sessions.contains(&tmux_name)
-                    && !app.terminals.contains_key(key);
+                let has_live_terminal = app.terminals.contains_key(key);
+                let tmux_alive_detached =
+                    app.state.live_tmux_sessions.contains(&tmux_name) && !has_live_terminal;
 
                 // ── Build right side FIRST with fixed total width ──
                 // unread(4) + status(10) + time(6) = 20 chars always
@@ -533,8 +533,10 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                         TaskRole::Assignee => Span::styled("A ", Style::default().fg(C_GREEN).bg(bg)),
                         TaskRole::Mentioned => Span::styled("  ", Style::default().bg(bg)),
                     },
-                    // Tmux-alive indicator (2 chars)
-                    if tmux_alive {
+                    // Session indicator (2 chars)
+                    if has_live_terminal {
+                        Span::styled("●", Style::default().fg(C_GREEN).bg(bg))
+                    } else if tmux_alive_detached {
                         Span::styled("⚡", Style::default().fg(C_YELLOW).bg(bg))
                     } else {
                         Span::styled("  ", Style::default().bg(bg))

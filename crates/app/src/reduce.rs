@@ -858,6 +858,47 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         Action::TmuxSessionsRefreshed { sessions } => {
             state.live_tmux_sessions = sessions;
+            // Auto-attach: any persisted pilot session whose tmux process
+            // is alive but which doesn't have a pilot terminal gets its
+            // terminal re-spawned (`tmux -A` reattaches rather than
+            // creating new). Covers the "quit + restart" case, sessions
+            // learned after startup, and tabs the user closed but wants
+            // back when they come into view.
+            let shell_kind = crate::action::ShellKind::Claude;
+            let candidates: Vec<(String, PathBuf)> = state
+                .sessions
+                .iter()
+                .filter(|(_, s)| {
+                    matches!(
+                        s.primary_task.state,
+                        pilot_core::TaskState::Open
+                            | pilot_core::TaskState::Draft
+                            | pilot_core::TaskState::InReview
+                            | pilot_core::TaskState::InProgress
+                    )
+                })
+                .filter_map(|(key, s)| {
+                    let tmux_name = key.replace([':', '/'], "_");
+                    if !state.live_tmux_sessions.contains(&tmux_name) {
+                        return None;
+                    }
+                    if state.terminal_index.contains_key(key) {
+                        return None; // already attached
+                    }
+                    let cwd = s
+                        .worktree_path
+                        .clone()
+                        .unwrap_or_else(|| clock.default_cwd.clone());
+                    Some((key.clone(), cwd))
+                })
+                .collect();
+            for (key, cwd) in candidates {
+                cmds.push(Command::SpawnTerminal {
+                    session_key: key.into(),
+                    cwd,
+                    kind: shell_kind,
+                });
+            }
         }
 
         Action::NeedsRebaseResult {
