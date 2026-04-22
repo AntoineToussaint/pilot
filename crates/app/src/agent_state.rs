@@ -113,19 +113,110 @@ pub(crate) fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
         return true;
     }
 
+    // Turn-complete footer + trailing `?` in Claude's response.
+    //
+    // Claude renders a subtle footer after every assistant turn:
+    //   "* Worked for 54s" / "* Churned for 3m 12s" / etc.
+    // If the NEAREST non-empty line above that footer ends with `?`,
+    // Claude just asked the user a question in free text (not via
+    // the numbered-options UI, not via the permission hook) and is
+    // now waiting for a reply. Only looking immediately above the
+    // footer keeps the user's own earlier questions from triggering.
+    if claude_turn_question(trimmed) {
+        return true;
+    }
+
+    // User-configured patterns matched against the last non-empty line.
     let last_line = trimmed
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
     let lower_last = last_line.to_lowercase();
-
     for pattern in patterns {
         if lower_last.contains(&pattern.to_lowercase()) {
             return true;
         }
     }
     false
+}
+
+/// True when Claude's turn-complete footer is present AND the nearest
+/// content line above it ends with `?`. See the comment in
+/// `detect_asking` for the reasoning behind this narrow scope.
+fn claude_turn_question(trimmed: &str) -> bool {
+    let lines: Vec<&str> = trimmed.lines().collect();
+    // Scan from the bottom for a footer in the last ~6 lines.
+    let footer_rel = lines.iter().rev().take(6).position(|l| {
+        let t = l.trim_start_matches(['*', ' ']);
+        t.starts_with("Worked for ")
+            || t.starts_with("Churned for ")
+            || t.starts_with("Dilly-dallying")
+    });
+    let Some(rev_idx) = footer_rel else {
+        return false;
+    };
+    let footer_abs = lines.len().saturating_sub(1 + rev_idx);
+    // Find the nearest non-empty line above the footer.
+    for i in (0..footer_abs).rev() {
+        let t = lines[i].trim_end();
+        if !t.is_empty() {
+            return t.ends_with('?');
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod turn_question_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn worked_for_footer_plus_trailing_q_triggers_asking() {
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"Verified builds: clean.\n\nThe rebased commit is ready. Want me to push (git push --force-with-lease) or hold?\n\n* Worked for 54s\n";
+        assert_eq!(
+            detect_state(old, out, AgentState::Active, &patterns),
+            AgentState::Asking
+        );
+    }
+
+    #[test]
+    fn worked_for_footer_without_trailing_q_stays_idle() {
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"All done. CI is green.\n\n* Worked for 2m 14s\n";
+        assert_eq!(
+            detect_state(old, out, AgentState::Active, &patterns),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn churned_for_and_trailing_q_also_triggers() {
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"Should I retry or skip this check?\n* Churned for 3m 12s\n";
+        assert_eq!(
+            detect_state(old, out, AgentState::Active, &patterns),
+            AgentState::Asking
+        );
+    }
+
+    #[test]
+    fn trailing_q_without_footer_does_not_trigger() {
+        // User's earlier "is CI green?" with no turn-complete footer
+        // afterward (e.g. Claude is still mid-turn) must NOT fire.
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"is CI green?\n\nChecking now...\n";
+        assert_eq!(
+            detect_state(old, out, AgentState::Active, &patterns),
+            AgentState::Idle
+        );
+    }
 }
 
 fn strip_ansi(s: &str) -> String {

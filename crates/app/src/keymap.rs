@@ -36,7 +36,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Char('b'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::OpenSession(ShellKind::Shell), short: "b", label: "shell", description: "Open shell in worktree" },
         Binding { key: KeyCode::Char('o'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::OpenInBrowser, short: "o", label: "open", description: "Open PR in browser" },
         Binding { key: KeyCode::Char('u'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::OpenCiChecks, short: "u", label: "ci", description: "Open CI checks tab in browser" },
-        Binding { key: KeyCode::Char('i'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::JumpToNextAsking, short: "i", label: "input", description: "Jump to next session waiting for your input" },
+        Binding { key: KeyCode::Char('/'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::JumpToNextAsking, short: "/", label: "input", description: "Jump to next session waiting for your input (visual: slash cycles through '?')" },
         Binding { key: KeyCode::Char('D'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal], action: || Action::FocusDetail, short: "D", label: "comments", description: "Focus comments pane (j/k to browse, Space to select)" },
         Binding { key: KeyCode::Char('M'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::MergePr, short: "M", label: "merge", description: "Merge PR (requires double-press)" },
         Binding { key: KeyCode::Char('V'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ApprovePr, short: "V", label: "approve", description: "Approve PR (only as Reviewer or Assignee)" },
@@ -60,7 +60,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Left, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::CollapseSelected, short: "←", label: "collapse", description: "Collapse repo/session" },
         Binding { key: KeyCode::Right, modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::ExpandSelected, short: "→", label: "expand", description: "Expand repo/session" },
         Binding { key: KeyCode::Char('t'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::CycleTimeFilter, short: "t", label: "time", description: "Cycle time filter (1d/3d/7d/30d/all)" },
-        Binding { key: KeyCode::Char('/'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::SearchActivate, short: "/", label: "search", description: "Search/filter sessions" },
+        Binding { key: KeyCode::Char('s'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::SearchActivate, short: "s", label: "search", description: "Search/filter sessions" },
         Binding { key: KeyCode::Char('g'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::Refresh, short: "g", label: "refresh", description: "Refresh — fetch latest from GitHub" },
     ]),
     ("Tabs", &[

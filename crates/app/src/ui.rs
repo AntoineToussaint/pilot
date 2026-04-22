@@ -240,7 +240,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
             C_YELLOW
         };
         header_spans.push(Span::styled(
-            format!("  ? {asking_count} input (i)"),
+            format!("  ? {asking_count} input (/)"),
             Style::default().fg(col).bold(),
         ));
     }
@@ -269,9 +269,9 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
     };
     let cursor = if app.state.search_active { "|" } else { "" };
     let search_text = if app.state.search_active || !app.state.search_query.is_empty() {
-        format!("  /{}{cursor}", app.state.search_query)
+        format!("  s {}{cursor}", app.state.search_query)
     } else {
-        "  / filter (needs:reply ci:failed ...)".into()
+        "  s  filter (needs:reply ci:failed ...)".into()
     };
     frame.render_widget(
         Paragraph::new(Span::styled(search_text, search_style)).style(Style::default().bg(C_BG)),
