@@ -28,3 +28,4 @@ libc = "0.2"
 serde_json = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
+notify-rust = "4"
