@@ -907,22 +907,34 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(term) = app.terminals.get(key) {
                         let prev = app.state.agent_states.get(key).copied()
                             .unwrap_or(AgentState::Active);
-                        // Prefer Claude's lifecycle hooks (deterministic)
-                        // over the output-timing heuristic. We trust the
-                        // state file unconditionally whenever it exists:
-                        // clear_state() wipes the file on session close
-                        // and spawn, so any present file reflects the
-                        // CURRENT session. An "idle" hook written hours
-                        // ago is still correct — Claude is still idle.
+                        // Prefer Claude's lifecycle hooks, but cross-check
+                        // "working" against PTY silence. The Stop hook does
+                        // NOT fire when a turn is interrupted (Esc in the
+                        // prompt, or external SIGINT), so the state file
+                        // would be stuck at "working" forever even though
+                        // Claude is clearly idle. If no PTY output has
+                        // arrived in >2s and the hook says working, fall
+                        // through to the heuristic which will see silence
+                        // and classify as Idle (or Asking if the tail
+                        // contains a question).
                         let hook = crate::claude_hooks::read_state(key);
+                        let silent_ms = term.last_output_at().elapsed().as_millis();
                         let new_state = match hook {
-                            Some((hs, _age)) => match hs {
+                            Some((crate::claude_hooks::HookState::Working, _))
+                                if silent_ms > 2000 =>
+                            {
+                                // Hook lies — interrupted turn. Fall back.
+                                detect_state(
+                                    term.last_output_at(),
+                                    term.recent_output(),
+                                    prev,
+                                    asking_patterns,
+                                )
+                            }
+                            Some((hs, _)) => match hs {
                                 crate::claude_hooks::HookState::Working => AgentState::Active,
                                 crate::claude_hooks::HookState::Asking => AgentState::Asking,
                                 crate::claude_hooks::HookState::Idle => {
-                                    // Cover the AskUserQuestion gap — Claude's
-                                    // Stop hook fires for input-waiting turns
-                                    // too, so peek the tail for a `?`.
                                     if crate::agent_state::detect_asking(
                                         term.recent_output(),
                                         asking_patterns,
@@ -1336,12 +1348,18 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             app.state.input_mode = InputMode::PanePrefix;
                         }
                         Action::None if derived == InputMode::Terminal => {
-                            // Forward to the terminal shown in the focused pane —
-                            // NOT `active_tab_key()`, which tracks the tab bar and
-                            // can point at a different (invisible) PTY after the
-                            // user switches panes.
-                            let focused_key = app.focused_terminal_key();
-                            if let Some(term_key) = focused_key {
+                            // Simple rule: keys go to the terminal the user
+                            // is LOOKING AT, which is the rendered one, which
+                            // (per render_right_pane) is the selected
+                            // session's terminal. The pane tree's Terminal
+                            // leaf key can diverge after sidebar nav — if
+                            // we routed there instead, keys would land in
+                            // an invisible PTY.
+                            let term_key = app
+                                .selected_session_key()
+                                .filter(|k| app.terminals.contains_key(k))
+                                .or_else(|| app.focused_terminal_key());
+                            if let Some(term_key) = term_key {
                                 if let Some(term) = app.terminals.get_mut(&term_key) {
                                     term.scroll_reset();
                                     if let Some(bytes) = keys::key_to_bytes(&key)
@@ -1353,14 +1371,12 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     }
                                 } else {
                                     tracing::warn!(
-                                        "Terminal mode but no terminal for focused pane: {term_key}"
+                                        "Terminal mode but no live terminal for {term_key}"
                                     );
                                     app.state.input_mode = InputMode::Normal;
-                                    app.state.status =
-                                        "Terminal disconnected — returned to sidebar".into();
                                 }
                             } else {
-                                tracing::warn!("Terminal mode but focused pane is not a terminal");
+                                tracing::warn!("Terminal mode but no selected/focused terminal");
                                 app.state.input_mode = InputMode::Normal;
                             }
                         }
@@ -1435,11 +1451,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::Paste(text) => {
-            // Forward paste to the FOCUSED terminal (bracketed paste mode).
-            if let Some(term_key) = app.focused_terminal_key()
+            // Forward paste to the RENDERED terminal (selected session),
+            // same routing as keystrokes.
+            let term_key = app
+                .selected_session_key()
+                .filter(|k| app.terminals.contains_key(k))
+                .or_else(|| app.focused_terminal_key());
+            if let Some(term_key) = term_key
                 && let Some(term) = app.terminals.get_mut(&term_key)
             {
-                // Bracketed paste: wrap in \x1b[200~ ... \x1b[201~
                 let result = term
                     .write(b"\x1b[200~")
                     .and_then(|()| term.write(text.as_bytes()))
@@ -1710,7 +1730,13 @@ pub(crate) fn spawn_terminal(
 ///
 /// Matches what xterm / iTerm2 do natively, so habits transfer.
 fn forward_scroll(app: &mut App, column: u16, row: u16, up: bool) {
-    let Some(term_key) = app.focused_terminal_key() else {
+    // Scroll targets the RENDERED terminal (selected session's, per
+    // render_right_pane) — not the pane tree leaf, which may lag.
+    let term_key = app
+        .selected_session_key()
+        .filter(|k| app.terminals.contains_key(k))
+        .or_else(|| app.focused_terminal_key());
+    let Some(term_key) = term_key else {
         if up {
             app.state.detail_scroll = app.state.detail_scroll.saturating_sub(3);
         } else {
