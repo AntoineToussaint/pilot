@@ -2059,24 +2059,54 @@ pub(crate) fn ensure_terminal_pane_for(app: &mut App, session_key: &str) {
 
 /// Update the detail pane content to match the selected session.
 pub(crate) fn update_detail_pane(app: &mut App) {
-    if let Some(key) = app.selected_session_key() {
-        if let Some(detail_id) = app.state
-            .panes
-            .find_pane(|c| matches!(c, PaneContent::Detail(_)))
-        {
-            app.state.panes
-                .set_content(detail_id, PaneContent::Detail(key.clone()));
-        }
+    let Some(key) = app.selected_session_key() else {
+        return;
+    };
 
-        // Update terminal pane if the session has a running terminal (don't auto-spawn).
-        if app.terminals.contains_key(&key)
-            && let Some(term_id) = app.state
-                .panes
-                .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
-            {
-                app.state.panes
+    if let Some(detail_id) = app
+        .state
+        .panes
+        .find_pane(|c| matches!(c, PaneContent::Detail(_)))
+    {
+        app.state
+            .panes
+            .set_content(detail_id, PaneContent::Detail(key.clone()));
+    }
+
+    // If the selected session has a live terminal, make sure a Terminal
+    // pane is in the tree. Retarget an existing one; otherwise split
+    // the Detail pane to create one. Without this, killing a session
+    // whose terminal was the ONLY Terminal leaf leaves the pane tree
+    // with no Terminal leaf — subsequent navigation to another session
+    // with a live terminal wouldn't be able to Tab into it.
+    if app.terminals.contains_key(&key) {
+        let existing = app
+            .state
+            .panes
+            .find_pane(|c| matches!(c, PaneContent::Terminal(_)));
+        match existing {
+            Some(term_id) => {
+                app.state
+                    .panes
                     .set_content(term_id, PaneContent::Terminal(key));
             }
+            None => {
+                if let Some(detail_id) = app
+                    .state
+                    .panes
+                    .find_pane(|c| matches!(c, PaneContent::Detail(_)))
+                {
+                    let prior_focus = app.state.panes.focused;
+                    app.state.panes.focused = detail_id;
+                    app.state
+                        .panes
+                        .split_vertical_above(PaneContent::Terminal(key));
+                    // Don't steal focus — sidebar nav recreating the
+                    // Terminal leaf should not drag the user into TERM.
+                    app.state.panes.focus(prior_focus);
+                }
+            }
+        }
     }
 }
 
