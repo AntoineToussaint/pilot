@@ -1100,6 +1100,21 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 app.state.merge_pending = None;
                 app.state.status = String::new();
             }
+
+            // ── Absolute-priority Tab handler ──
+            // Tab MUST always cycle panes, no matter the current mode, no
+            // matter which overlay is up. The only exceptions are text
+            // overlays where Tab could be legitimately typed (search, new
+            // session, quick reply) — but even then pressing Tab dismisses
+            // the overlay and cycles, which is what the user wants.
+            if key.code == KeyCode::Tab
+                && key.modifiers.is_empty()
+                && !matches!(app.state.input_mode, InputMode::TextInput(_))
+            {
+                handle_action(app, Action::FocusPaneNext, action_tx);
+                return;
+            }
+
             // ── Input mode state machine ──
             // Exactly one arm runs per key event. No fallthrough.
             match app.state.input_mode {
