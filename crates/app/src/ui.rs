@@ -672,17 +672,15 @@ fn render_right_pane(
     area: Rect,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    // The right-pane layout is derived from the pane TREE, not from the
-    // sidebar cursor. The Terminal shown in the tree may be for session
-    // A while the sidebar is hovering session B — in that case we keep
-    // showing A's terminal (so Tab never visually dead-ends) and render
-    // Detail for B underneath.
+    // Both panes follow the sidebar cursor: if you j/k over a session,
+    // the right side swaps to that session's header/comments/terminal.
+    // The pane tree's Terminal leaf is kept in sync by update_detail_pane
+    // whenever `selected` moves.
     let detail_key = app.selected_session_key();
-    let term_key = app
-        .state
-        .panes
-        .terminal_leaf_key()
-        .filter(|k| app.terminals.contains_key(k));
+    let term_key = detail_key
+        .as_ref()
+        .filter(|k| app.terminals.contains_key(k.as_str()))
+        .cloned();
 
     // Hide Detail when the selected PR has no comments — the header
     // alone isn't worth screen real estate, and the user wants Claude

@@ -333,17 +333,6 @@ impl PaneManager {
         find_content_node(&self.root, pane_id)
     }
 
-    /// Return the session key of the Terminal leaf in the pane tree, if any.
-    /// The right-pane renderer derives its layout from this — the Terminal
-    /// that's actually in the tree may differ from the selected sidebar
-    /// session after the user moves the sidebar cursor.
-    pub(crate) fn terminal_leaf_key(&self) -> Option<String> {
-        let id = self.find_pane(|c| matches!(c, PaneContent::Terminal(_)))?;
-        match self.find_content(id)? {
-            PaneContent::Terminal(k) => Some(k),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

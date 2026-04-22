@@ -864,10 +864,26 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
     // the action, execute any emitted commands and return. Otherwise fall
     // through to the legacy handler below.
     if crate::reduce::handled_by_reduce(&action) {
+        // Remember if this action moves the sidebar cursor — we need to
+        // retarget Detail / Terminal leaves afterward so the right pane
+        // follows the selection. Otherwise Tab/j/k changes selected but
+        // the panes keep showing the OLD session's content, and every
+        // Terminal tab looks identical.
+        let moves_cursor = matches!(
+            &action,
+            Action::SelectNext
+                | Action::SelectPrev
+                | Action::ToggleRepo(_)
+                | Action::CollapseSelected
+                | Action::ExpandSelected
+        );
         let clock = crate::reduce::Clock::now();
         let cmds = crate::reduce::reduce(&mut app.state, action, &clock);
         for cmd in cmds {
             app.execute(cmd, action_tx);
+        }
+        if moves_cursor {
+            update_detail_pane(app);
         }
         return;
     }
