@@ -262,11 +262,20 @@ impl TermSession {
         self.scrolled_back
     }
 
+    /// True when the inner app has enabled any mouse tracking mode.
+    /// When this is on, we should forward scroll wheel events as raw
+    /// SGR mouse escape sequences so tmux/vim/less/Claude Code can
+    /// drive their own scroll behavior. When off, forwarding mouse as
+    /// *anything* (including arrow keys — don't!) corrupts the input
+    /// stream, so we fall back to libghostty's scrollback instead.
+    pub fn is_mouse_tracking(&self) -> bool {
+        self.terminal.is_mouse_tracking().unwrap_or(false)
+    }
+
     /// True when the PTY child is using the alternate screen buffer
     /// (tmux, vim, less, etc.). Libghostty's scrollback is empty in this
-    /// mode; callers should forward scroll wheel as arrow keys so the
-    /// underlying app can handle it (tmux copy mode, less pagination,
-    /// vim cursor movement).
+    /// mode; the caller needs a different strategy — either forward
+    /// mouse as SGR events (if mouse tracking is on) or do nothing.
     pub fn in_alternate_screen(&self) -> bool {
         self.terminal
             .mode(libghostty_vt::terminal::Mode::ALT_SCREEN)

@@ -1408,36 +1408,10 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     app.state.drag_resize = false;
                 }
                 MouseEventKind::ScrollUp => {
-                    // Scroll whatever terminal pane currently has focus (not
-                    // the active tab — those can differ).
-                    if let Some(term_key) = app.focused_terminal_key()
-                        && let Some(term) = app.terminals.get_mut(&term_key)
-                    {
-                        // Alt-screen apps (tmux, vim, less) never accumulate
-                        // scrollback in libghostty, so scroll_up is a no-op
-                        // visually. Forward as arrow-up presses instead so
-                        // the underlying app scrolls its own buffer.
-                        if term.in_alternate_screen() {
-                            let _ = term.write(b"\x1b[A\x1b[A\x1b[A");
-                        } else {
-                            term.scroll_up(3);
-                        }
-                    } else {
-                        app.state.detail_scroll = app.state.detail_scroll.saturating_sub(3);
-                    }
+                    forward_scroll(app, mouse.column, mouse.row, true);
                 }
                 MouseEventKind::ScrollDown => {
-                    if let Some(term_key) = app.focused_terminal_key()
-                        && let Some(term) = app.terminals.get_mut(&term_key)
-                    {
-                        if term.in_alternate_screen() {
-                            let _ = term.write(b"\x1b[B\x1b[B\x1b[B");
-                        } else {
-                            term.scroll_down(3);
-                        }
-                    } else {
-                        app.state.detail_scroll = app.state.detail_scroll.saturating_add(3);
-                    }
+                    forward_scroll(app, mouse.column, mouse.row, false);
                 }
                 _ => {}
             }
@@ -1707,6 +1681,51 @@ pub(crate) fn spawn_terminal(
 
 /// Construct a context prompt from selected comments and paste it into the
 /// active Claude terminal session.
+/// Route a trackpad / mouse-wheel scroll to the right place:
+///   1. Terminal with mouse tracking ON → forward as an SGR mouse wheel
+///      event, so tmux / Claude Code / vim / less handle it natively.
+///   2. Terminal on alt-screen WITHOUT mouse tracking → libghostty has
+///      no scrollback to move, and forwarding anything (arrow keys!)
+///      corrupts the input. Do nothing.
+///   3. Terminal on the primary screen (plain shell) → scroll
+///      libghostty's scrollback buffer.
+///   4. Detail pane (no focused terminal) → scroll the markdown.
+///
+/// Matches what xterm / iTerm2 do natively, so habits transfer.
+fn forward_scroll(app: &mut App, column: u16, row: u16, up: bool) {
+    let Some(term_key) = app.focused_terminal_key() else {
+        if up {
+            app.state.detail_scroll = app.state.detail_scroll.saturating_sub(3);
+        } else {
+            app.state.detail_scroll = app.state.detail_scroll.saturating_add(3);
+        }
+        return;
+    };
+    let Some(term) = app.terminals.get_mut(&term_key) else {
+        return;
+    };
+
+    if term.is_mouse_tracking() {
+        // SGR mouse wheel: button 64 = up, 65 = down. Coords are
+        // 1-based in the SGR protocol, so add 1. We emit three wheel
+        // notches so one trackpad flick = ~3 lines, same as the old
+        // scrollback behavior.
+        let button = if up { 64 } else { 65 };
+        let x = column.saturating_add(1);
+        let y = row.saturating_add(1);
+        let seq = format!("\x1b[<{button};{x};{y}M");
+        let chunk = seq.repeat(3);
+        let _ = term.write(chunk.as_bytes());
+    } else if term.in_alternate_screen() {
+        // Alt-screen app (tmux/vim/less) WITHOUT mouse mode — there's
+        // no safe way to forward a scroll. Swallow the event.
+    } else if up {
+        term.scroll_up(3);
+    } else {
+        term.scroll_down(3);
+    }
+}
+
 fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Action>, mode: &str) {
     // Debounce: ignore if we sent something in the last 1.5s.
     let now = std::time::Instant::now();
