@@ -489,7 +489,18 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
 
                 // ── Status label ──
                 let tag = pilot_core::StatusTag::for_task(task);
-                let (label_text, label_fg, label_bg) = status_tag_colors(tag, bg);
+                let (label_text, mut label_fg, label_bg) = status_tag_colors(tag, bg);
+                // Slow blink for CI-running so it visibly separates
+                // from static statuses when glancing down the list.
+                // Cycle every ~1.6s (16 ticks at 100ms).
+                if matches!(tag, pilot_core::StatusTag::CiRunning) {
+                    let tick = app.state.tick_count;
+                    label_fg = if (tick % 16) < 8 {
+                        C_YELLOW
+                    } else {
+                        C_TEXT_DIM
+                    };
+                }
 
                 // ── PR number ──
                 let pr_num = task.id.key.rsplit_once('#')
