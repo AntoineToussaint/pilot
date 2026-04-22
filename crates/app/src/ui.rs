@@ -489,16 +489,17 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
 
                 // ── Status label ──
                 let tag = pilot_core::StatusTag::for_task(task);
-                let (label_text, mut label_fg, label_bg) = status_tag_colors(tag, bg);
-                // Slow blink for CI-running so it visibly separates
-                // from static statuses when glancing down the list.
-                // Cycle every ~1.6s (16 ticks at 100ms).
+                let (label_text, label_fg, mut label_bg) = status_tag_colors(tag, bg);
+                // Slow-pulse the CI-running pill background so it visibly
+                // separates from the static statuses. Cycle every ~1.6s
+                // (16 ticks at 100ms) between bright yellow and a muted
+                // amber so the eye catches it without flashing hard.
                 if matches!(tag, pilot_core::StatusTag::CiRunning) {
                     let tick = app.state.tick_count;
-                    label_fg = if (tick % 16) < 8 {
+                    label_bg = if (tick % 16) < 8 {
                         C_YELLOW
                     } else {
-                        C_TEXT_DIM
+                        Color::Rgb(132, 99, 25)
                     };
                 }
 
@@ -2077,7 +2078,7 @@ fn status_tag_colors(tag: pilot_core::StatusTag, row_bg: Color) -> (&'static str
         StatusTag::Ready => ("READY", dark_fg, C_GREEN),
         StatusTag::AutoMerge => ("AUTO", dark_fg, C_MAGENTA),
         StatusTag::ReviewPending => ("REVIEW", dark_fg, C_YELLOW),
-        StatusTag::CiRunning => ("CI...", C_YELLOW, row_bg),
+        StatusTag::CiRunning => ("CI", dark_fg, C_YELLOW),
         StatusTag::Draft => ("DRAFT", C_TEXT_DIM, row_bg),
         StatusTag::None => ("", C_TEXT_DIM, row_bg),
     }
