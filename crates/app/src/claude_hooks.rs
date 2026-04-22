@@ -114,11 +114,20 @@ pub fn install_hooks(worktree: &Path, session_key: &str) -> std::io::Result<()> 
             "PostToolUse": [{
                 "hooks": [{ "type": "command", "command": cmd("working") }]
             }],
-            // Notification covers permission_prompt + elicitation_dialog
-            // + idle_prompt. We treat all three as "needs attention".
-            "Notification": [{
-                "hooks": [{ "type": "command", "command": cmd("asking") }]
-            }],
+            // Notification fires three sub-events. Use matchers to
+            // distinguish — idle_prompt is Claude's "60s idle ping"
+            // and must NOT flip the indicator to asking, or every
+            // long-running session flickers red every minute.
+            "Notification": [
+                {
+                    "matcher": "permission_prompt",
+                    "hooks": [{ "type": "command", "command": cmd("asking") }]
+                },
+                {
+                    "matcher": "elicitation_dialog",
+                    "hooks": [{ "type": "command", "command": cmd("asking") }]
+                }
+            ],
             // Newer (>=v2.1) dedicated hooks for permission / elicitation.
             // Harmless on older versions — Claude ignores unknown events.
             "PermissionRequest": [{
@@ -155,6 +164,30 @@ mod tests {
     fn state_file_path_uses_safe_name() {
         let p = state_file_for("github:o/r#1");
         assert!(p.to_string_lossy().ends_with("github_o_r#1.state"));
+    }
+
+    #[test]
+    fn install_hooks_uses_matchers_for_notification() {
+        // Notification fires three sub-events — idle_prompt must NOT
+        // be configured to write "asking", or every idle session
+        // flickers red every 60s.
+        let tmp = std::env::temp_dir().join(format!("pilot-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&tmp);
+        install_hooks(&tmp, "test:session").unwrap();
+        let settings = fs::read_to_string(tmp.join(".claude/settings.local.json")).unwrap();
+        assert!(
+            settings.contains("permission_prompt"),
+            "permission_prompt matcher missing"
+        );
+        assert!(
+            settings.contains("elicitation_dialog"),
+            "elicitation_dialog matcher missing"
+        );
+        assert!(
+            !settings.contains("idle_prompt"),
+            "idle_prompt should NOT have a matcher — it must not write 'asking'"
+        );
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

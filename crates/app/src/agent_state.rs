@@ -89,6 +89,10 @@ pub(crate) fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
     // that match `^\s*\d+\.\s` — a numbered choice block near the
     // cursor. Looser than the "Esc to cancel" markers but matches
     // the many internal Claude dialogs that skip the hook.
+    // Tight match: cursor/indent-prefixed `1.` / `12.` followed by a
+    // space and non-digit content. Rejects version numbers (`1.2.3`),
+    // file-line refs (`foo.rs: 42.`), and `123.` in prose where the
+    // number is just a list item in documentation.
     let numbered_count = trimmed
         .lines()
         .rev()
@@ -96,8 +100,13 @@ pub(crate) fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
         .take(8)
         .filter(|l| {
             let t = l.trim_start_matches(['>', ' ']);
-            let Some(rest) = t.split_once('.') else { return false };
-            rest.0.chars().all(|c| c.is_ascii_digit()) && !rest.0.is_empty()
+            let Some((digits, after)) = t.split_once('.') else {
+                return false;
+            };
+            (1..=2).contains(&digits.len())
+                && digits.chars().all(|c| c.is_ascii_digit())
+                && after.starts_with(' ')
+                && after.len() > 1
         })
         .count();
     if numbered_count >= 2 {
@@ -216,6 +225,61 @@ mod tests {
             AgentState::Active,
             &patterns,
         );
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn test_version_numbers_do_not_trigger() {
+        // Semver in prose should not match the numbered-options rule.
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"bumped to 1.2.3 and 0.15.0\nshipped with 2.0.1 yesterday\n";
+        let state = detect_state(old, out, AgentState::Active, &patterns);
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn test_file_paths_do_not_trigger() {
+        // Hunk paths / file refs should not be misread as numbered options.
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"edited foo.rs and bar.ts\nrewrote main.py\n";
+        let state = detect_state(old, out, AgentState::Active, &patterns);
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn test_trailing_question_from_user_not_asking() {
+        // Regression: the user's OWN question text in scrollback was
+        // triggering Asking via a trailing `?`. That heuristic has been
+        // removed; ensure it stays removed.
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let state = detect_state(
+            old,
+            b"is CI green?\n\nYes. All 12 checks pass.\n",
+            AgentState::Active,
+            &patterns,
+        );
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn test_two_digit_numbered_options_match() {
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"Pick one:\n 10. foo\n 11. bar\n 12. baz\n";
+        let state = detect_state(old, out, AgentState::Active, &patterns);
+        assert_eq!(state, AgentState::Asking);
+    }
+
+    #[test]
+    fn test_three_digit_prose_does_not_match() {
+        // "100." or longer as a bare list marker in docs shouldn't fire.
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"Pass rate was\n 100. percent\n 200. total runs\n";
+        let state = detect_state(old, out, AgentState::Active, &patterns);
         assert_eq!(state, AgentState::Idle);
     }
 

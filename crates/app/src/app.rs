@@ -1350,17 +1350,21 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             app.state.input_mode = InputMode::PanePrefix;
                         }
                         Action::None if derived == InputMode::Terminal => {
-                            // Simple rule: keys go to the terminal the user
-                            // is LOOKING AT, which is the rendered one, which
-                            // (per render_right_pane) is the selected
-                            // session's terminal. The pane tree's Terminal
-                            // leaf key can diverge after sidebar nav — if
-                            // we routed there instead, keys would land in
-                            // an invisible PTY.
+                            // Focus wins. If the pane tree says the user is
+                            // on a Terminal pane, route to that leaf's key —
+                            // the render side syncs the leaf to the selected
+                            // session via update_detail_pane, so they agree
+                            // when the sidebar cursor is on a session with
+                            // a live terminal. Fall back to selected only
+                            // if the focused leaf's key is no longer live
+                            // (e.g. PTY just exited).
                             let term_key = app
-                                .selected_session_key()
+                                .focused_terminal_key()
                                 .filter(|k| app.terminals.contains_key(k))
-                                .or_else(|| app.focused_terminal_key());
+                                .or_else(|| {
+                                    app.selected_session_key()
+                                        .filter(|k| app.terminals.contains_key(k))
+                                });
                             if let Some(term_key) = term_key {
                                 if let Some(term) = app.terminals.get_mut(&term_key) {
                                     term.scroll_reset();
@@ -1453,12 +1457,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::Paste(text) => {
-            // Forward paste to the RENDERED terminal (selected session),
-            // same routing as keystrokes.
+            // Same routing rule as keystrokes: focused first, selected
+            // as fallback.
             let term_key = app
-                .selected_session_key()
+                .focused_terminal_key()
                 .filter(|k| app.terminals.contains_key(k))
-                .or_else(|| app.focused_terminal_key());
+                .or_else(|| {
+                    app.selected_session_key()
+                        .filter(|k| app.terminals.contains_key(k))
+                });
             if let Some(term_key) = term_key
                 && let Some(term) = app.terminals.get_mut(&term_key)
             {
@@ -1646,11 +1653,18 @@ pub(crate) fn spawn_terminal(
         .cloned()
         .unwrap_or_default();
 
-    let env = vec![
+    let mut env = vec![
         ("PILOT_SESSION".to_string(), task_id),
         ("PILOT_PR_NUMBER".to_string(), pr_number),
         ("PILOT_REPO".to_string(), repo),
     ];
+    if matches!(kind, ShellKind::Claude) {
+        // Ask Claude Code to use its fullscreen renderer. Without this
+        // Claude uses the primary screen and ignores mouse events, so
+        // our SGR wheel forwarding has no receiver. See
+        // https://code.claude.com/docs/en/fullscreen.
+        env.push(("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string()));
+    }
 
     // Install Claude Code hooks so we get deterministic state
     // transitions (working / asking / idle) instead of guessing from
@@ -1732,12 +1746,16 @@ pub(crate) fn spawn_terminal(
 ///
 /// Matches what xterm / iTerm2 do natively, so habits transfer.
 fn forward_scroll(app: &mut App, column: u16, row: u16, up: bool) {
-    // Scroll targets the RENDERED terminal (selected session's, per
-    // render_right_pane) — not the pane tree leaf, which may lag.
+    // Same routing rule as keystrokes: focused pane first, selected
+    // as fallback. Keeps wheel events on whatever PTY has focus even
+    // if the sidebar cursor drifts.
     let term_key = app
-        .selected_session_key()
+        .focused_terminal_key()
         .filter(|k| app.terminals.contains_key(k))
-        .or_else(|| app.focused_terminal_key());
+        .or_else(|| {
+            app.selected_session_key()
+                .filter(|k| app.terminals.contains_key(k))
+        });
     let Some(term_key) = term_key else {
         if up {
             app.state.detail_scroll = app.state.detail_scroll.saturating_sub(3);
@@ -1750,26 +1768,37 @@ fn forward_scroll(app: &mut App, column: u16, row: u16, up: bool) {
         return;
     };
 
-    // On alt-screen (tmux, Claude Code, vim, less) always forward as
-    // SGR mouse wheel events. Apps that don't understand them ignore
-    // them silently — we checked `is_mouse_tracking()` before, but
-    // that gate is too strict: Claude Code doesn't always advertise
-    // tracking even though it'd accept the events. Worst case: no
-    // visible scroll, same as swallowing the event ourselves. Best
-    // case: the app scrolls natively.
+    // Scroll routing by what the inner app actually supports:
     //
-    // On the primary screen (plain shell) fall back to libghostty's
-    // scrollback buffer — there's no live app to forward to.
+    // Primary screen (plain shell): libghostty scrollback.
+    //
+    // Alt-screen + mouse tracking on (fullscreen Claude Code,
+    // tmux with proper forwarding, vim with `:set mouse=a`):
+    //   → SGR-1006 wheel events, the app scrolls natively.
+    //
+    // Alt-screen + no mouse tracking (default Claude Code v2.x,
+    // tmux without `mouse on`, less, man): send PgUp / PgDn.
+    //   Arrow keys are wrong — Claude maps them to input history.
+    //   Wheel bytes as literal input are worse — they get typed
+    //   into the prompt (see anthropics/claude-code#42297).
+    //   PgUp/PgDn are universally treated as "scroll the viewport"
+    //   across Claude fullscreen, tmux copy-mode, and pagers.
     if term.in_alternate_screen() {
-        // SGR mouse wheel: button 64 = up, 65 = down. Coords are
-        // 1-based in the SGR protocol. Emit three notches so one
-        // trackpad flick ≈ 3 lines.
-        let button = if up { 64 } else { 65 };
-        let x = column.saturating_add(1);
-        let y = row.saturating_add(1);
-        let seq = format!("\x1b[<{button};{x};{y}M");
-        let chunk = seq.repeat(3);
-        let _ = term.write(chunk.as_bytes());
+        if term.is_mouse_tracking() {
+            let button = if up { 64 } else { 65 };
+            let x = column.saturating_add(1);
+            let y = row.saturating_add(1);
+            let seq = format!("\x1b[<{button};{x};{y}M");
+            let chunk = seq.repeat(3);
+            let _ = term.write(chunk.as_bytes());
+        } else {
+            let key = if up { b"\x1b[5~" } else { b"\x1b[6~" };
+            let mut chunk = Vec::with_capacity(key.len() * 3);
+            for _ in 0..3 {
+                chunk.extend_from_slice(key);
+            }
+            let _ = term.write(&chunk);
+        }
     } else if up {
         term.scroll_up(3);
     } else {
