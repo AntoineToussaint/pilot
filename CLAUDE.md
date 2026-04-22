@@ -33,7 +33,6 @@ crates/
   tui-term/      # Embedded terminal: portable-pty + vt100 + tui-term widget. Scrollback support.
   gh-provider/   # GitHub provider: octocrab polling → generic Events. Needs-reply detection.
   git-ops/       # Git worktree manager (bare clones + worktrees).
-  mcp-server/    # MCP server binary (stdio). Claude Code calls this for push/reply/merge/approve.
   app/           # TUI binary. Event loop, pane system, tabs, search, confirmation prompts.
 ```
 
@@ -45,7 +44,7 @@ crates/
 - **Store**: `Store` trait with `SqliteStore` backend. Read/unread state persists across sessions.
 - **Terminal**: PTY reader on std::thread. vt100 Parser behind Mutex. 100ms tick redraws. Auto-resize.
 - **Markdown**: PR descriptions rendered via `tui-markdown` (pulldown-cmark + syntect).
-- **MCP integration**: `pilot-mcp-server` runs as stdio MCP server. When spawning Claude, pilot writes `.mcp.json` in the worktree. Claude calls `pilot_push`, `pilot_reply`, `pilot_merge` etc. instead of running git/gh directly. Pilot shows y/n confirmation modal. IPC via `~/.pilot/ipc/` files.
+- **Agent autonomy**: spawned Claude Code sessions drive the repo directly with `gh` and `git`. Pilot does not wrap these actions behind an MCP/tool-approval layer — the agent has the same tools it would in any other worktree.
 
 ### Adding a new provider
 

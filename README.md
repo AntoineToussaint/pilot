@@ -154,7 +154,6 @@ display:
 agent:
   command: claude
   resume_args: ["--continue"]
-  mcp: true
 
 shell:
   command: bash
@@ -177,7 +176,6 @@ crates/
   tui-term/      PTY terminal (portable-pty + libghostty-vt)
   gh-provider/   GitHub GraphQL polling, implements TaskProvider
   git-ops/       Git worktree manager
-  mcp-server/    MCP stdio server for Claude integration
   app/           TUI binary
 ```
 

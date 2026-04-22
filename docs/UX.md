@@ -139,20 +139,12 @@ When you navigate to a session and view it for 2+ seconds, it's automatically ma
 
 Merged and closed PRs are automatically hidden from the sidebar. They're still in the database — just not displayed.
 
-## MCP Tools (Claude Integration)
+## Claude Integration
 
-When Claude Code runs in a worktree, it has access to pilot tools via MCP:
-
-| Tool | Requires confirmation |
-|------|-----------------------|
-| `pilot_push` | Yes (auto in monitor) |
-| `pilot_reply` | Yes |
-| `pilot_merge` | Yes |
-| `pilot_approve` | Yes |
-| `pilot_resolve_thread` | Yes |
-| `pilot_request_changes` | Yes |
-| `pilot_get_pr_state` | No (read-only) |
-| `pilot_get_context` | No (read-only) |
+Pilot spawns Claude Code into the worktree with the normal `gh` and `git`
+CLIs available. Claude handles replies, commits, pushes, and merges
+directly — no custom tool layer. You drive the PR list; Claude drives the
+code.
 
 ## Configuration (~/.pilot/config.yaml)
 
@@ -170,7 +162,6 @@ display:
 agent:
   command: claude             # agent binary
   resume_args: ["--continue"] # args for resuming previous session
-  mcp: true                   # write .mcp.json for MCP discovery
 
 shell:
   command: bash               # shell binary

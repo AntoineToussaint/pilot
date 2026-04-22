@@ -16,9 +16,6 @@ pub struct AgentConfig {
     /// Args to resume a previous session (e.g., ["--continue"]).
     #[serde(default)]
     pub resume_args: Vec<String>,
-    /// Whether to write .mcp.json for MCP tool discovery.
-    #[serde(default)]
-    pub mcp: bool,
     /// Patterns in terminal output that indicate the agent is asking a question.
     /// Used for notification detection.
     #[serde(default = "default_asking_patterns")]
@@ -43,7 +40,6 @@ impl Default for AgentConfig {
             command: "claude".into(),
             args: vec![],
             resume_args: vec!["--continue".into()],
-            mcp: true,
             asking_patterns: default_asking_patterns(),
         }
     }
