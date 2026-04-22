@@ -24,8 +24,16 @@ pub struct GhClient {
 impl GhClient {
     pub async fn from_credential(cred: Credential) -> Result<Self, GhError> {
         let source = cred.source.clone();
+        // Disable octocrab's built-in retry: its `OctoBody` clone only
+        // Arc-clones a single-use body stream, so on a 429/5xx retry the
+        // second attempt goes out with an empty `{}` body. GitHub answers
+        // with the infamous "A query attribute must be specified and must
+        // be a string" — ~1 in every 5 GraphQL polls during rate-limited
+        // periods. We eat the retry feature; polling runs every few seconds
+        // so we just try again on the next tick.
         let inner = Octocrab::builder()
             .personal_token(cred.into_token())
+            .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
             .build()
             .map_err(GhError::Api)?;
         let user = inner.current().user().await.map_err(GhError::Api)?.login;
@@ -85,20 +93,51 @@ impl GhClient {
                 serde_json::to_string(&body).unwrap_or_default()
             );
 
-            let response: graphql::GqlResponse = self
+            // Fetch the raw JSON first so that on error we can dump the
+            // complete response body (not just the serde-parsed message) to
+            // `/tmp/pilot.log` — invaluable when debugging queries GitHub
+            // rejects with terse messages like "A query attribute must be
+            // specified and must be a string".
+            let raw: serde_json::Value = self
                 .inner
                 .post("/graphql", Some(&body))
                 .await
                 .map_err(|e| {
                     tracing::error!("GraphQL HTTP error (page {page}): {e}");
+                    tracing::error!(
+                        "GraphQL request body was: {}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
                     GhError::Api(e)
                 })?;
+
+            let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(
+                        "GraphQL response did not match schema (page {page}): {e}\n\
+                         Full response body:\n{}",
+                        serde_json::to_string_pretty(&raw).unwrap_or_default()
+                    );
+                    return Err(GhError::Graphql(format!(
+                        "response schema mismatch (page {page}): {e}"
+                    )));
+                }
+            };
 
             if let Some(errors) = &response.errors {
                 let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
                 let joined = detailed.join("; ");
                 tracing::error!("GraphQL errors (search page {page}): {joined}");
                 tracing::error!("GraphQL search was: {search_query}");
+                tracing::error!(
+                    "GraphQL request body:\n{}",
+                    serde_json::to_string_pretty(&body).unwrap_or_default()
+                );
+                tracing::error!(
+                    "GraphQL full response body:\n{}",
+                    serde_json::to_string_pretty(&raw).unwrap_or_default()
+                );
                 return Err(GhError::Graphql(format!(
                     "search `{search_query}` (page {page}): {joined}"
                 )));
