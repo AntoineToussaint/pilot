@@ -934,16 +934,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             Some((hs, _)) => match hs {
                                 crate::claude_hooks::HookState::Working => AgentState::Active,
                                 crate::claude_hooks::HookState::Asking => AgentState::Asking,
-                                crate::claude_hooks::HookState::Idle => {
-                                    if crate::agent_state::detect_asking(
-                                        term.recent_output(),
-                                        asking_patterns,
-                                    ) {
-                                        AgentState::Asking
-                                    } else {
-                                        AgentState::Idle
-                                    }
-                                }
+                                // Trust the hook: Stop fired → Claude is idle.
+                                // No peeking at the output for a trailing
+                                // `?` — that matched the user's OWN prior
+                                // question sitting in the scrollback and
+                                // triggered false "INPUT NEEDED" states.
+                                // The real "Claude wants input" cases are
+                                // covered by the Notification / PermissionRequest
+                                // / Elicitation hooks, which fire "asking".
+                                crate::claude_hooks::HookState::Idle => AgentState::Idle,
                                 crate::claude_hooks::HookState::Stopped => AgentState::Idle,
                             },
                             None => detect_state(

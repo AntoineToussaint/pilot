@@ -47,27 +47,50 @@ pub(crate) fn detect_state(
 }
 
 /// Check recent output for question/prompt patterns.
+///
+/// Only used as a fallback when Claude's own lifecycle hooks aren't
+/// available. Deliberately narrow: scans the last non-empty line for
+/// user-configured patterns only, and Claude v2.x UI markers that are
+/// part of a multi-line block ending near the bottom. Does NOT look
+/// for a generic trailing `?` — the scrollback contains the user's
+/// earlier questions, and those create false positives long after
+/// Claude has answered and gone idle.
 pub(crate) fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
-    let tail_start = recent_output.len().saturating_sub(512);
+    // 1KB is enough to capture a permission dialog without dragging
+    // in the previous user prompt.
+    let tail_start = recent_output.len().saturating_sub(1024);
     let tail = String::from_utf8_lossy(&recent_output[tail_start..]);
     let clean = strip_ansi(&tail);
     let trimmed = clean.trim();
+    let lower_all = trimmed.to_lowercase();
+
+    // Multi-line permission/confirmation blocks in Claude v2.x.
+    // "esc to cancel" / "tab to amend" appear ON the dialog, and
+    // only then — they're reliable markers the dialog is open right
+    // now (not a leftover from earlier output).
+    const CLAUDE_ASKING_MARKERS: &[&str] = &[
+        "esc to cancel",
+        "tab to amend",
+    ];
+    for marker in CLAUDE_ASKING_MARKERS {
+        if lower_all.contains(marker) {
+            return true;
+        }
+    }
 
     let last_line = trimmed
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
-    let lower = last_line.to_lowercase();
+    let lower_last = last_line.to_lowercase();
 
-    // Check configurable patterns.
     for pattern in patterns {
-        if lower.contains(&pattern.to_lowercase()) {
+        if lower_last.contains(&pattern.to_lowercase()) {
             return true;
         }
     }
-    // Also check if line ends with '?'
-    lower.ends_with('?')
+    false
 }
 
 fn strip_ansi(s: &str) -> String {
@@ -122,10 +145,26 @@ mod tests {
     }
 
     #[test]
-    fn test_asking_on_question_mark() {
+    fn test_does_not_match_trailing_question_mark_alone() {
+        // REGRESSION: "is CI green?" from the user's own scrollback
+        // used to trigger Asking. The heuristic now only matches
+        // configured patterns + specific Claude UI markers.
         let old = Instant::now() - Duration::from_secs(5);
         let patterns: Vec<String> = vec![];
         let state = detect_state(old, b"Do you want to continue?", AgentState::Active, &patterns);
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn test_asking_on_claude_marker() {
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let state = detect_state(
+            old,
+            b"Bash command\n  foo\n\nEsc to cancel - Tab to amend",
+            AgentState::Active,
+            &patterns,
+        );
         assert_eq!(state, AgentState::Asking);
     }
 
