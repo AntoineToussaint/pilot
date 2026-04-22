@@ -194,6 +194,60 @@ impl PaneManager {
         prune_node(&mut self.root, live_keys);
     }
 
+    /// Retarget the Detail leaf to `selected_key` and ensure a Terminal
+    /// leaf exists for that key when `selected_has_terminal`. Does NOT
+    /// steal focus — this runs on every sidebar-cursor move, and moving
+    /// focus would drag the user into TERM mode on every j/k.
+    ///
+    /// Pure enough to unit-test: takes the pieces of state it needs, no
+    /// App dependency. Three invariants the tests lock in:
+    ///   - A Detail leaf always matches the selected session's key.
+    ///   - When selected has a live terminal, a Terminal leaf exists in
+    ///     the tree with that key. (Previously missed: the Terminal leaf
+    ///     could have been pruned by a prior kill, and re-navigation did
+    ///     not re-create it — Tab couldn't reach the live terminal.)
+    ///   - Focus is preserved across the call.
+    pub fn sync_for_selection(
+        &mut self,
+        selected_key: Option<&str>,
+        selected_has_terminal: bool,
+    ) {
+        let Some(key) = selected_key else {
+            return;
+        };
+        // Retarget Detail.
+        if let Some(detail_id) =
+            find_pane_node(&self.root, &|c| matches!(c, PaneContent::Detail(_)))
+        {
+            set_content_node(&mut self.root, detail_id, PaneContent::Detail(key.to_string()));
+        }
+        // Ensure a Terminal leaf for the selected session's key exists.
+        if selected_has_terminal {
+            let existing = find_pane_node(&self.root, &|c| {
+                matches!(c, PaneContent::Terminal(_))
+            });
+            match existing {
+                Some(term_id) => {
+                    set_content_node(
+                        &mut self.root,
+                        term_id,
+                        PaneContent::Terminal(key.to_string()),
+                    );
+                }
+                None => {
+                    if let Some(detail_id) = find_pane_node(&self.root, &|c| {
+                        matches!(c, PaneContent::Detail(_))
+                    }) {
+                        let prior_focus = self.focused;
+                        self.focused = detail_id;
+                        self.split_vertical_above(PaneContent::Terminal(key.to_string()));
+                        self.focused = prior_focus;
+                    }
+                }
+            }
+        }
+    }
+
     /// Enforce the pane <-> terminal invariant:
     ///   1. Every `Terminal(k)` leaf must have `k ∈ live_keys`.
     ///   2. If `active_key` is Some and no leaf shows it, either retarget an
@@ -774,6 +828,95 @@ mod tests {
         assert!(p
             .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
             .is_none());
+    }
+
+    // ── sync_for_selection: the sidebar-nav retarget/rebuild invariants ──
+
+    #[test]
+    fn sync_retargets_detail_to_selected() {
+        let mut p = PaneManager::default_layout();
+        p.sync_for_selection(Some("sess-z"), false);
+        assert!(
+            p.find_pane(|c| matches!(c, PaneContent::Detail(k) if k == "sess-z"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn sync_recreates_terminal_leaf_after_kill() {
+        // REGRESSION: Shift-X kills session A, close_terminal prunes
+        // A's Terminal leaf. Pane tree now has NO Terminal leaf.
+        // User navigates to session B which still has a live terminal.
+        // sync_for_selection must SPLIT to create a Terminal leaf for
+        // B — before the fix it only retargeted existing leaves and
+        // Tab couldn't reach B's terminal.
+        let mut p = PaneManager::default_layout();
+        assert!(
+            p.find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+                .is_none(),
+            "precondition: no Terminal leaf"
+        );
+
+        p.sync_for_selection(Some("sess-b"), true);
+
+        assert!(
+            p.find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "sess-b"))
+                .is_some(),
+            "Terminal leaf should have been created"
+        );
+    }
+
+    #[test]
+    fn sync_retargets_existing_terminal_leaf() {
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("sess-old".into()));
+        p.sync_for_selection(Some("sess-new"), true);
+        assert!(
+            p.find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "sess-new"))
+                .is_some(),
+            "Terminal leaf retargeted to new session"
+        );
+        assert!(
+            p.find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "sess-old"))
+                .is_none(),
+            "Old Terminal leaf gone"
+        );
+    }
+
+    #[test]
+    fn sync_preserves_focus() {
+        // Sidebar nav must never steal focus into Terminal mode —
+        // that was one of the "stuck in TERM" bugs.
+        let mut p = PaneManager::default_layout();
+        let prior_focus = p.focused;
+        p.sync_for_selection(Some("sess-x"), true);
+        assert_eq!(
+            p.focused, prior_focus,
+            "sync must not move focus on sidebar cursor changes"
+        );
+    }
+
+    #[test]
+    fn sync_does_not_create_terminal_when_selected_has_none() {
+        // Selected session with NO live terminal → don't spawn a
+        // Terminal leaf. Some other session's Terminal leaf should
+        // stay as-is.
+        let mut p = PaneManager::default_layout();
+        p.split_vertical(PaneContent::Terminal("other-alive".into()));
+        p.sync_for_selection(Some("cold-session"), false);
+        // Terminal leaf still exists (we leave it — other tabs may use it).
+        assert!(
+            p.find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn sync_none_selection_is_noop() {
+        let mut p = PaneManager::default_layout();
+        let before = format!("{:?}", p.root);
+        p.sync_for_selection(None, true);
+        assert_eq!(format!("{:?}", p.root), before);
     }
 
     #[test]

@@ -2058,56 +2058,19 @@ pub(crate) fn ensure_terminal_pane_for(app: &mut App, session_key: &str) {
 }
 
 /// Update the detail pane content to match the selected session.
+///
+/// Delegates to `PaneManager::sync_for_selection` (pure, unit-tested
+/// in crates/app/src/pane.rs) so the hard cases — leaf re-creation
+/// after a kill, focus preservation — are covered by tests.
 pub(crate) fn update_detail_pane(app: &mut App) {
-    let Some(key) = app.selected_session_key() else {
-        return;
-    };
-
-    if let Some(detail_id) = app
-        .state
+    let selected = app.selected_session_key();
+    let has_term = selected
+        .as_ref()
+        .map(|k| app.terminals.contains_key(k))
+        .unwrap_or(false);
+    app.state
         .panes
-        .find_pane(|c| matches!(c, PaneContent::Detail(_)))
-    {
-        app.state
-            .panes
-            .set_content(detail_id, PaneContent::Detail(key.clone()));
-    }
-
-    // If the selected session has a live terminal, make sure a Terminal
-    // pane is in the tree. Retarget an existing one; otherwise split
-    // the Detail pane to create one. Without this, killing a session
-    // whose terminal was the ONLY Terminal leaf leaves the pane tree
-    // with no Terminal leaf — subsequent navigation to another session
-    // with a live terminal wouldn't be able to Tab into it.
-    if app.terminals.contains_key(&key) {
-        let existing = app
-            .state
-            .panes
-            .find_pane(|c| matches!(c, PaneContent::Terminal(_)));
-        match existing {
-            Some(term_id) => {
-                app.state
-                    .panes
-                    .set_content(term_id, PaneContent::Terminal(key));
-            }
-            None => {
-                if let Some(detail_id) = app
-                    .state
-                    .panes
-                    .find_pane(|c| matches!(c, PaneContent::Detail(_)))
-                {
-                    let prior_focus = app.state.panes.focused;
-                    app.state.panes.focused = detail_id;
-                    app.state
-                        .panes
-                        .split_vertical_above(PaneContent::Terminal(key));
-                    // Don't steal focus — sidebar nav recreating the
-                    // Terminal leaf should not drag the user into TERM.
-                    app.state.panes.focus(prior_focus);
-                }
-            }
-        }
-    }
+        .sync_for_selection(selected.as_deref(), has_term);
 }
 
 
