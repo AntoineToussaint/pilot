@@ -215,6 +215,12 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
     let action_area = chunks[4];
 
     // ── Header: PILOT brand + counts ──
+    let asking_count = app
+        .state
+        .agent_states
+        .iter()
+        .filter(|(_, s)| matches!(s, crate::agent_state::AgentState::Asking))
+        .count();
     let mut header_spans = vec![
         Span::styled("  PILOT", Style::default().fg(C_ACCENT).bold()),
         Span::styled(format!("  {visible_count}", ), Style::default().fg(C_TEXT_DIM)),
@@ -223,6 +229,19 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
         header_spans.push(Span::styled(
             format!("  {total_unread} new", ),
             Style::default().fg(C_RED).bold(),
+        ));
+    }
+    if asking_count > 0 {
+        // Blink red↔yellow every ~400ms so it pulls the eye.
+        let tick = app.state.tick_count;
+        let col = if tick.is_multiple_of(8) || (tick % 8) >= 4 {
+            C_RED
+        } else {
+            C_YELLOW
+        };
+        header_spans.push(Span::styled(
+            format!("  ? {asking_count} input (i)"),
+            Style::default().fg(col).bold(),
         ));
     }
     header_spans.push(Span::styled(
@@ -681,6 +700,15 @@ fn render_right_pane(
         .as_ref()
         .filter(|k| app.terminals.contains_key(k.as_str()))
         .cloned();
+    // True when the selected session is mid-worktree-checkout (git clone /
+    // fetch / worktree add in flight). Checkout can take several seconds
+    // the first time a repo is opened, so we render a spinner in the
+    // terminal slot instead of leaving a silent black hole.
+    let checking_out = detail_key
+        .as_ref()
+        .and_then(|k| app.state.sessions.get(k))
+        .map(|s| matches!(s.state, pilot_core::SessionState::CheckingOut))
+        .unwrap_or(false);
 
     // Hide Detail when the selected PR has no comments — the header
     // alone isn't worth screen real estate, and the user wants Claude
@@ -694,10 +722,7 @@ fn render_right_pane(
     match (term_key, detail_key) {
         (Some(term), Some(detail)) if has_comments => {
             // Three-way stack: header (PR metadata), comments, then
-            // Claude Code at the bottom. Reading order = "what needs
-            // doing" → "who's doing it". Claude's tail output stays
-            // anchored next to the prompt input rather than being
-            // pushed off-screen by new lines.
+            // Claude Code at the bottom.
             let header_h = detail_header_height(&app.state, &detail);
             let chunks = Layout::vertical([
                 Constraint::Length(header_h),
@@ -710,7 +735,6 @@ fn render_right_pane(
             render_terminal(app, frame, chunks[2], &term);
         }
         (Some(term), Some(detail)) => {
-            // No comments — header on top, terminal below.
             let header_h = detail_header_height(&app.state, &detail);
             let chunks = Layout::vertical([
                 Constraint::Length(header_h),
@@ -723,6 +747,31 @@ fn render_right_pane(
         (Some(term), None) => {
             render_terminal(app, frame, area, &term);
         }
+        // Checkout in progress → show header + spinner where the
+        // terminal will appear. Give the user visible feedback that
+        // something is happening; `f` can take 5–10s on a cold repo.
+        (None, Some(detail)) if checking_out => {
+            let header_h = detail_header_height(&app.state, &detail);
+            if has_comments {
+                let chunks = Layout::vertical([
+                    Constraint::Length(header_h),
+                    Constraint::Percentage(30),
+                    Constraint::Min(5),
+                ])
+                .split(area);
+                render_detail_header(app, frame, chunks[0], &detail, now);
+                render_comments(app, frame, chunks[1], &detail, now);
+                render_checking_out(app, frame, chunks[2]);
+            } else {
+                let chunks = Layout::vertical([
+                    Constraint::Length(header_h),
+                    Constraint::Min(5),
+                ])
+                .split(area);
+                render_detail_header(app, frame, chunks[0], &detail, now);
+                render_checking_out(app, frame, chunks[1]);
+            }
+        }
         (None, Some(detail)) => {
             render_detail(app, frame, area, &detail, now);
         }
@@ -730,6 +779,42 @@ fn render_right_pane(
             render_welcome(app, frame, area);
         }
     }
+}
+
+/// Draw a centered "checking out worktree…" spinner in `area`. Used
+/// while the async CheckoutWorktree command is running.
+fn render_checking_out(app: &App, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::LEFT | Borders::TOP)
+        .border_style(Style::default().fg(C_BORDER))
+        .style(Style::default().bg(C_BG))
+        .title(Span::styled(
+            " Preparing worktree ",
+            Style::default().fg(C_YELLOW).bold(),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Braille spinner — one full rotation per second at 100ms tick.
+    const FRAMES: [&str; 10] = [
+        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
+        "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+        "\u{2807}", "\u{280f}",
+    ];
+    let f = FRAMES[(app.state.tick_count as usize) % FRAMES.len()];
+    let msg = format!(" {f}  Checking out worktree…");
+    let hint = "    This takes a few seconds on first open.";
+    let lines = vec![
+        Line::raw(""),
+        Line::raw(""),
+        Line::from(Span::styled(msg, Style::default().fg(C_YELLOW).bold())),
+        Line::raw(""),
+        Line::from(Span::styled(hint, Style::default().fg(C_TEXT_DIM))),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(C_BG)),
+        inner,
+    );
 }
 
 /// Computed height in rows for the PR-header pane. Depends on whether

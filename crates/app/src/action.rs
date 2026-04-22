@@ -81,6 +81,14 @@ pub enum Action {
     OpenInBrowser,
     /// Open the PR's CI "checks" tab in the default browser.
     OpenCiChecks,
+    /// Jump the sidebar cursor to the next session whose Claude agent
+    /// is asking for user input (AgentState::Asking). Focuses that
+    /// session's terminal pane directly.
+    JumpToNextAsking,
+    /// Focus the Detail (comments) pane so j/k browses comments and
+    /// Space toggles selection. Tab bypasses Detail when a Terminal
+    /// exists, so this is the dedicated way in.
+    FocusDetail,
     /// Send a Slack reminder to reviewers.
     SlackNudge,
     /// Approve the selected PR (only when user's role is Reviewer or Assignee).

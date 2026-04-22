@@ -334,6 +334,58 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 }
         }
 
+        // ── FocusDetail: jump focus onto the Detail pane ──
+        Action::FocusDetail => {
+            if let Some(detail_id) = state
+                .panes
+                .find_pane(|c| matches!(c, PaneContent::Detail(_)))
+            {
+                state.panes.focus(detail_id);
+            }
+        }
+
+        // ── JumpToNextAsking: cycle to next session needing input ──
+        Action::JumpToNextAsking => {
+            use crate::nav::NavItem;
+            use crate::agent_state::AgentState;
+            let items = crate::nav::nav_items_from_state(state);
+            let cur = state.selected;
+            let n = items.len();
+            // Scan forward from the current position, wrapping. Skip the
+            // starting index so repeated presses cycle through all asking
+            // sessions rather than getting stuck on the current one.
+            let asking: Option<(usize, String)> = (1..=n)
+                .find_map(|off| {
+                    let idx = (cur + off) % n;
+                    match items.get(idx)? {
+                        NavItem::Session(k)
+                            if state.agent_states.get(k) == Some(&AgentState::Asking) =>
+                        {
+                            Some((idx, k.clone()))
+                        }
+                        _ => None,
+                    }
+                });
+            if let Some((idx, key)) = asking {
+                state.selected = idx;
+                // Also switch the active tab to that session so Tab
+                // lands the user on its terminal, and emit
+                // FocusTerminalPane so the user can reply immediately.
+                if let Some(tab_idx) =
+                    state.terminal_index.tab_order.iter().position(|k| k == &key)
+                {
+                    state.terminal_index.active_tab = Some(tab_idx);
+                    cmds.push(Command::SetActiveTab { idx: tab_idx });
+                    cmds.push(Command::FocusTerminalPane {
+                        session_key: key.into(),
+                    });
+                }
+                state.status = "Jumped to session needing input".into();
+            } else {
+                state.status = "No sessions waiting for input".into();
+            }
+        }
+
         // ── OpenCiChecks: open the PR's /checks tab ──
         Action::OpenCiChecks => {
             if let Some(key) = selected_key(state)
@@ -1449,21 +1501,15 @@ fn selected_key(state: &State) -> Option<String> {
     }
 }
 
-/// After a focus move, if we landed on a Detail pane whose session has no
-/// comments (and a Terminal pane exists), step past it. The renderer hides
-/// the empty Detail pane, so leaving focus there dead-ends Tab cycling.
+/// After a focus move, if we landed on a Detail pane while a Terminal
+/// pane also exists, step past it. In the new three-zone layout the
+/// "Detail" pane just drives the comments-zone render — users reach it
+/// via the dedicated `D` binding, not via Tab cycling. Keeps Tab to a
+/// clean Inbox ↔ Terminal cycle when Claude is running.
 fn skip_empty_detail(state: &mut State) {
-    let Some(PaneContent::Detail(key)) = state.panes.focused_content() else {
+    let Some(PaneContent::Detail(_)) = state.panes.focused_content() else {
         return;
     };
-    let has_comments = state
-        .sessions
-        .get(&key)
-        .map(|s| !s.activity.is_empty())
-        .unwrap_or(false);
-    if has_comments {
-        return;
-    }
     let has_term = state
         .panes
         .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
@@ -1513,6 +1559,8 @@ pub fn handled_by_reduce(action: &Action) -> bool {
             | Action::MarkRead
             | Action::OpenInBrowser
             | Action::OpenCiChecks
+            | Action::JumpToNextAsking
+            | Action::FocusDetail
             | Action::MergePr
             | Action::MergeCompleted { .. }
             | Action::ApprovePr
