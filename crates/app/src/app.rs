@@ -1350,19 +1350,18 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             app.state.input_mode = InputMode::PanePrefix;
                         }
                         Action::None if derived == InputMode::Terminal => {
-                            // Focus wins. If the pane tree says the user is
-                            // on a Terminal pane, route to that leaf's key —
-                            // the render side syncs the leaf to the selected
-                            // session via update_detail_pane, so they agree
-                            // when the sidebar cursor is on a session with
-                            // a live terminal. Fall back to selected only
-                            // if the focused leaf's key is no longer live
-                            // (e.g. PTY just exited).
+                            // Keys go to the terminal the user SEES. The
+                            // renderer picks the selected session's
+                            // terminal (render_right_pane), so route to
+                            // the same target. The pane tree's Terminal
+                            // leaf key can lag the sidebar cursor — if
+                            // we routed there, keystrokes would hit an
+                            // invisible PTY.
                             let term_key = app
-                                .focused_terminal_key()
+                                .selected_session_key()
                                 .filter(|k| app.terminals.contains_key(k))
                                 .or_else(|| {
-                                    app.selected_session_key()
+                                    app.focused_terminal_key()
                                         .filter(|k| app.terminals.contains_key(k))
                                 });
                             if let Some(term_key) = term_key {
@@ -1457,13 +1456,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::Paste(text) => {
-            // Same routing rule as keystrokes: focused first, selected
-            // as fallback.
+            // Same routing rule as keystrokes: selected first, focused
+            // as fallback — targets what's rendered.
             let term_key = app
-                .focused_terminal_key()
+                .selected_session_key()
                 .filter(|k| app.terminals.contains_key(k))
                 .or_else(|| {
-                    app.selected_session_key()
+                    app.focused_terminal_key()
                         .filter(|k| app.terminals.contains_key(k))
                 });
             if let Some(term_key) = term_key
@@ -1746,14 +1745,13 @@ pub(crate) fn spawn_terminal(
 ///
 /// Matches what xterm / iTerm2 do natively, so habits transfer.
 fn forward_scroll(app: &mut App, column: u16, row: u16, up: bool) {
-    // Same routing rule as keystrokes: focused pane first, selected
-    // as fallback. Keeps wheel events on whatever PTY has focus even
-    // if the sidebar cursor drifts.
+    // Same routing rule as keystrokes: selected first, focused fallback
+    // — targets the rendered terminal.
     let term_key = app
-        .focused_terminal_key()
+        .selected_session_key()
         .filter(|k| app.terminals.contains_key(k))
         .or_else(|| {
-            app.selected_session_key()
+            app.focused_terminal_key()
                 .filter(|k| app.terminals.contains_key(k))
         });
     let Some(term_key) = term_key else {
