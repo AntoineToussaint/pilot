@@ -695,20 +695,21 @@ fn render_right_pane(
 
     match (term_key, detail_key) {
         (Some(term), Some(detail)) if has_comments => {
-            // Three-way stack: header (PR metadata) at the top, Claude
-            // Code in the middle, comments at the bottom. The header is
-            // always visible so CI/branch/role stay on-screen; Claude
-            // gets the biggest slice; comments tuck under as reference.
+            // Three-way stack: header (PR metadata), comments, then
+            // Claude Code at the bottom. Reading order = "what needs
+            // doing" → "who's doing it". Claude's tail output stays
+            // anchored next to the prompt input rather than being
+            // pushed off-screen by new lines.
             let header_h = detail_header_height(&app.state, &detail);
             let chunks = Layout::vertical([
                 Constraint::Length(header_h),
-                Constraint::Min(8),
-                Constraint::Percentage(30),
+                Constraint::Percentage(30), // comments
+                Constraint::Min(8),         // terminal (bottom)
             ])
             .split(area);
             render_detail_header(app, frame, chunks[0], &detail, now);
-            render_terminal(app, frame, chunks[1], &term);
-            render_comments(app, frame, chunks[2], &detail, now);
+            render_comments(app, frame, chunks[1], &detail, now);
+            render_terminal(app, frame, chunks[2], &term);
         }
         (Some(term), Some(detail)) => {
             // No comments — header on top, terminal below.
