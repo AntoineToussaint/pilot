@@ -334,6 +334,22 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 }
         }
 
+        // ── OpenCiChecks: open the PR's /checks tab ──
+        Action::OpenCiChecks => {
+            if let Some(key) = selected_key(state)
+                && let Some(session) = state.sessions.get(&key) {
+                    let base = &session.primary_task.url;
+                    if base.is_empty() {
+                        state.status = "No URL for this session".into();
+                    } else {
+                        // github.com/o/r/pull/N → github.com/o/r/pull/N/checks
+                        let url = format!("{}/checks", base.trim_end_matches('/'));
+                        state.status = "Opened CI checks".into();
+                        cmds.push(Command::OpenUrl { url });
+                    }
+                }
+        }
+
         // ── Merge (two-press guard, optimistic) ──
         Action::MergePr => {
             if let Some(key) = selected_key(state) {
@@ -577,6 +593,13 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 if let Some(session) = state.sessions.get_mut(&key) {
                     session.state = pilot_core::SessionState::Active;
                 }
+                // Wipe ALL per-session transient state — if we only called
+                // CloseTerminal, those keys would be cleaned, but if the
+                // tmux session was alive without a pilot PTY attached, a
+                // queued prompt / agent-state / asking-flag would linger.
+                state.pending_prompts.remove(&key);
+                state.notified_asking.remove(&key);
+                state.agent_states.remove(&key);
                 cmds.push(Command::KillTmuxSession { tmux_name });
                 if state.terminal_index.contains_key(&key) {
                     cmds.push(Command::CloseTerminal { session_key: key.clone().into() });
@@ -1489,6 +1512,7 @@ pub fn handled_by_reduce(action: &Action) -> bool {
             | Action::Refresh
             | Action::MarkRead
             | Action::OpenInBrowser
+            | Action::OpenCiChecks
             | Action::MergePr
             | Action::MergeCompleted { .. }
             | Action::ApprovePr

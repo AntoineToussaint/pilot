@@ -79,6 +79,8 @@ pub enum Action {
     MergeCompleted { session_key: SessionKey },
     /// Open PR in browser.
     OpenInBrowser,
+    /// Open the PR's CI "checks" tab in the default browser.
+    OpenCiChecks,
     /// Send a Slack reminder to reviewers.
     SlackNudge,
     /// Approve the selected PR (only when user's role is Reviewer or Assignee).

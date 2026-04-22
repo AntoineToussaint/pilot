@@ -672,54 +672,45 @@ fn render_right_pane(
     area: Rect,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    let selected_key = app.selected_session_key();
-
-    let Some(key) = selected_key else {
-        render_welcome(app, frame, area);
-        return;
-    };
-
-    let has_terminal = app.terminals.contains_key(&key);
-    // Hide the Detail pane entirely when the PR has no comments to show —
-    // the header alone isn't worth the screen real estate, and the user
-    // wants Claude Code to dominate the right side when there's nothing
-    // to discuss.
-    let has_comments = app
+    // The right-pane layout is derived from the pane TREE, not from the
+    // sidebar cursor. The Terminal shown in the tree may be for session
+    // A while the sidebar is hovering session B — in that case we keep
+    // showing A's terminal (so Tab never visually dead-ends) and render
+    // Detail for B underneath.
+    let detail_key = app.selected_session_key();
+    let term_key = app
         .state
-        .sessions
-        .get(&key)
+        .panes
+        .terminal_leaf_key()
+        .filter(|k| app.terminals.contains_key(k));
+
+    // Hide Detail when the selected PR has no comments — the header
+    // alone isn't worth screen real estate, and the user wants Claude
+    // Code to dominate the right side.
+    let has_comments = detail_key
+        .as_ref()
+        .and_then(|k| app.state.sessions.get(k))
         .map(|s| !s.activity.is_empty())
         .unwrap_or(false);
 
-    match (has_terminal, has_comments) {
-        (true, true) => {
+    match (term_key, detail_key) {
+        (Some(term), Some(detail)) if has_comments => {
             let chunks = Layout::vertical([
-                Constraint::Percentage(30), // detail header + comments
-                Constraint::Percentage(70), // terminal
+                Constraint::Percentage(30),
+                Constraint::Percentage(70),
             ])
             .split(area);
-            render_detail(app, frame, chunks[0], &key, now);
-            render_terminal(app, frame, chunks[1], &key);
+            render_detail(app, frame, chunks[0], &detail, now);
+            render_terminal(app, frame, chunks[1], &term);
         }
-        (true, false) => {
-            // No comments → give the whole right side to the terminal.
-            // If focus happens to be on the (now-invisible) Detail leaf,
-            // redirect it to the Terminal so Tab doesn't dead-end there.
-            if matches!(
-                app.state.panes.focused_content(),
-                Some(crate::pane::PaneContent::Detail(_))
-            ) && let Some(term_id) = app
-                .state
-                .panes
-                .find_pane(|c| matches!(c, crate::pane::PaneContent::Terminal(_)))
-            {
-                app.state.panes.focus(term_id);
-                crate::app::apply_determined_mode(app);
-            }
-            render_terminal(app, frame, area, &key);
+        (Some(term), _) => {
+            render_terminal(app, frame, area, &term);
         }
-        (false, _) => {
-            render_detail(app, frame, area, &key, now);
+        (None, Some(detail)) => {
+            render_detail(app, frame, area, &detail, now);
+        }
+        (None, None) => {
+            render_welcome(app, frame, area);
         }
     }
 }

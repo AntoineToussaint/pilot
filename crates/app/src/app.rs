@@ -935,19 +935,16 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     .map(|s| s.display_name.clone())
                                     .unwrap_or_else(|| key.clone());
                                 app.state.status = format!("Claude needs input: {title}");
-                                // Poke the OUTER terminal (iTerm2 etc.) so
-                                // the tab flashes / dock bounces when pilot
-                                // is in a background window. BEL triggers
-                                // the tab-alert; OSC 9 is iTerm2's Growl
-                                // notification. Runs on a blocking thread
-                                // so it won't race with ratatui's render.
-                                let osc9 = format!(
-                                    "\x07\x1b]9;pilot: Claude needs input — {title}\x07"
-                                );
-                                tokio::task::spawn_blocking(move || {
+                                // Ring the outer terminal's bell so iTerm2 /
+                                // Terminal.app highlights the tab. A plain
+                                // BEL is safe across all terminals; OSC 9 is
+                                // iTerm-specific and Terminal.app can route
+                                // it through AppleScript (opens Script
+                                // Editor!), so we don't send OSC anymore.
+                                tokio::task::spawn_blocking(|| {
                                     use std::io::Write;
                                     let mut out = std::io::stdout().lock();
-                                    let _ = out.write_all(osc9.as_bytes());
+                                    let _ = out.write_all(b"\x07");
                                     let _ = out.flush();
                                 });
                                 let title_clone = title.clone();
@@ -1056,16 +1053,19 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 );
             } else if app.state.loaded
                 && !app.state.purged_stale
-                && app.state.tick_count >= 50
+                && app.state.tick_count.is_multiple_of(300)
                 && app.state.first_poll_had_errors
             {
-                // Don't purge, but still mark as done so we don't keep
-                // rechecking every tick.
-                app.state.purged_stale = true;
+                // First poll had errors — we can't trust the key set.
+                // Clear the error flag and drop the partial key list so
+                // the NEXT error-free poll fills in fresh keys and
+                // triggers the purge. Logged every 30s so the user
+                // sees retry attempts in the log. Note we do NOT set
+                // purged_stale=true here — that would permanently
+                // suppress purging for this session.
+                tracing::info!("Retrying stale-purge accumulation after provider error");
+                app.state.first_poll_had_errors = false;
                 app.state.first_poll_keys.clear();
-                tracing::warn!(
-                    "Skipped stale purge — first poll had errors; sessions kept as-is"
-                );
             }
             // Terminal reaping + all associated cleanup happens in
             // `enforce_invariants()`, which runs right after this handler
