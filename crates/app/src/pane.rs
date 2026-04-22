@@ -223,23 +223,30 @@ impl PaneManager {
             return;
         }
 
-        // An existing Terminal leaf (for some other session) → retarget it.
+        // An existing Terminal leaf (for some other session) → retarget
+        // the content but DO NOT steal focus. Sidebar navigation calls
+        // this on every cursor move, and yanking focus to the Terminal
+        // leaf on each j/k would force the user into TERM mode against
+        // their will. Explicit paths (`c` / `n` / `p`) emit their own
+        // FocusTerminalPane command when focus is actually desired.
         if let Some(term_id) =
             find_pane_node(&self.root, &|c| matches!(c, PaneContent::Terminal(_)))
         {
             set_content_node(&mut self.root, term_id, PaneContent::Terminal(key.to_string()));
-            self.focused = term_id;
             return;
         }
 
-        // No Terminal leaf exists at all → split the detail pane, with
-        // the new Terminal leaf on top so visual order and Tab-cycling
-        // order both match: Inbox → Terminal → Detail.
+        // No Terminal leaf exists at all → split the detail pane. Same
+        // policy: don't steal focus — the split leaves focus on the
+        // newly created Terminal leaf only when the caller wanted it,
+        // which is already handled by spawn_terminal / FocusTerminalPane.
         if let Some(detail_id) =
             find_pane_node(&self.root, &|c| matches!(c, PaneContent::Detail(_)))
         {
+            let prior_focus = self.focused;
             self.focused = detail_id;
             self.split_vertical_above(PaneContent::Terminal(key.to_string()));
+            self.focused = prior_focus;
         }
     }
 
@@ -700,18 +707,24 @@ mod tests {
         // REGRESSION: user pressed `f` → prompt was sent to Claude → but
         // the terminal map had the terminal and no Terminal pane existed,
         // so the user saw DETAIL mode with no terminal visible.
+        //
+        // Invariant: the Terminal pane is created. Focus stays on the
+        // prior pane — sidebar navigation should NOT yank you into
+        // Terminal mode. Explicit paths (`c` / `n` / `p`) handle focus.
         let mut p = PaneManager::default_layout();
         assert!(p
             .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
             .is_none());
+        let prior_focus = p.focused;
 
         p.enforce_terminal_invariant(&keys(&["sess-a"]), Some("sess-a"));
 
-        let term_id = p
-            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "sess-a"))
-            .expect("Terminal pane should have been created");
-        // It must be the focused pane.
-        assert_eq!(p.focused, term_id);
+        assert!(
+            p.find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "sess-a"))
+                .is_some(),
+            "Terminal pane should have been created"
+        );
+        assert_eq!(p.focused, prior_focus, "focus must not be stolen");
     }
 
     #[test]
