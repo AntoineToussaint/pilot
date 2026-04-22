@@ -116,6 +116,9 @@ impl App {
         self.state.agent_states.remove(key);
         self.state.pending_prompts.remove(key);
         self.state.notified_asking.remove(key);
+        // Forget the last hook state so a re-attach doesn't inherit
+        // stale "asking" / "idle" from the previous run.
+        crate::claude_hooks::clear_state(key);
         // Sweep any pane leaves still pointing at dead terminal keys.
         let live: std::collections::BTreeSet<String> =
             self.terminals.keys().cloned().collect();
@@ -888,12 +891,39 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(term) = app.terminals.get(key) {
                         let prev = app.state.agent_states.get(key).copied()
                             .unwrap_or(AgentState::Active);
-                        let new_state = detect_state(
-                            term.last_output_at(),
-                            term.recent_output(),
-                            prev,
-                            asking_patterns,
-                        );
+                        // Prefer Claude's lifecycle hooks (deterministic)
+                        // over the output-timing heuristic. Fall back to
+                        // the heuristic only if the hook file is missing
+                        // or went stale (>120s without an update while
+                        // output is still flowing) — e.g. hooks failed to
+                        // install, or the user is on an old Claude build.
+                        let hook = crate::claude_hooks::read_state(key);
+                        let new_state = match hook {
+                            Some((hs, age)) if age < 120 => match hs {
+                                crate::claude_hooks::HookState::Working => AgentState::Active,
+                                crate::claude_hooks::HookState::Asking => AgentState::Asking,
+                                crate::claude_hooks::HookState::Idle => {
+                                    // Cover the AskUserQuestion gap — Claude's
+                                    // Stop hook fires for input-waiting turns
+                                    // too, so peek the tail for a `?`.
+                                    if crate::agent_state::detect_asking(
+                                        term.recent_output(),
+                                        asking_patterns,
+                                    ) {
+                                        AgentState::Asking
+                                    } else {
+                                        AgentState::Idle
+                                    }
+                                }
+                                crate::claude_hooks::HookState::Stopped => AgentState::Idle,
+                            },
+                            _ => detect_state(
+                                term.last_output_at(),
+                                term.recent_output(),
+                                prev,
+                                asking_patterns,
+                            ),
+                        };
                         // Handle transitions.
                         if new_state != prev {
                             if new_state == AgentState::Active {
@@ -1608,6 +1638,17 @@ pub(crate) fn spawn_terminal(
         ("PILOT_PR_NUMBER".to_string(), pr_number),
         ("PILOT_REPO".to_string(), repo),
     ];
+
+    // Install Claude Code hooks so we get deterministic state
+    // transitions (working / asking / idle) instead of guessing from
+    // PTY output. Only meaningful for the Claude kind; harmless for
+    // Shell since Claude never runs there to read the settings file.
+    if matches!(kind, ShellKind::Claude) {
+        crate::claude_hooks::clear_state(session_key);
+        if let Err(e) = crate::claude_hooks::install_hooks(&cwd, session_key) {
+            tracing::warn!("Failed to install Claude hooks for {session_key}: {e}");
+        }
+    }
 
     let term_result = TermSession::spawn(&cmd, size, Some(&cwd), env);
 

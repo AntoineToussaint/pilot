@@ -47,7 +47,7 @@ pub(crate) fn detect_state(
 }
 
 /// Check recent output for question/prompt patterns.
-fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
+pub(crate) fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
     let tail_start = recent_output.len().saturating_sub(512);
     let tail = String::from_utf8_lossy(&recent_output[tail_start..]);
     let clean = strip_ansi(&tail);

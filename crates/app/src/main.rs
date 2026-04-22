@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 mod action;
 mod app;
 mod agent_state;
+mod claude_hooks;
 mod command;
 mod reduce;
 pub mod input;
