@@ -232,12 +232,14 @@ impl PaneManager {
             return;
         }
 
-        // No Terminal leaf exists at all → split the detail pane.
+        // No Terminal leaf exists at all → split the detail pane, with
+        // the new Terminal leaf on top so visual order and Tab-cycling
+        // order both match: Inbox → Terminal → Detail.
         if let Some(detail_id) =
             find_pane_node(&self.root, &|c| matches!(c, PaneContent::Detail(_)))
         {
             self.focused = detail_id;
-            self.split_vertical(PaneContent::Terminal(key.to_string()));
+            self.split_vertical_above(PaneContent::Terminal(key.to_string()));
         }
     }
 

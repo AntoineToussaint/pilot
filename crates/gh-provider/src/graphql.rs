@@ -397,13 +397,25 @@ pub fn query_body(search_query: &str) -> serde_json::Value {
 }
 
 pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::Value {
-    serde_json::json!({
-        "query": SEARCH_QUERY,
-        "variables": {
+    // Omit `after` entirely when None — sending `"after": null` in the
+    // variables block trips GitHub's GraphQL with a misleading
+    // "A query attribute must be specified and must be a string" error.
+    // With the variable absent, the query's `$after: String` parameter
+    // defaults to null on GitHub's side, which is what we want.
+    let variables = match after {
+        Some(cursor) => serde_json::json!({
             "query": search_query,
             "first": 100,
-            "after": after,
-        }
+            "after": cursor,
+        }),
+        None => serde_json::json!({
+            "query": search_query,
+            "first": 100,
+        }),
+    };
+    serde_json::json!({
+        "query": SEARCH_QUERY,
+        "variables": variables,
     })
 }
 
