@@ -1501,21 +1501,29 @@ fn selected_key(state: &State) -> Option<String> {
     }
 }
 
-/// After a focus move, if we landed on a Detail pane while a Terminal
-/// pane also exists, step past it. In the new three-zone layout the
-/// "Detail" pane just drives the comments-zone render — users reach it
-/// via the dedicated `D` binding, not via Tab cycling. Keeps Tab to a
-/// clean Inbox ↔ Terminal cycle when Claude is running.
+/// After a focus move, step past panes that aren't meaningful for the
+/// CURRENT selection:
+///   - Landed on Detail but the selected session has a live terminal →
+///     skip to Terminal (the typing surface).
+///   - Landed on Terminal but the selected session has NO live terminal
+///     → the pane tree's Terminal leaf belongs to some other session
+///     and isn't rendered. Tab must cycle past it to avoid "TERM mode
+///     with nothing visible".
+///   - Landed on Detail and no terminal exists → stay; user needs Detail
+///     to select comments.
 fn skip_empty_detail(state: &mut State) {
-    let Some(PaneContent::Detail(_)) = state.panes.focused_content() else {
-        return;
+    let selected_has_terminal = match selected_key(state) {
+        Some(k) => state.terminal_index.keys.contains(&k),
+        None => false,
     };
-    let has_term = state
-        .panes
-        .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
-        .is_some();
-    if has_term {
-        state.panes.focus_next();
+    match state.panes.focused_content() {
+        Some(PaneContent::Detail(_)) if selected_has_terminal => {
+            state.panes.focus_next();
+        }
+        Some(PaneContent::Terminal(_)) if !selected_has_terminal => {
+            state.panes.focus_next();
+        }
+        _ => {}
     }
 }
 
