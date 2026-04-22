@@ -907,50 +907,53 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     if let Some(term) = app.terminals.get(key) {
                         let prev = app.state.agent_states.get(key).copied()
                             .unwrap_or(AgentState::Active);
-                        // Prefer Claude's lifecycle hooks, but cross-check
-                        // "working" against PTY silence. The Stop hook does
-                        // NOT fire when a turn is interrupted (Esc in the
-                        // prompt, or external SIGINT), so the state file
-                        // would be stuck at "working" forever even though
-                        // Claude is clearly idle. If no PTY output has
-                        // arrived in >2s and the hook says working, fall
-                        // through to the heuristic which will see silence
-                        // and classify as Idle (or Asking if the tail
-                        // contains a question).
+                        // Prefer Claude's lifecycle hooks, but override when
+                        // the PTY clearly shows an in-turn dialog that the
+                        // hook system doesn't fire for. Examples:
+                        //   - Rate-limit / "What do you want to do?" prompts
+                        //   - AskUserQuestion tool (no hook — open issue)
+                        //   - Custom Claude dialogs mid-turn
+                        //
+                        // All of these render "Esc to cancel" / "Tab to
+                        // amend" at the bottom of a dialog box. Those
+                        // strings are product-stable and only appear on
+                        // an OPEN dialog, so treat them as a reliable
+                        // "asking" override regardless of hook state.
                         let hook = crate::claude_hooks::read_state(key);
                         let silent_ms = term.last_output_at().elapsed().as_millis();
-                        let new_state = match hook {
-                            Some((crate::claude_hooks::HookState::Working, _))
-                                if silent_ms > 2000 =>
-                            {
-                                // Hook lies — interrupted turn. Fall back.
-                                detect_state(
+                        let dialog_visible = crate::agent_state::detect_asking(
+                            term.recent_output(),
+                            asking_patterns,
+                        );
+                        let new_state = if dialog_visible {
+                            AgentState::Asking
+                        } else {
+                            match hook {
+                                Some((crate::claude_hooks::HookState::Working, _))
+                                    if silent_ms > 2000 =>
+                                {
+                                    // Hook says working but PTY is quiet —
+                                    // likely an interrupted turn. Fall back.
+                                    detect_state(
+                                        term.last_output_at(),
+                                        term.recent_output(),
+                                        prev,
+                                        asking_patterns,
+                                    )
+                                }
+                                Some((hs, _)) => match hs {
+                                    crate::claude_hooks::HookState::Working => AgentState::Active,
+                                    crate::claude_hooks::HookState::Asking => AgentState::Asking,
+                                    crate::claude_hooks::HookState::Idle => AgentState::Idle,
+                                    crate::claude_hooks::HookState::Stopped => AgentState::Idle,
+                                },
+                                None => detect_state(
                                     term.last_output_at(),
                                     term.recent_output(),
                                     prev,
                                     asking_patterns,
-                                )
+                                ),
                             }
-                            Some((hs, _)) => match hs {
-                                crate::claude_hooks::HookState::Working => AgentState::Active,
-                                crate::claude_hooks::HookState::Asking => AgentState::Asking,
-                                // Trust the hook: Stop fired → Claude is idle.
-                                // No peeking at the output for a trailing
-                                // `?` — that matched the user's OWN prior
-                                // question sitting in the scrollback and
-                                // triggered false "INPUT NEEDED" states.
-                                // The real "Claude wants input" cases are
-                                // covered by the Notification / PermissionRequest
-                                // / Elicitation hooks, which fire "asking".
-                                crate::claude_hooks::HookState::Idle => AgentState::Idle,
-                                crate::claude_hooks::HookState::Stopped => AgentState::Idle,
-                            },
-                            None => detect_state(
-                                term.last_output_at(),
-                                term.recent_output(),
-                                prev,
-                                asking_patterns,
-                            ),
                         };
                         // Handle transitions.
                         if new_state != prev {

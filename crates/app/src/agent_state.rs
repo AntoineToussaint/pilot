@@ -71,11 +71,37 @@ pub(crate) fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
     const CLAUDE_ASKING_MARKERS: &[&str] = &[
         "esc to cancel",
         "tab to amend",
+        "enter to confirm",
     ];
     for marker in CLAUDE_ASKING_MARKERS {
         if lower_all.contains(marker) {
             return true;
         }
+    }
+
+    // Numbered-option prompt. Claude's mid-turn question UI renders:
+    //
+    //   What do you want to do?
+    //   > 1. Stop and wait for limit to reset
+    //     2. Request more
+    //
+    // Detect by scanning the last ~8 non-empty lines for two or more
+    // that match `^\s*\d+\.\s` — a numbered choice block near the
+    // cursor. Looser than the "Esc to cancel" markers but matches
+    // the many internal Claude dialogs that skip the hook.
+    let numbered_count = trimmed
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(8)
+        .filter(|l| {
+            let t = l.trim_start_matches(['>', ' ']);
+            let Some(rest) = t.split_once('.') else { return false };
+            rest.0.chars().all(|c| c.is_ascii_digit()) && !rest.0.is_empty()
+        })
+        .count();
+    if numbered_count >= 2 {
+        return true;
     }
 
     let last_line = trimmed
@@ -166,6 +192,31 @@ mod tests {
             &patterns,
         );
         assert_eq!(state, AgentState::Asking);
+    }
+
+    #[test]
+    fn test_asking_on_numbered_options() {
+        // Mid-turn Claude dialog: "What do you want to do? 1. ... 2. ..."
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let out = b"What do you want to do?\n\n> 1. Stop and wait for limit to reset\n  2. Request more\n\nEnter to confirm \xc2\xb7 Esc to cancel";
+        let state = detect_state(old, out, AgentState::Active, &patterns);
+        assert_eq!(state, AgentState::Asking);
+    }
+
+    #[test]
+    fn test_idle_single_numbered_line_does_not_trigger() {
+        // A single "1. foo" in the scrollback shouldn't trigger Asking —
+        // needs at least two numbered lines in close proximity.
+        let old = Instant::now() - Duration::from_secs(5);
+        let patterns: Vec<String> = vec![];
+        let state = detect_state(
+            old,
+            b"Done.\n\nHere's the list:\n 1. only one item\nsomething else\n",
+            AgentState::Active,
+            &patterns,
+        );
+        assert_eq!(state, AgentState::Idle);
     }
 
     #[test]
