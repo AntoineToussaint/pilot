@@ -488,6 +488,42 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             cmds.push(Command::RunGhApprove { repo, pr_number });
         }
 
+        // ── UpdateBranch (two-press confirmation) ──
+        Action::UpdateBranch => {
+            let Some(key) = selected_key(state) else { return cmds };
+            let Some(session) = state.sessions.get(&key) else { return cmds };
+            let task = &session.primary_task;
+            let repo = task.repo.clone().unwrap_or_default();
+            let pr_number = task
+                .id
+                .key
+                .rsplit_once('#')
+                .map(|(_, n)| n.to_string())
+                .unwrap_or_default();
+            if repo.is_empty() || pr_number.is_empty() {
+                state.status = "UpdateBranch: no PR info".into();
+                return cmds;
+            }
+            if !task.is_behind_base {
+                state.status = format!("{repo}#{pr_number}: branch is not behind base");
+                return cmds;
+            }
+            if state.update_branch_pending.as_deref() == Some(key.as_str()) {
+                state.update_branch_pending = None;
+                state.status = format!("Updating {repo}#{pr_number} from base…");
+                cmds.push(Command::RunGhUpdateBranch {
+                    repo,
+                    pr_number,
+                    session_key: key.into(),
+                });
+            } else {
+                state.update_branch_pending = Some(key);
+                state.status = format!(
+                    "Update branch on {repo}#{pr_number}? Press Shift-U again to confirm."
+                );
+            }
+        }
+
         // ── SlackNudge ──
         Action::SlackNudge => {
             let Some(key) = selected_key(state) else { return cmds };
@@ -721,6 +757,8 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 auto_merge_enabled: false,
                 is_in_merge_queue: false,
                 has_conflicts: false,
+                is_behind_base: false,
+                node_id: None,
                 needs_reply: false,
                 last_commenter: None,
                 recent_activity: vec![],
@@ -1572,6 +1610,7 @@ pub fn handled_by_reduce(action: &Action) -> bool {
             | Action::MergePr
             | Action::MergeCompleted { .. }
             | Action::ApprovePr
+            | Action::UpdateBranch
             | Action::SlackNudge
             | Action::WorktreeReady { .. }
             | Action::OpenSession(_)
@@ -1743,7 +1782,8 @@ mod tests {
             base_branch: None,
             updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
             assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: false, last_commenter: None,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         };
         task.url = "https://github.com/o/r/pull/1".into();
@@ -1773,7 +1813,8 @@ mod tests {
             base_branch: None,
             updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
             assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: false, last_commenter: None,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         };
         s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
@@ -1798,7 +1839,8 @@ mod tests {
             base_branch: None,
             updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
             assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: false, last_commenter: None,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         };
         task.role = TaskRole::Reviewer;
@@ -1827,7 +1869,8 @@ mod tests {
             base_branch: None,
             updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
             assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: false, last_commenter: None,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         };
         s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
@@ -1861,7 +1904,8 @@ mod tests {
             base_branch: None,
             updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
             assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: false, last_commenter: None,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         };
         s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
@@ -1894,7 +1938,8 @@ mod tests {
             base_branch: None,
             updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
             assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: true, last_commenter: None,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: true, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         };
         s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
@@ -1934,6 +1979,8 @@ mod tests {
             auto_merge_enabled: false,
             is_in_merge_queue: false,
             has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
             needs_reply: false,
             last_commenter: None,
             recent_activity: vec![],
@@ -2323,7 +2370,8 @@ mod tests {
             base_branch: None,
             updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
             assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: false, last_commenter: None,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         };
         let mut session = pilot_core::Session::new_at(task, chrono::Utc::now());

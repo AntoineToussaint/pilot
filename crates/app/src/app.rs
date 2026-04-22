@@ -265,6 +265,44 @@ impl App {
                     }
                 });
             }
+            C::RunGhUpdateBranch { repo, pr_number, session_key } => {
+                // `gh api -X PUT /repos/<repo>/pulls/<num>/update-branch` is
+                // the exact same API the github.com "Update branch" button
+                // uses. Works for both merge and rebase — GitHub chooses
+                // based on the repo's default update strategy.
+                let tx = action_tx.clone();
+                let repo_clone = repo.clone();
+                let pr_clone = pr_number.clone();
+                tokio::spawn(async move {
+                    let path = format!("/repos/{repo_clone}/pulls/{pr_clone}/update-branch");
+                    let out = tokio::process::Command::new("gh")
+                        .args(["api", "--method", "PUT", &path])
+                        .output()
+                        .await;
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let _ = tx.send(Action::StatusMessage(format!(
+                                "Updated branch: {repo_clone}#{pr_clone}"
+                            )));
+                            // Kick a poll so the sidebar's ⇣ glyph clears
+                            // once GitHub recomputes mergeStateStatus.
+                            let _ = tx.send(Action::Refresh);
+                            let _ = session_key;
+                        }
+                        Ok(o) => {
+                            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                            let _ = tx.send(Action::StatusMessage(format!(
+                                "Update branch failed: {err}"
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::StatusMessage(format!(
+                                "Update branch error: {e}"
+                            )));
+                        }
+                    }
+                });
+            }
             C::RunGhComment { repo, pr_number, body, reply_to_node_id } => {
                 let tx = action_tx.clone();
                 tokio::spawn(async move {

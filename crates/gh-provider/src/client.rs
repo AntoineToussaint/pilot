@@ -176,6 +176,23 @@ impl GhClient {
         tracing::info!("GraphQL returned {} PRs (incl. {} watched repos)", tasks.len(), self.watch_repos.len());
         Ok(tasks)
     }
+
+    /// Merge the base branch into this PR's head — same as the "Update
+    /// branch" button on github.com. Requires the PR's GraphQL node ID.
+    pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        let body = graphql::update_branch_body(pull_request_node_id);
+        let response: graphql::GqlResponse = self
+            .inner
+            .post("/graphql", Some(&body))
+            .await
+            .map_err(GhError::Api)?;
+        if let Some(errors) = response.errors {
+            let joined = errors.iter().map(|e| e.full()).collect::<Vec<_>>().join("; ");
+            tracing::error!("updatePullRequestBranch errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
 }
 
 impl pilot_core::TaskProvider for GhClient {

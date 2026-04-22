@@ -82,6 +82,14 @@ pub enum Command {
         repo: String,
         pr_number: String,
     },
+    /// `gh api -X PUT /repos/<repo>/pulls/<num>/update-branch` — merges the
+    /// PR's base branch into head (same as the github.com "Update branch"
+    /// button).
+    RunGhUpdateBranch {
+        repo: String,
+        pr_number: String,
+        session_key: SessionKey,
+    },
     /// `gh pr comment <num> --body <body> [--reply-to <node_id>] --repo <repo>`.
     RunGhComment {
         repo: String,

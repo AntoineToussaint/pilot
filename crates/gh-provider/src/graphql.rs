@@ -11,6 +11,7 @@ query($query: String!, $first: Int!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
+        id
         number
         title
         body
@@ -25,6 +26,7 @@ query($query: String!, $first: Int!, $after: String) {
         headRefName
         baseRefName
         mergeable
+        mergeStateStatus
         reviewDecision
         autoMergeRequest { enabledAt }
         isInMergeQueue
@@ -187,6 +189,9 @@ pub struct GqlPageInfo {
 
 #[derive(Deserialize, Debug)]
 pub struct GqlPr {
+    /// GraphQL node ID — needed for mutations like `updatePullRequestBranch`.
+    #[serde(default)]
+    pub id: Option<String>,
     pub number: u64,
     pub title: String,
     pub body: Option<String>,
@@ -208,6 +213,10 @@ pub struct GqlPr {
     /// MERGEABLE, CONFLICTING, or UNKNOWN.
     #[serde(default)]
     pub mergeable: Option<String>,
+    /// BEHIND, BLOCKED, CLEAN, DIRTY, DRAFT, HAS_HOOKS, UNKNOWN, UNSTABLE.
+    /// `BEHIND` is what drives the "Update branch" button on github.com.
+    #[serde(default, rename = "mergeStateStatus")]
+    pub merge_state_status: Option<String>,
     #[serde(rename = "reviewDecision")]
     pub review_decision: Option<String>, // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED
     #[serde(rename = "autoMergeRequest")]
@@ -419,6 +428,24 @@ pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::
     })
 }
 
+/// GraphQL mutation that merges the base branch into the PR head — same
+/// effect as clicking "Update branch" on github.com. Default method is MERGE;
+/// pass REBASE if the repo prefers it.
+const UPDATE_BRANCH_MUTATION: &str = r#"
+mutation($id: ID!) {
+  updatePullRequestBranch(input: { pullRequestId: $id }) {
+    pullRequest { id }
+  }
+}
+"#;
+
+pub fn update_branch_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": UPDATE_BRANCH_MUTATION,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
 /// Convert GraphQL PR data to our Task type.
 pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     let repo = extract_repo_from_url(&pr.url);
@@ -595,6 +622,8 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         auto_merge_enabled: pr.auto_merge_request.is_some(),
         is_in_merge_queue: pr.is_in_merge_queue,
         has_conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
+        is_behind_base: pr.merge_state_status.as_deref() == Some("BEHIND"),
+        node_id: pr.id.clone(),
         needs_reply,
         last_commenter,
         recent_activity: activities,

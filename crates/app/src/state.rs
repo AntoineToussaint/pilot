@@ -90,6 +90,8 @@ pub struct State {
     pub(crate) should_quit: bool,
     pub(crate) quit_pending: bool,
     pub(crate) merge_pending: Option<String>,
+    /// Session key armed for an UpdateBranch — next Shift-U confirms.
+    pub(crate) update_branch_pending: Option<String>,
 
     // ── First-poll bookkeeping ──
     pub(crate) loaded: bool,
@@ -166,6 +168,7 @@ impl State {
             should_quit: false,
             quit_pending: false,
             merge_pending: None,
+            update_branch_pending: None,
             loaded: false,
             purged_stale: false,
             first_poll_keys: HashSet::new(),

@@ -93,6 +93,13 @@ pub enum Action {
     SlackNudge,
     /// Approve the selected PR (only when user's role is Reviewer or Assignee).
     ApprovePr,
+    /// Merge the base branch into the PR head — same effect as clicking
+    /// "Update branch" on github.com. Only meaningful when the PR is
+    /// behind its base (the `⇣` indicator in the sidebar).
+    ///
+    /// Uses a two-press confirmation like `MergePr` so Shift-U can't
+    /// update by accident.
+    UpdateBranch,
 
     // -- Snooze --
     /// Snooze the selected session for N hours.

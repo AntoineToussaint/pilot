@@ -145,6 +145,7 @@ mod tests {
             updated_at: updated,
             labels: vec![], reviewers: vec![], assignees: vec![],
             auto_merge_enabled: false, is_in_merge_queue: false, has_conflicts: false,
+            is_behind_base: false, node_id: None,
             needs_reply: false, last_commenter: None,
             recent_activity: vec![], additions: 0, deletions: 0,
         }

@@ -345,6 +345,8 @@ mod tests {
             auto_merge_enabled: false,
             is_in_merge_queue: false,
             has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
             needs_reply: false,
             last_commenter: None,
             recent_activity: vec![],

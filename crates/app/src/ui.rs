@@ -81,9 +81,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let groups = crate::keymap::all_bindings();
 
-    // Center the help box.
-    let modal_w = 70u16.min(area.width.saturating_sub(4));
-    let modal_h = 28u16.min(area.height.saturating_sub(2));
+    // Center the help box — wider + taller than pure keymap because we also
+    // explain status tags and icons (otherwise "AUTO" / "REVIEW" / "↳" are a
+    // mystery).
+    let modal_w = 84u16.min(area.width.saturating_sub(4));
+    let modal_h = area.height.saturating_sub(2).min(40);
     let x = (area.width.saturating_sub(modal_w)) / 2;
     let y = (area.height.saturating_sub(modal_h)) / 2;
     let modal_area = Rect::new(x, y, modal_w, modal_h);
@@ -93,6 +95,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
 
+    // ── Keybindings ──
     for (category, items) in groups {
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -110,6 +113,61 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         }
         lines.push(Line::raw(""));
     }
+
+    // ── Status tags (sidebar right column) ──
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Status tags", Style::default().fg(C_ACCENT).bold()),
+    ]));
+    let tag_rows: [(&str, Color, Color, &str); 9] = [
+        ("CONFLICT", C_TEXT_BRIGHT, C_RED,     "Merge conflicts with base branch"),
+        ("CI FAIL",  C_TEXT_BRIGHT, C_RED,     "CI checks failed"),
+        ("CHANGES",  C_TEXT_BRIGHT, C_ORANGE,  "Reviewer requested changes"),
+        ("QUEUED",   C_TEXT_BRIGHT, C_MAGENTA, "Sitting in GitHub's merge queue"),
+        ("READY",    C_TEXT_BRIGHT, C_GREEN,   "Approved + CI green — merge now"),
+        ("AUTO",     C_TEXT_BRIGHT, C_MAGENTA, "Auto-merge armed — will merge when checks pass"),
+        ("REVIEW",   C_TEXT_BRIGHT, C_YELLOW,  "Awaiting review"),
+        ("CI",       C_TEXT_BRIGHT, C_YELLOW,  "CI still running (pulses)"),
+        ("DRAFT",    C_TEXT_DIM,    C_BG_ALT,  "Draft PR — not ready for review"),
+    ];
+    for (label, fg, bg, desc) in tag_rows {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(format!(" {label:<8} "), Style::default().fg(fg).bg(bg).bold()),
+            Span::raw("  "),
+            Span::styled(desc, Style::default().fg(C_TEXT)),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
+    // ── Icons (sidebar left columns) ──
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Icons", Style::default().fg(C_ACCENT).bold()),
+    ]));
+    let icon_rows: [(&str, Color, &str); 11] = [
+        ("@",  C_CYAN,     "You authored this PR"),
+        ("R",  C_MAGENTA,  "You're a reviewer"),
+        ("A",  C_GREEN,    "You're an assignee"),
+        ("↳",  C_TEXT_DIM, "Stacked on another PR (waits for parent to merge)"),
+        ("⇡",  C_TEXT_DIM, "Another PR is stacked on top of this one"),
+        ("⇣",  C_TEXT_DIM, "Branch is behind base — Shift-U to update"),
+        ("●",  C_GREEN,    "Claude idle — waiting for your next prompt"),
+        ("⠿",  C_CYAN,     "Claude working (animated braille spinner)"),
+        ("?",  C_RED,      "Claude is asking a question — INPUT NEEDED (blinks)"),
+        ("●",  C_YELLOW,   "tmux session alive but detached — press c to attach"),
+        ("*",  C_ACCENT,   "Unread events on this PR"),
+    ];
+    for (glyph, color, desc) in icon_rows {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(format!("{glyph:<3}"), Style::default().fg(color).bold()),
+            Span::raw(" "),
+            Span::styled(desc, Style::default().fg(C_TEXT)),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
     lines.push(Line::from(Span::styled(
         "  Press any key to close",
         Style::default().fg(C_TEXT_DIM).italic(),
@@ -118,7 +176,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Span::styled(
-            " Keybindings (N=Normal D=Detail T=Terminal P=PanePrefix) ",
+            " Help — Keys / Status tags / Icons  (N=Normal D=Detail T=Terminal P=PanePrefix) ",
             Style::default().fg(C_ACCENT).bold(),
         ))
         .border_style(Style::default().fg(C_ACCENT))
@@ -556,13 +614,19 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                     ""
                 };
 
+                // `⇣ ` = PR branch is behind base (same signal as the
+                // "Update branch" button on github.com). Dimmed — informational,
+                // not urgent like REVIEW/CI. Placed between the stack prefix
+                // and the title so it's aligned regardless of stack status.
+                let behind_prefix: &str = if task.is_behind_base { "⇣ " } else { "" };
+
                 // ── Title fills the gap ──
                 let title_w = w.saturating_sub(LEFT_W + RIGHT_W);
-                let prefix_w = stack_prefix.chars().count();
+                let prefix_w = stack_prefix.chars().count() + behind_prefix.chars().count();
                 let title_budget = title_w.saturating_sub(prefix_w);
                 let title_text = truncate_str(&task.title, title_budget);
                 let padded_title = format!(
-                    "{stack_prefix}{title_text:<width$}",
+                    "{stack_prefix}{behind_prefix}{title_text:<width$}",
                     width = title_budget
                 );
 

@@ -144,6 +144,14 @@ pub struct Task {
     /// Whether this PR has merge conflicts.
     #[serde(default)]
     pub has_conflicts: bool,
+    /// Whether the PR branch is behind its base (needs "Update branch").
+    /// Derived from GitHub's `mergeStateStatus == BEHIND`.
+    #[serde(default)]
+    pub is_behind_base: bool,
+    /// GraphQL node ID of the PR — required for mutations like
+    /// `updatePullRequestBranch`. Populated by providers that fetch it.
+    #[serde(default)]
+    pub node_id: Option<String>,
     /// Whether the last comment/review on this task is from someone else
     /// (i.e. you need to reply).
     pub needs_reply: bool,
@@ -290,7 +298,8 @@ mod status_tag_tests {
             branch: Some("b".into()), base_branch: None, updated_at: Utc::now(),
             labels: vec![], reviewers: vec![], assignees: vec![],
             auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, needs_reply: false,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false,
             last_commenter: None, recent_activity: vec![],
             additions: 0, deletions: 0,
         }
