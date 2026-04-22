@@ -248,60 +248,21 @@ impl PaneManager {
         }
     }
 
-    /// Enforce the pane <-> terminal invariant:
-    ///   1. Every `Terminal(k)` leaf must have `k ∈ live_keys`.
-    ///   2. If `active_key` is Some and no leaf shows it, either retarget an
-    ///      existing Terminal leaf to `active_key` or split the detail pane
-    ///      to create one. Result: the active terminal is always visible.
+    /// Prune Terminal leaves whose key is no longer in `live_keys`. That's
+    /// ALL it does now — the retarget-to-active-tab step that used to live
+    /// here fought with `sync_for_selection` (which retargets to the
+    /// sidebar-selected session) and caused "Tab can't reach my terminal"
+    /// bugs. Retargeting / creation is handled by `sync_for_selection` on
+    /// navigation and by `FocusTerminalPane` on explicit tab switches.
     ///
-    /// Pure in the sense that it only depends on pane tree + the two input
-    /// sets; no side channels. Unit-tested.
+    /// The `active_key` parameter is kept for API compatibility with
+    /// existing call sites but is ignored.
     pub fn enforce_terminal_invariant(
         &mut self,
         live_keys: &std::collections::BTreeSet<String>,
-        active_key: Option<&str>,
+        _active_key: Option<&str>,
     ) {
-        // 1. Prune dead leaves.
         prune_node(&mut self.root, live_keys);
-
-        // 2. Make sure the active key is visible.
-        let Some(key) = active_key else { return };
-        if !live_keys.contains(key) {
-            return; // active_key isn't actually live; nothing to do.
-        }
-        let already_visible = find_pane_node(&self.root, &|c| {
-            matches!(c, PaneContent::Terminal(k) if k == key)
-        })
-        .is_some();
-        if already_visible {
-            return;
-        }
-
-        // An existing Terminal leaf (for some other session) → retarget
-        // the content but DO NOT steal focus. Sidebar navigation calls
-        // this on every cursor move, and yanking focus to the Terminal
-        // leaf on each j/k would force the user into TERM mode against
-        // their will. Explicit paths (`c` / `n` / `p`) emit their own
-        // FocusTerminalPane command when focus is actually desired.
-        if let Some(term_id) =
-            find_pane_node(&self.root, &|c| matches!(c, PaneContent::Terminal(_)))
-        {
-            set_content_node(&mut self.root, term_id, PaneContent::Terminal(key.to_string()));
-            return;
-        }
-
-        // No Terminal leaf exists at all → split the detail pane. Same
-        // policy: don't steal focus — the split leaves focus on the
-        // newly created Terminal leaf only when the caller wanted it,
-        // which is already handled by spawn_terminal / FocusTerminalPane.
-        if let Some(detail_id) =
-            find_pane_node(&self.root, &|c| matches!(c, PaneContent::Detail(_)))
-        {
-            let prior_focus = self.focused;
-            self.focused = detail_id;
-            self.split_vertical_above(PaneContent::Terminal(key.to_string()));
-            self.focused = prior_focus;
-        }
     }
 
     /// Move focus to the next pane (cycles through all leaves).
@@ -757,43 +718,39 @@ mod tests {
     }
 
     #[test]
-    fn enforce_invariant_creates_pane_when_terminal_active_but_not_shown() {
-        // REGRESSION: user pressed `f` → prompt was sent to Claude → but
-        // the terminal map had the terminal and no Terminal pane existed,
-        // so the user saw DETAIL mode with no terminal visible.
-        //
-        // Invariant: the Terminal pane is created. Focus stays on the
-        // prior pane — sidebar navigation should NOT yank you into
-        // Terminal mode. Explicit paths (`c` / `n` / `p`) handle focus.
+    fn enforce_invariant_prunes_dead_leaves() {
+        // enforce_terminal_invariant now JUST prunes — retargeting and
+        // creation are the job of sync_for_selection. See the note on
+        // the method. A dead key becomes Empty; focus is untouched.
         let mut p = PaneManager::default_layout();
-        assert!(p
-            .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
-            .is_none());
+        p.split_vertical(PaneContent::Terminal("dead".into()));
         let prior_focus = p.focused;
-
-        p.enforce_terminal_invariant(&keys(&["sess-a"]), Some("sess-a"));
-
+        p.enforce_terminal_invariant(&keys(&[]), None);
         assert!(
-            p.find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "sess-a"))
-                .is_some(),
-            "Terminal pane should have been created"
+            p.find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+                .is_none(),
+            "dead leaf should have been pruned"
         );
-        assert_eq!(p.focused, prior_focus, "focus must not be stolen");
+        assert_eq!(p.focused, prior_focus);
     }
 
     #[test]
-    fn enforce_invariant_retargets_existing_pane_for_different_session() {
+    fn enforce_invariant_does_not_retarget_on_active_key() {
+        // REGRESSION: previously enforce_terminal_invariant retargeted
+        // the Terminal leaf to active_tab_key on every tick, undoing
+        // sync_for_selection which had pointed the leaf at the sidebar-
+        // selected session. That made Tab land on a stale Terminal leaf
+        // (Mode=Terminal but the leaf's key was dead).
         let mut p = PaneManager::default_layout();
-        p.split_vertical(PaneContent::Terminal("old".into()));
-        // Switch active session to "new".
-        p.enforce_terminal_invariant(&keys(&["new"]), Some("new"));
-        // "old" was pruned (not in live_keys), "new" took over.
-        assert!(p
-            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "new"))
-            .is_some());
-        assert!(p
-            .find_pane(|c| matches!(c, PaneContent::Terminal(k) if k == "old"))
-            .is_none());
+        p.split_vertical(PaneContent::Terminal("selected".into()));
+        let tree_before = format!("{:?}", p.root);
+        // Pass a DIFFERENT active key — should be ignored now.
+        p.enforce_terminal_invariant(&keys(&["selected", "other"]), Some("other"));
+        assert_eq!(
+            format!("{:?}", p.root),
+            tree_before,
+            "leaf must not be retargeted from active_key"
+        );
     }
 
     #[test]
