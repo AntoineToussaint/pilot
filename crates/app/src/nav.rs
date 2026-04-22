@@ -202,6 +202,40 @@ fn build_repo_groups_inner(
     repos
 }
 
+/// For each visible session, figure out whether it's stacked on top of
+/// another open session in the same repo. A PR is "stacked" when its base
+/// branch is the head branch of another open PR — i.e. it can't merge
+/// until the parent does.
+///
+/// Returns a map `session_key → parent_session_key`. Missing from the map
+/// means the session is NOT stacked (its base is a real trunk branch).
+pub(crate) fn compute_stacked_sessions(
+    state: &crate::state::State,
+) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    // (repo, head_branch) → session_key of the PR that publishes that head.
+    let mut head_index: HashMap<(String, String), String> = HashMap::new();
+    for (key, session) in state.sessions.iter() {
+        let repo = session.primary_task.repo.clone();
+        let head = session.primary_task.branch.clone();
+        if let (Some(repo), Some(head)) = (repo, head) {
+            head_index.insert((repo, head), key.clone());
+        }
+    }
+    let mut stacked: HashMap<String, String> = HashMap::new();
+    for (key, session) in state.sessions.iter() {
+        let repo = session.primary_task.repo.clone();
+        let base = session.primary_task.base_branch.clone();
+        if let (Some(repo), Some(base)) = (repo, base)
+            && let Some(parent) = head_index.get(&(repo, base))
+            && parent != key
+        {
+            stacked.insert(key.clone(), parent.clone());
+        }
+    }
+    stacked
+}
+
 /// Re-sort session_order by priority, preserving selected key.
 pub(crate) fn resort_sessions(app: &mut App) {
     let prev_key = app.selected_session_key();
@@ -303,6 +337,7 @@ mod tests {
             url: "https://github.com/o/r/pull/1".into(),
             repo: Some("o/r".into()),
             branch: Some("f".into()),
+            base_branch: None,
             updated_at: Utc::now(),
             labels: vec![],
             reviewers: vec![],

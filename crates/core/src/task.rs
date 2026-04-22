@@ -120,6 +120,10 @@ pub struct Task {
     pub url: String,
     pub repo: Option<String>,
     pub branch: Option<String>,
+    /// Target branch of the PR — usually the repo default (main / master),
+    /// but for stacked PRs it's the head branch of another open PR.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub labels: Vec<String>,
     /// Requested reviewers (user logins or team names).
@@ -283,7 +287,7 @@ mod status_tag_tests {
             ci: CiStatus::None, review: ReviewStatus::None,
             checks: vec![], unread_count: 0,
             url: "u".into(), repo: Some("o/r".into()),
-            branch: Some("b".into()), updated_at: Utc::now(),
+            branch: Some("b".into()), base_branch: None, updated_at: Utc::now(),
             labels: vec![], reviewers: vec![], assignees: vec![],
             auto_merge_enabled: false, is_in_merge_queue: false,
             has_conflicts: false, needs_reply: false,

@@ -121,6 +121,25 @@ impl PaneManager {
         new_id
     }
 
+    /// Split the focused pane vertically, putting the new content ON TOP
+    /// and the existing content on the bottom. Used to hoist the embedded
+    /// terminal above the detail pane — Claude Code is the primary surface,
+    /// PR comments are reference material.
+    pub fn split_vertical_above(&mut self, new_content: PaneContent) -> PaneId {
+        let new_id = self.alloc_id();
+        let target = self.focused;
+        replace_node(&mut self.root, target, |old| PaneNode::VSplit {
+            top: Box::new(PaneNode::Leaf {
+                id: new_id,
+                content: new_content,
+            }),
+            bottom: Box::new(old),
+            ratio: 60,
+        });
+        self.focused = new_id;
+        new_id
+    }
+
     /// Split the focused pane horizontally (left/right). Existing stays left.
     pub fn split_horizontal(&mut self, new_content: PaneContent) -> PaneId {
         let new_id = self.alloc_id();
@@ -213,12 +232,13 @@ impl PaneManager {
             return;
         }
 
-        // No Terminal leaf exists at all → split the detail pane.
+        // No Terminal leaf exists at all → split the detail pane, with the
+        // new Terminal leaf ON TOP (Claude is the primary surface).
         if let Some(detail_id) =
             find_pane_node(&self.root, &|c| matches!(c, PaneContent::Detail(_)))
         {
             self.focused = detail_id;
-            self.split_vertical(PaneContent::Terminal(key.to_string()));
+            self.split_vertical_above(PaneContent::Terminal(key.to_string()));
         }
     }
 

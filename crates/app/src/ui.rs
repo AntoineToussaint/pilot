@@ -392,6 +392,15 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
         "\u{2807}", "\u{280f}",
     ];
 
+    // Pre-compute which sessions are stacked on another open session.
+    // A PR is stacked when its base branch matches another PR's head
+    // branch in the same repo — i.e. it can't merge until the parent does.
+    let stacked = crate::nav::compute_stacked_sessions(&app.state);
+    // Also compute which sessions ARE parents (something stacks on them)
+    // so we can mark the base of a stack too.
+    let is_parent: std::collections::HashSet<&String> =
+        stacked.values().collect();
+
     // ── Render each nav item ──
     for (nav_idx, item) in items.iter().enumerate() {
         let is_cursor = nav_idx == app.state.selected;
@@ -504,10 +513,27 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                 // ── Left side: cursor(2) + pr#(5) + role(2) + tmux(2) = 11 ──
                 const LEFT_W: usize = 11;
 
+                // ── Stack indicator ──
+                // `↳` = stacked on another PR (can't merge until parent does).
+                // `⇡` = another PR is stacked on top of this one (the base).
+                // Space otherwise. Prefixed to the title so it nests visually.
+                let stack_prefix: &str = if stacked.contains_key(key) {
+                    "↳ "
+                } else if is_parent.contains(key) {
+                    "⇡ "
+                } else {
+                    ""
+                };
+
                 // ── Title fills the gap ──
                 let title_w = w.saturating_sub(LEFT_W + RIGHT_W);
-                let title_text = truncate_str(&task.title, title_w);
-                let padded_title = format!("{:<width$}", title_text, width = title_w);
+                let prefix_w = stack_prefix.chars().count();
+                let title_budget = title_w.saturating_sub(prefix_w);
+                let title_text = truncate_str(&task.title, title_budget);
+                let padded_title = format!(
+                    "{stack_prefix}{title_text:<width$}",
+                    width = title_budget
+                );
 
                 // Build right-side spans with fixed widths.
                 let unread_span = Span::styled(

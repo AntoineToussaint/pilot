@@ -327,6 +327,7 @@ mod tests {
             url: "https://github.com/test/repo/pull/1".into(),
             repo: Some("test/repo".into()),
             branch: Some("feature".into()),
+            base_branch: None,
             updated_at: Utc::now(),
             labels: vec![],
             reviewers: vec![],

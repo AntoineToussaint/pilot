@@ -434,7 +434,7 @@ impl App {
                             |c| matches!(c, PaneContent::Detail(_))
                         ) {
                             self.state.panes.focused = detail_id;
-                            self.state.panes.split_vertical(
+                            self.state.panes.split_vertical_above(
                                 PaneContent::Terminal(key_str.to_string()),
                             );
                         }
@@ -1603,7 +1603,7 @@ pub(crate) fn spawn_terminal(
                 {
                     app.state.panes.focused = detail_id;
                     app.state.panes
-                        .split_vertical(PaneContent::Terminal(session_key.to_string()));
+                        .split_vertical_above(PaneContent::Terminal(session_key.to_string()));
                 }
             } else if let Some(term_id) = app.state
                 .panes
@@ -1882,7 +1882,7 @@ pub(crate) fn ensure_terminal_pane_for(app: &mut App, session_key: &str) {
             {
                 app.state.panes.focused = detail_id;
                 app.state.panes
-                    .split_vertical(PaneContent::Terminal(session_key.to_string()));
+                    .split_vertical_above(PaneContent::Terminal(session_key.to_string()));
             }
         }
     }

@@ -23,6 +23,7 @@ query($query: String!, $first: Int!, $after: String) {
         additions
         deletions
         headRefName
+        baseRefName
         mergeable
         reviewDecision
         autoMergeRequest { enabledAt }
@@ -202,6 +203,8 @@ pub struct GqlPr {
     pub deletions: u32,
     #[serde(rename = "headRefName")]
     pub head_ref_name: String,
+    #[serde(rename = "baseRefName", default)]
+    pub base_ref_name: String,
     /// MERGEABLE, CONFLICTING, or UNKNOWN.
     #[serde(default)]
     pub mergeable: Option<String>,
@@ -560,6 +563,11 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         url: pr.url.clone(),
         repo: Some(repo),
         branch: Some(pr.head_ref_name.clone()),
+        base_branch: if pr.base_ref_name.is_empty() {
+            None
+        } else {
+            Some(pr.base_ref_name.clone())
+        },
         updated_at: pr.updated_at,
         labels: pr.labels.nodes.iter().map(|l| l.name.clone()).collect(),
         reviewers: pr.review_requests.nodes.iter()

@@ -141,6 +141,7 @@ mod tests {
             checks: vec![], unread_count: 0,
             url: format!("https://github.com/o/r/pull/{title}"),
             repo: Some("o/r".into()), branch: Some("f".into()),
+            base_branch: None,
             updated_at: updated,
             labels: vec![], reviewers: vec![], assignees: vec![],
             auto_merge_enabled: false, is_in_merge_queue: false, has_conflicts: false,
