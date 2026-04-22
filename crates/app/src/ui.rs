@@ -695,13 +695,15 @@ fn render_right_pane(
 
     match (term_key, detail_key) {
         (Some(term), Some(detail)) if has_comments => {
+            // Terminal on TOP (Claude Code is the primary surface),
+            // comments on the BOTTOM as reference material.
             let chunks = Layout::vertical([
-                Constraint::Percentage(30),
-                Constraint::Percentage(70),
+                Constraint::Percentage(70), // terminal (top)
+                Constraint::Percentage(30), // comments (bottom)
             ])
             .split(area);
-            render_detail(app, frame, chunks[0], &detail, now);
-            render_terminal(app, frame, chunks[1], &term);
+            render_terminal(app, frame, chunks[0], &term);
+            render_detail(app, frame, chunks[1], &detail, now);
         }
         (Some(term), _) => {
             render_terminal(app, frame, area, &term);

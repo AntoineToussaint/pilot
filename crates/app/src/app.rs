@@ -892,14 +892,15 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         let prev = app.state.agent_states.get(key).copied()
                             .unwrap_or(AgentState::Active);
                         // Prefer Claude's lifecycle hooks (deterministic)
-                        // over the output-timing heuristic. Fall back to
-                        // the heuristic only if the hook file is missing
-                        // or went stale (>120s without an update while
-                        // output is still flowing) — e.g. hooks failed to
-                        // install, or the user is on an old Claude build.
+                        // over the output-timing heuristic. We trust the
+                        // state file unconditionally whenever it exists:
+                        // clear_state() wipes the file on session close
+                        // and spawn, so any present file reflects the
+                        // CURRENT session. An "idle" hook written hours
+                        // ago is still correct — Claude is still idle.
                         let hook = crate::claude_hooks::read_state(key);
                         let new_state = match hook {
-                            Some((hs, age)) if age < 120 => match hs {
+                            Some((hs, _age)) => match hs {
                                 crate::claude_hooks::HookState::Working => AgentState::Active,
                                 crate::claude_hooks::HookState::Asking => AgentState::Asking,
                                 crate::claude_hooks::HookState::Idle => {
@@ -917,7 +918,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 }
                                 crate::claude_hooks::HookState::Stopped => AgentState::Idle,
                             },
-                            _ => detect_state(
+                            None => detect_state(
                                 term.last_output_at(),
                                 term.recent_output(),
                                 prev,
@@ -1705,20 +1706,26 @@ fn forward_scroll(app: &mut App, column: u16, row: u16, up: bool) {
         return;
     };
 
-    if term.is_mouse_tracking() {
+    // On alt-screen (tmux, Claude Code, vim, less) always forward as
+    // SGR mouse wheel events. Apps that don't understand them ignore
+    // them silently — we checked `is_mouse_tracking()` before, but
+    // that gate is too strict: Claude Code doesn't always advertise
+    // tracking even though it'd accept the events. Worst case: no
+    // visible scroll, same as swallowing the event ourselves. Best
+    // case: the app scrolls natively.
+    //
+    // On the primary screen (plain shell) fall back to libghostty's
+    // scrollback buffer — there's no live app to forward to.
+    if term.in_alternate_screen() {
         // SGR mouse wheel: button 64 = up, 65 = down. Coords are
-        // 1-based in the SGR protocol, so add 1. We emit three wheel
-        // notches so one trackpad flick = ~3 lines, same as the old
-        // scrollback behavior.
+        // 1-based in the SGR protocol. Emit three notches so one
+        // trackpad flick ≈ 3 lines.
         let button = if up { 64 } else { 65 };
         let x = column.saturating_add(1);
         let y = row.saturating_add(1);
         let seq = format!("\x1b[<{button};{x};{y}M");
         let chunk = seq.repeat(3);
         let _ = term.write(chunk.as_bytes());
-    } else if term.in_alternate_screen() {
-        // Alt-screen app (tmux/vim/less) WITHOUT mouse mode — there's
-        // no safe way to forward a scroll. Swallow the event.
     } else if up {
         term.scroll_up(3);
     } else {
