@@ -700,7 +700,20 @@ pub async fn run(app: &mut App) -> Result<()> {
         let mut stream = EventStream::new();
         while let Some(Ok(evt)) = stream.next().await {
             let action = match evt {
-                CtEvent::Key(key) => Action::Key(key),
+                CtEvent::Key(key) => {
+                    // Only react to Press events. Modern terminals (iTerm2
+                    // with modifyOtherKeys, Kitty protocol, etc.) also emit
+                    // Release and Repeat events; without this filter, a
+                    // single Tab press fires twice and focus skips past
+                    // Detail going Inbox → Terminal directly.
+                    if !matches!(
+                        key.kind,
+                        crossterm::event::KeyEventKind::Press
+                    ) {
+                        continue;
+                    }
+                    Action::Key(key)
+                }
                 CtEvent::Mouse(mouse) => Action::Mouse(mouse),
                 CtEvent::Paste(text) => Action::Paste(text),
                 CtEvent::Resize(w, h) => Action::Resize { width: w, height: h },
