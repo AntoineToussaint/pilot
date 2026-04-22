@@ -695,17 +695,33 @@ fn render_right_pane(
 
     match (term_key, detail_key) {
         (Some(term), Some(detail)) if has_comments => {
-            // Terminal on TOP (Claude Code is the primary surface),
-            // comments on the BOTTOM as reference material.
+            // Three-way stack: header (PR metadata) at the top, Claude
+            // Code in the middle, comments at the bottom. The header is
+            // always visible so CI/branch/role stay on-screen; Claude
+            // gets the biggest slice; comments tuck under as reference.
+            let header_h = detail_header_height(&app.state, &detail);
             let chunks = Layout::vertical([
-                Constraint::Percentage(70), // terminal (top)
-                Constraint::Percentage(30), // comments (bottom)
+                Constraint::Length(header_h),
+                Constraint::Min(8),
+                Constraint::Percentage(30),
             ])
             .split(area);
-            render_terminal(app, frame, chunks[0], &term);
-            render_detail(app, frame, chunks[1], &detail, now);
+            render_detail_header(app, frame, chunks[0], &detail, now);
+            render_terminal(app, frame, chunks[1], &term);
+            render_comments(app, frame, chunks[2], &detail, now);
         }
-        (Some(term), _) => {
+        (Some(term), Some(detail)) => {
+            // No comments — header on top, terminal below.
+            let header_h = detail_header_height(&app.state, &detail);
+            let chunks = Layout::vertical([
+                Constraint::Length(header_h),
+                Constraint::Min(8),
+            ])
+            .split(area);
+            render_detail_header(app, frame, chunks[0], &detail, now);
+            render_terminal(app, frame, chunks[1], &term);
+        }
+        (Some(term), None) => {
             render_terminal(app, frame, area, &term);
         }
         (None, Some(detail)) => {
@@ -715,6 +731,348 @@ fn render_right_pane(
             render_welcome(app, frame, area);
         }
     }
+}
+
+/// Computed height in rows for the PR-header pane. Depends on whether
+/// this session has labels or an active monitor — they each add a row.
+fn detail_header_height(state: &crate::state::State, key: &str) -> u16 {
+    let Some(session) = state.sessions.get(key) else {
+        return 5;
+    };
+    let task = &session.primary_task;
+    // Block's padding adds 1 top line; then title + separator + status
+    // + reviewers = 4. Labels and monitor are optional.
+    let mut h: u16 = 1 + 4;
+    if !task.labels.is_empty() {
+        h += 1;
+    }
+    if session.monitor.is_some() {
+        h += 1;
+    }
+    h
+}
+
+// ─── Detail header pane (PR metadata only — no comments) ──────────────────
+
+fn render_detail_header(
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+    key: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(session) = app.state.sessions.get(key) else {
+        return;
+    };
+    let task = &session.primary_task;
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(C_BORDER))
+        .style(Style::default().bg(C_BG))
+        .padding(Padding::new(1, 1, 0, 0));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = build_header_lines(app, task, session, inner.width, now);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(C_BG)),
+        inner,
+    );
+}
+
+// ─── Comments-only pane ──────────────────────────────────────────────────
+
+fn render_comments(
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+    key: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(session) = app.state.sessions.get(key) else {
+        return;
+    };
+    let task = &session.primary_task;
+    let is_focused = app.state.input_mode == InputMode::Detail;
+    let border_color = if is_focused { C_BORDER_ACTIVE } else { C_BORDER };
+    let block = Block::default()
+        .borders(Borders::LEFT | Borders::TOP)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(C_BG))
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(Span::styled(
+            " Comments ",
+            Style::default().fg(C_TEXT_DIM),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = build_comment_lines(app, task, session, inner.width, now, is_focused);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((app.state.detail_scroll, 0))
+            .style(Style::default().bg(C_BG)),
+        inner,
+    );
+}
+
+// Build the lines that make up the PR-metadata header: title+state,
+// CI/review/role/branch, reviewers/assignees, labels, monitor.
+fn build_header_lines<'a>(
+    _app: &'a App,
+    task: &'a pilot_core::Task,
+    session: &'a pilot_core::Session,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'a>> {
+    let staleness = time::staleness(&task.updated_at, &task.updated_at, now);
+    let stale_span = match staleness {
+        Staleness::Stale { idle_days } => Span::styled(
+            format!("  idle {idle_days}d"),
+            Style::default().fg(C_YELLOW),
+        ),
+        Staleness::Abandoned { idle_days, .. } => Span::styled(
+            format!("  idle {idle_days}d"),
+            Style::default().fg(C_RED),
+        ),
+        Staleness::Fresh => Span::raw(""),
+    };
+    let ago = time::time_ago(&task.updated_at);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            state_pill(&task.state),
+            Span::raw("  "),
+            Span::styled(&task.title, Style::default().fg(C_TEXT_BRIGHT).bold()),
+            stale_span,
+            Span::styled(format!("  {ago}"), Style::default().fg(C_TEXT_DIM)),
+        ]),
+        thin_separator(width as usize),
+        {
+            let mut spans = vec![
+                Span::styled("CI: ", Style::default().fg(C_TEXT_DIM)),
+                ci_span(&task.ci),
+                Span::styled("   Review: ", Style::default().fg(C_TEXT_DIM)),
+                review_span(&task.review),
+                Span::styled("   Role: ", Style::default().fg(C_TEXT_DIM)),
+                role_span(&task.role),
+            ];
+            if task.has_conflicts {
+                spans.push(Span::styled("   CONFLICT", Style::default().fg(C_RED).bold()));
+            }
+            if let Some(ref branch) = task.branch {
+                spans.push(Span::styled(
+                    format!("   Branch: {branch}"),
+                    Style::default().fg(C_TEXT_DIM),
+                ));
+            }
+            Line::from(spans)
+        },
+    ];
+
+    let reviewers_str = if task.reviewers.is_empty() {
+        "none".to_string()
+    } else {
+        task.reviewers.join(", ")
+    };
+    let assignees_str = if task.assignees.is_empty() {
+        "none".to_string()
+    } else {
+        task.assignees.join(", ")
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Reviewers: ", Style::default().fg(C_TEXT_DIM)),
+        Span::styled(reviewers_str, Style::default().fg(C_CYAN)),
+        Span::raw("    "),
+        Span::styled("Assignees: ", Style::default().fg(C_TEXT_DIM)),
+        Span::styled(assignees_str, Style::default().fg(C_MAGENTA)),
+        if task.additions > 0 || task.deletions > 0 {
+            Span::styled(
+                format!("    +{} -{}", task.additions, task.deletions),
+                Style::default().fg(C_TEXT_DIM),
+            )
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    if !task.labels.is_empty() {
+        let mut label_spans: Vec<Span> = Vec::new();
+        for label in &task.labels {
+            let lc = label_pill_color(label);
+            label_spans.push(Span::styled(
+                format!(" {label} "),
+                Style::default().fg(Color::Rgb(15, 17, 23)).bg(lc).bold(),
+            ));
+            label_spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(label_spans));
+    }
+    if let Some(label) = session.monitor_label() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " MONITOR ",
+                Style::default().fg(Color::Rgb(15, 17, 23)).bg(C_CYAN).bold(),
+            ),
+            Span::styled(format!(" {label}"), Style::default().fg(C_CYAN)),
+        ]));
+    }
+    lines
+}
+
+// Build the lines that make up the activity/comments pane.
+fn build_comment_lines<'a>(
+    app: &'a App,
+    task: &'a pilot_core::Task,
+    session: &'a pilot_core::Session,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+    is_focused: bool,
+) -> Vec<Line<'a>> {
+    let comment_width = width as usize;
+    let mut comment_lines: Vec<Line> = Vec::new();
+
+    if session.activity.is_empty() {
+        comment_lines.push(Line::from(Span::styled(
+            "  No activity yet",
+            Style::default().fg(C_TEXT_DIM).italic(),
+        )));
+    } else {
+        let any_selected = !app.state.selected_comments.is_empty();
+        for (i, a) in session.activity.iter().enumerate() {
+            let is_cursor = is_focused && i == app.state.detail_cursor;
+            let is_checked = app.state.selected_comments.contains(&i);
+            let is_unread = session.is_activity_unread(i);
+            let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
+            let ago_str = time_ago_short(&a.created_at, now);
+            let prefix = if any_selected || is_checked {
+                if is_checked { "[x] " } else { "[ ] " }
+            } else if is_unread {
+                " *  "
+            } else {
+                "    "
+            };
+            let prefix_color = if is_checked {
+                C_GREEN
+            } else if is_unread {
+                C_RED
+            } else {
+                C_TEXT_DIM
+            };
+            let clean_body = strip_html(&a.body);
+            let body_summary: String = clean_body
+                .chars()
+                .take(comment_width.saturating_sub(25))
+                .collect();
+            let author_color = if is_unread { C_TEXT_BRIGHT } else { C_TEXT_DIM };
+            let body_color = if is_unread { C_TEXT } else { C_TEXT_DIM };
+            let mut summary_spans = vec![
+                Span::styled(prefix, Style::default().fg(prefix_color).bg(bg)),
+                Span::styled(&a.author, Style::default().fg(author_color).bold().bg(bg)),
+                Span::styled(format!(" {ago_str} "), Style::default().fg(C_TEXT_DIM).bg(bg)),
+            ];
+            if let Some(path) = &a.path {
+                let loc = match a.line {
+                    Some(n) => format!("{path}:{n} "),
+                    None => format!("{path} "),
+                };
+                summary_spans.push(Span::styled(loc, Style::default().fg(C_ACCENT).bg(bg)));
+            }
+            summary_spans.push(Span::styled(body_summary, Style::default().fg(body_color).bg(bg)));
+            comment_lines.push(Line::from(summary_spans));
+
+            if is_cursor && !a.body.is_empty() {
+                if let Some(hunk) = &a.diff_hunk
+                    && !hunk.is_empty()
+                {
+                    let hunk_width = comment_width.saturating_sub(6);
+                    for raw in hunk.lines().take(10) {
+                        let color = match raw.chars().next() {
+                            Some('+') => C_GREEN,
+                            Some('-') => C_RED,
+                            Some('@') => C_ACCENT,
+                            _ => C_TEXT_DIM,
+                        };
+                        let shown: String = raw.chars().take(hunk_width).collect();
+                        comment_lines.push(Line::from(vec![
+                            Span::styled("    \u{2502} ", Style::default().fg(C_ACCENT).bg(bg)),
+                            Span::styled(shown, Style::default().fg(color).bg(bg)),
+                        ]));
+                    }
+                    comment_lines.push(Line::from(vec![
+                        Span::styled("    \u{2502}", Style::default().fg(C_ACCENT).bg(bg)),
+                    ]));
+                }
+                let wrap_width = comment_width.saturating_sub(6);
+                let cleaned = strip_html(&a.body);
+                let md_lines = render_markdown(&cleaned);
+                let mut count = 0;
+                for md_line in md_lines.into_iter() {
+                    if count >= 15 {
+                        break;
+                    }
+                    let text: String = md_line.spans.iter().map(|s| s.content.as_ref()).collect();
+                    if text.is_empty() {
+                        comment_lines.push(Line::from(Span::styled(
+                            "    \u{2502}",
+                            Style::default().fg(C_ACCENT).bg(bg),
+                        )));
+                        count += 1;
+                        continue;
+                    }
+                    let style = md_line
+                        .spans
+                        .first()
+                        .map(|s| s.style)
+                        .unwrap_or(Style::default().fg(C_TEXT));
+                    let mut remaining = text.as_str();
+                    while !remaining.is_empty() && count < 15 {
+                        let chunk = if remaining.len() <= wrap_width {
+                            remaining
+                        } else {
+                            remaining[..wrap_width]
+                                .rfind(' ')
+                                .map(|p| &remaining[..p])
+                                .unwrap_or(&remaining[..wrap_width])
+                        };
+                        comment_lines.push(Line::from(vec![
+                            Span::styled("    \u{2502} ", Style::default().fg(C_ACCENT).bg(bg)),
+                            Span::styled(chunk.to_string(), style.bg(bg)),
+                        ]));
+                        remaining = remaining[chunk.len()..].trim_start();
+                        count += 1;
+                    }
+                }
+                comment_lines.push(Line::raw(""));
+            }
+        }
+    }
+
+    let failed: Vec<_> = task
+        .checks
+        .iter()
+        .filter(|c| matches!(c.status, CiStatus::Failure))
+        .collect();
+    if !failed.is_empty() {
+        let total = task.checks.len();
+        let passed = total - failed.len();
+        comment_lines.insert(0, Line::raw(""));
+        for check in failed.iter().rev().take(5) {
+            comment_lines.insert(
+                0,
+                Line::from(vec![
+                    Span::styled("    \u{2717} ", Style::default().fg(C_RED)),
+                    Span::styled(check.name.clone(), Style::default().fg(C_RED)),
+                ]),
+            );
+        }
+        let summary = format!("  {} failed, {} passed", failed.len(), passed);
+        comment_lines.insert(
+            0,
+            Line::from(Span::styled(summary, Style::default().fg(C_RED).bold())),
+        );
+    }
+    comment_lines
 }
 
 // ─── Detail pane (PR header + selectable comment thread) ──────────────────
