@@ -701,15 +701,15 @@ pub async fn run(app: &mut App) -> Result<()> {
         while let Some(Ok(evt)) = stream.next().await {
             let action = match evt {
                 CtEvent::Key(key) => {
-                    // Only react to Press events. Modern terminals (iTerm2
-                    // with modifyOtherKeys, Kitty protocol, etc.) also emit
-                    // Release and Repeat events; without this filter, a
-                    // single Tab press fires twice and focus skips past
-                    // Detail going Inbox → Terminal directly.
-                    if !matches!(
-                        key.kind,
-                        crossterm::event::KeyEventKind::Press
-                    ) {
+                    // Drop Release events only. Modern terminals (iTerm2
+                    // with modifyOtherKeys, Kitty keyboard protocol) emit
+                    // Press + Release for every keystroke — without this
+                    // guard, one Tab fires twice and focus skips past
+                    // Detail. Repeat is kept so held arrow keys still
+                    // scroll lists naturally, and we DO NOT filter more
+                    // aggressively than this: terminals that emit only
+                    // one of {Press, Repeat} per keystroke still work.
+                    if matches!(key.kind, crossterm::event::KeyEventKind::Release) {
                         continue;
                     }
                     Action::Key(key)
@@ -905,6 +905,21 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     .map(|s| s.display_name.clone())
                                     .unwrap_or_else(|| key.clone());
                                 app.state.status = format!("Claude needs input: {title}");
+                                // Poke the OUTER terminal (iTerm2 etc.) so
+                                // the tab flashes / dock bounces when pilot
+                                // is in a background window. BEL triggers
+                                // the tab-alert; OSC 9 is iTerm2's Growl
+                                // notification. Runs on a blocking thread
+                                // so it won't race with ratatui's render.
+                                let osc9 = format!(
+                                    "\x07\x1b]9;pilot: Claude needs input — {title}\x07"
+                                );
+                                tokio::task::spawn_blocking(move || {
+                                    use std::io::Write;
+                                    let mut out = std::io::stdout().lock();
+                                    let _ = out.write_all(osc9.as_bytes());
+                                    let _ = out.flush();
+                                });
                                 let title_clone = title.clone();
                                 tokio::spawn(async move {
                                     crate::notify::send_notification(

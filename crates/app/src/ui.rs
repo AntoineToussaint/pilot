@@ -565,11 +565,43 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                         TaskRole::Mentioned => Span::styled("  ", Style::default().bg(bg)),
                     },
                     // Session indicator (2 chars — glyph + trailing space).
-                    // Uses single-cell glyphs so column alignment is
-                    // predictable across terminals (emoji are often 2 cells).
+                    // Encodes three orthogonal states in one cell:
+                    //   - no terminal at all (blank)
+                    //   - tmux alive, detached (●  yellow — "c to attach")
+                    //   - terminal attached + Claude Active (braille spinner, cyan)
+                    //   - terminal attached + Claude Idle   (●  green)
+                    //   - terminal attached + Claude Asking (blinking ? red/yellow)
+                    // Single-cell glyphs keep column alignment predictable.
                     {
+                        use crate::agent_state::AgentState;
+                        let claude_state = app.state.agent_states.get(key).copied();
+                        let tick = app.state.tick_count;
+
                         let (ch, color) = if has_live_terminal {
-                            ("●", C_GREEN)
+                            match claude_state {
+                                Some(AgentState::Asking) => {
+                                    // Blink between bright red and yellow
+                                    // every ~400ms so it catches the eye.
+                                    let col = if tick.is_multiple_of(8) || (tick % 8) >= 4 {
+                                        C_RED
+                                    } else {
+                                        C_YELLOW
+                                    };
+                                    ("?", col)
+                                }
+                                Some(AgentState::Active) => {
+                                    // Braille spinner — tight 10-frame cycle
+                                    // at 100ms per tick = 1s full rotation.
+                                    const FRAMES: [&str; 10] = [
+                                        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
+                                        "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+                                        "\u{2807}", "\u{280f}",
+                                    ];
+                                    let f = FRAMES[(tick as usize) % FRAMES.len()];
+                                    (f, C_CYAN)
+                                }
+                                _ => ("●", C_GREEN),
+                            }
                         } else if tmux_alive_detached {
                             ("●", C_YELLOW)
                         } else {
@@ -1044,12 +1076,56 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
         Span::raw("")
     };
 
+    // Claude state in the title bar — matches the sidebar spinner/dot/?
+    // so the user sees the same signal whether looking at the list or the
+    // terminal itself.
+    let claude_indicator = {
+        use crate::agent_state::AgentState;
+        let state = app.state.agent_states.get(key).copied();
+        let is_claude = matches!(
+            app.terminals.kind(key),
+            Some(crate::action::ShellKind::Claude)
+        );
+        let tick = app.state.tick_count;
+        if !is_claude {
+            Span::raw("")
+        } else {
+            match state {
+                Some(AgentState::Asking) => {
+                    let col = if tick.is_multiple_of(8) || (tick % 8) >= 4 {
+                        C_RED
+                    } else {
+                        C_YELLOW
+                    };
+                    Span::styled(" ? INPUT NEEDED ", Style::default().fg(col).bold())
+                }
+                Some(AgentState::Active) => {
+                    const FRAMES: [&str; 10] = [
+                        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
+                        "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+                        "\u{2807}", "\u{280f}",
+                    ];
+                    let f = FRAMES[(tick as usize) % FRAMES.len()];
+                    Span::styled(
+                        format!(" {f} working "),
+                        Style::default().fg(C_CYAN).bold(),
+                    )
+                }
+                Some(AgentState::Idle) => {
+                    Span::styled(" ● idle ", Style::default().fg(C_GREEN).bold())
+                }
+                None => Span::raw(""),
+            }
+        }
+    };
+
     let block = Block::bordered()
         .title(Line::from(vec![
             Span::styled(
                 format!(" {shell_label} "),
                 Style::default().fg(C_GREEN).bold(),
             ),
+            claude_indicator,
             scroll_indicator,
             Span::styled(hint, Style::default().fg(C_TEXT_DIM)),
             Span::raw(" "),
