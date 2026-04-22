@@ -232,13 +232,12 @@ impl PaneManager {
             return;
         }
 
-        // No Terminal leaf exists at all → split the detail pane, with the
-        // new Terminal leaf ON TOP (Claude is the primary surface).
+        // No Terminal leaf exists at all → split the detail pane.
         if let Some(detail_id) =
             find_pane_node(&self.root, &|c| matches!(c, PaneContent::Detail(_)))
         {
             self.focused = detail_id;
-            self.split_vertical_above(PaneContent::Terminal(key.to_string()));
+            self.split_vertical(PaneContent::Terminal(key.to_string()));
         }
     }
 
@@ -657,36 +656,6 @@ mod tests {
         assert!(matches!(p.focused_content(), Some(PaneContent::Terminal(_))));
     }
 
-    #[test]
-    fn split_vertical_above_places_new_on_top() {
-        // Regression: when spawning Claude, the terminal must land ABOVE
-        // the detail pane — Claude is the primary surface.
-        let mut p = PaneManager::default_layout();
-        let detail_id = p
-            .find_pane(|c| matches!(c, PaneContent::Detail(_)))
-            .unwrap();
-        p.focus(detail_id);
-        p.split_vertical_above(PaneContent::Terminal("t1".into()));
-
-        // Resolve with a known area and assert the Terminal's rect sits
-        // above the Detail's rect.
-        let area = Rect::new(0, 0, 100, 100);
-        let resolved = p.resolve(area);
-        let term = resolved
-            .iter()
-            .find(|r| matches!(r.content, PaneContent::Terminal(_)))
-            .expect("terminal in tree");
-        let detail = resolved
-            .iter()
-            .find(|r| matches!(r.content, PaneContent::Detail(_)))
-            .expect("detail in tree");
-        assert!(
-            term.area.y < detail.area.y,
-            "terminal y={} should be above detail y={}",
-            term.area.y,
-            detail.area.y,
-        );
-    }
 
     #[test]
     fn focus_next_cycles_through_leaves() {

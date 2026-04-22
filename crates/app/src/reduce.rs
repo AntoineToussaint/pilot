@@ -163,9 +163,11 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         // ── Panes (pure — no terminal lifecycle) ──
         Action::FocusPaneNext => {
             state.panes.focus_next();
+            skip_empty_detail(state);
         }
         Action::FocusPanePrev => {
             state.panes.focus_prev();
+            skip_empty_detail(state);
         }
         Action::FocusPaneUp | Action::FocusPaneDown
         | Action::FocusPaneLeft | Action::FocusPaneRight => {
@@ -1421,6 +1423,30 @@ fn selected_key(state: &State) -> Option<String> {
     match items.get(state.selected) {
         Some(crate::nav::NavItem::Session(k)) => Some(k.clone()),
         _ => None,
+    }
+}
+
+/// After a focus move, if we landed on a Detail pane whose session has no
+/// comments (and a Terminal pane exists), step past it. The renderer hides
+/// the empty Detail pane, so leaving focus there dead-ends Tab cycling.
+fn skip_empty_detail(state: &mut State) {
+    let Some(PaneContent::Detail(key)) = state.panes.focused_content() else {
+        return;
+    };
+    let has_comments = state
+        .sessions
+        .get(&key)
+        .map(|s| !s.activity.is_empty())
+        .unwrap_or(false);
+    if has_comments {
+        return;
+    }
+    let has_term = state
+        .panes
+        .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+        .is_some();
+    if has_term {
+        state.panes.focus_next();
     }
 }
 

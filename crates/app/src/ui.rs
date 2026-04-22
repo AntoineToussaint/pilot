@@ -680,17 +680,47 @@ fn render_right_pane(
     };
 
     let has_terminal = app.terminals.contains_key(&key);
+    // Hide the Detail pane entirely when the PR has no comments to show —
+    // the header alone isn't worth the screen real estate, and the user
+    // wants Claude Code to dominate the right side when there's nothing
+    // to discuss.
+    let has_comments = app
+        .state
+        .sessions
+        .get(&key)
+        .map(|s| !s.activity.is_empty())
+        .unwrap_or(false);
 
-    if has_terminal {
-        let chunks = Layout::vertical([
-            Constraint::Percentage(30), // detail header + comments
-            Constraint::Percentage(70), // terminal
-        ])
-        .split(area);
-        render_detail(app, frame, chunks[0], &key, now);
-        render_terminal(app, frame, chunks[1], &key);
-    } else {
-        render_detail(app, frame, area, &key, now);
+    match (has_terminal, has_comments) {
+        (true, true) => {
+            let chunks = Layout::vertical([
+                Constraint::Percentage(30), // detail header + comments
+                Constraint::Percentage(70), // terminal
+            ])
+            .split(area);
+            render_detail(app, frame, chunks[0], &key, now);
+            render_terminal(app, frame, chunks[1], &key);
+        }
+        (true, false) => {
+            // No comments → give the whole right side to the terminal.
+            // If focus happens to be on the (now-invisible) Detail leaf,
+            // redirect it to the Terminal so Tab doesn't dead-end there.
+            if matches!(
+                app.state.panes.focused_content(),
+                Some(crate::pane::PaneContent::Detail(_))
+            ) && let Some(term_id) = app
+                .state
+                .panes
+                .find_pane(|c| matches!(c, crate::pane::PaneContent::Terminal(_)))
+            {
+                app.state.panes.focus(term_id);
+                crate::app::apply_determined_mode(app);
+            }
+            render_terminal(app, frame, area, &key);
+        }
+        (false, _) => {
+            render_detail(app, frame, area, &key, now);
+        }
     }
 }
 
