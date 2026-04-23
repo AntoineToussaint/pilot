@@ -154,19 +154,21 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Fetch the base branch so we have a commit to branch from.
-        run_git_in(
-            &bare_path,
-            &["fetch", "origin", &format!("{base_branch}:{base_branch}")],
-        )
-        .await?;
+        // Fetch the base branch's tip into FETCH_HEAD, WITHOUT updating the
+        // local ref. Using `base:base` as the refspec fails with "refusing
+        // to fetch into branch X checked out at <path>" when another
+        // worktree (another pilot session) has that same base checked out.
+        // FETCH_HEAD sidesteps the constraint — we just need the commit,
+        // not a local branch.
+        run_git_in(&bare_path, &["fetch", "origin", base_branch]).await?;
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        // `git worktree add -b <new> <path> <base>` creates the branch and
-        // checks it out in the worktree in a single atomic step.
+        // `git worktree add -b <new> <path> FETCH_HEAD` creates the branch
+        // off the just-fetched tip without requiring `base` to exist as a
+        // local ref.
         run_git_in(
             &bare_path,
             &[
@@ -175,7 +177,7 @@ impl WorktreeManager {
                 "-b",
                 new_branch,
                 &wt_path.to_string_lossy(),
-                base_branch,
+                "FETCH_HEAD",
             ],
         )
         .await?;
