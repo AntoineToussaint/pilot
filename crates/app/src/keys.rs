@@ -152,6 +152,14 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
             let mut buf = [0u8; 4];
             Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
         }
+        // Shift-Enter → ESC + CR. That's what Claude Code (and most
+        // readline-style inputs) accept as "newline in the prompt without
+        // submitting". Requires the Kitty keyboard protocol to be enabled
+        // upstream so crossterm actually reports the Shift modifier on
+        // Enter; otherwise the terminal collapses it to plain Enter.
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(vec![0x1b, b'\r'])
+        }
         KeyCode::Enter => Some(vec![b'\r']),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Esc => Some(vec![0x1b]),

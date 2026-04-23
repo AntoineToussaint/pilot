@@ -877,6 +877,14 @@ pub async fn run(app: &mut App) -> Result<()> {
         std::io::stdout(),
         ct_event::EnableMouseCapture,
         ct_event::EnableBracketedPaste,
+        // Enable Kitty keyboard protocol if the terminal supports it. This
+        // is what lets crossterm tell Shift-Enter apart from plain Enter —
+        // without it, terminals collapse them and users lose "newline in
+        // Claude prompt" capability.
+        ct_event::PushKeyboardEnhancementFlags(
+            ct_event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | ct_event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+        ),
     )?;
 
     // ── Main loop ──
@@ -913,6 +921,7 @@ pub async fn run(app: &mut App) -> Result<()> {
         std::io::stdout(),
         ct_event::DisableMouseCapture,
         ct_event::DisableBracketedPaste,
+        ct_event::PopKeyboardEnhancementFlags,
     )?;
     ratatui::restore();
     Ok(())
@@ -1120,6 +1129,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 && !app.state.first_poll_keys.is_empty()
                 && !app.state.first_poll_had_errors
             {
+                // Remember the cursor target BEFORE mutation. If the first
+                // poll had errors, this purge code fires on a *later*
+                // successful poll (not at startup) — and teleporting the
+                // cursor back to row 0 while the user is doing something
+                // is infuriating. Restore by-key afterward.
+                let prior_nav = crate::nav::selected_nav_item_from_state(&app.state);
+
                 app.state.purged_stale = true;
                 let stale: Vec<String> = app.state.sessions.order().iter()
                     .filter(|k| k.starts_with("github:") && !app.state.first_poll_keys.contains(*k))
@@ -1133,7 +1149,22 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 if !stale.is_empty() {
                     resort_sessions(app);
                 }
-                app.state.selected = 0;
+                // Re-resolve the prior nav item; clamp if it's gone.
+                let items = crate::nav::nav_items_from_state(&app.state);
+                let new_idx = prior_nav.as_ref().and_then(|prior| match prior {
+                    crate::nav::NavItem::Session(k) => items.iter().position(|i| {
+                        matches!(i, crate::nav::NavItem::Session(x) if x == k)
+                    }),
+                    crate::nav::NavItem::Repo(r) => items.iter().position(|i| {
+                        matches!(i, crate::nav::NavItem::Repo(x) if x == r)
+                    }),
+                });
+                if let Some(idx) = new_idx {
+                    app.state.selected = idx;
+                } else {
+                    let n = items.len();
+                    app.state.selected = if n == 0 { 0 } else { app.state.selected.min(n - 1) };
+                }
                 update_detail_pane(app);
                 app.state.status = format!(
                     "Loaded — {} as {}",

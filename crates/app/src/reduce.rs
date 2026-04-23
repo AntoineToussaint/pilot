@@ -766,27 +766,32 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         Action::NewSession => {
             // If the cursor is on a local session whose worktree never
             // materialized (invalid branch name, checkout killed, etc.),
-            // pre-fill with a slugified version of its branch so the user
-            // can fix-and-retry with one keystroke instead of re-typing.
-            let prefill = selected_key(state)
-                .and_then(|k| state.sessions.get(&k).cloned())
-                .filter(|s| {
+            // pre-fill with a slugified version of its branch AND remember
+            // its key so Confirm replaces it rather than leaving a dead
+            // row next to the successful one.
+            let (prefill, replaces) = selected_key(state)
+                .and_then(|k| state.sessions.get(&k).cloned().map(|s| (k, s)))
+                .filter(|(_k, s)| {
                     s.primary_task.id.source == "local"
                         && s.worktree_path.is_none()
                 })
-                .and_then(|s| s.primary_task.branch.clone())
-                .map(|b| {
-                    b.chars()
+                .map(|(k, s)| {
+                    let branch = s.primary_task.branch.clone().unwrap_or_default();
+                    let slug = branch
+                        .chars()
                         .map(|c| if c.is_whitespace() { '-' } else { c })
-                        .collect::<String>()
+                        .collect::<String>();
+                    (slug, Some(k))
                 })
                 .unwrap_or_default();
             state.new_session_input = Some(prefill);
+            state.new_session_replaces = replaces;
             state.input_mode = InputMode::TextInput(TextInputKind::NewSession);
             state.status = "New worktree — type branch name, Enter to create + open Claude".into();
         }
         Action::NewSessionCancel => {
             state.new_session_input = None;
+            state.new_session_replaces = None;
             if matches!(state.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
                 state.input_mode = InputMode::Normal;
             }
@@ -794,6 +799,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         }
         Action::NewSessionConfirm { description } => {
             state.new_session_input = None;
+            let replaces = state.new_session_replaces.take();
             if matches!(state.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
                 state.input_mode = InputMode::Normal;
             }
@@ -893,6 +899,19 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             let mut session = pilot_core::Session::new_at(task, clock.chrono);
             session.state = pilot_core::SessionState::CheckingOut;
             state.sessions.insert(key.clone(), session);
+            // If this N invocation is "retry with a fixed branch name" on
+            // a stuck local session, delete the original so the user ends
+            // up with ONE row, not two.
+            if let Some(old_key) = replaces.filter(|k| k != &key) {
+                if let Some(old) = state.sessions.get(&old_key) {
+                    let task_id = old.primary_task.id.clone();
+                    cmds.push(Command::StoreDeleteSession { task_id });
+                }
+                state.sessions.remove(&old_key);
+                state.pending_prompts.remove(&old_key);
+                state.notified_asking.remove(&old_key);
+                state.agent_states.remove(&old_key);
+            }
             state.status = format!(
                 "Creating worktree {repo_full}#{branch_name} off {base_branch}…"
             );

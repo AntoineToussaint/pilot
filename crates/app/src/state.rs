@@ -92,6 +92,10 @@ pub struct State {
     pub(crate) merge_pending: Option<String>,
     /// Session key armed for an UpdateBranch — next Shift-U confirms.
     pub(crate) update_branch_pending: Option<String>,
+    /// If set, the stuck local session whose branch we're re-typing in
+    /// the NewSession overlay. On confirm we DELETE this session instead
+    /// of leaving it around next to the successful one.
+    pub(crate) new_session_replaces: Option<String>,
 
     // ── First-poll bookkeeping ──
     pub(crate) loaded: bool,
@@ -169,6 +173,7 @@ impl State {
             quit_pending: false,
             merge_pending: None,
             update_branch_pending: None,
+            new_session_replaces: None,
             loaded: false,
             purged_stale: false,
             first_poll_keys: HashSet::new(),
