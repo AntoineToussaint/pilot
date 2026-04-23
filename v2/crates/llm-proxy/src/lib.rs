@@ -20,7 +20,10 @@
 //! proxy in the `Authorization` header; the proxy forwards it verbatim
 //! and doesn't log auth headers.
 //!
-//! Skeleton only — the actual hyper server lands in Week 3.
+//! This module currently ships the types that the daemon and SQLite
+//! layer persist. The hyper server that binds the port and forwards
+//! upstream traffic lands together with the daemon integration — see
+//! tasks #68 and #69 in the roadmap.
 
 use chrono::{DateTime, Utc};
 use pilot_core::SessionKey;
@@ -123,9 +126,10 @@ impl Default for ProxyConfig {
     }
 }
 
-// Placeholder. Real hyper server + parsers + upstream forwarding land
-// in Week 3 of the rewrite. The types above are already referenceable
-// from the daemon so proxy records can be wired into IPC first.
+/// Public handle to the proxy. The hyper server implementation (task
+/// #68) replaces the body of `new` + adds `listen`, `records_rx`,
+/// `shutdown`. The type is defined here today so callers in the
+/// daemon can hold `Option<ProxyServer>` without conditional compilation.
 pub struct ProxyServer {
     _config: ProxyConfig,
 }

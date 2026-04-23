@@ -487,7 +487,7 @@ and every golden snapshot is reviewed.
 
 | Week | Deliverable | Key tests |
 |------|-------------|-----------|
-| 1 | `ipc` wire types + transport. `agents` trait + builtins. `llm-proxy` types + pricing. `daemon` skeleton with PTY lifecycle + ring buffer. | Serde round-trip, framing, PTY spawn→exit, replay on reconnect. |
+| 1 | `ipc` wire types + transport. `agents` trait + builtins. `llm-proxy` record types + pricing. `daemon` serve loop + PTY lifecycle + ring buffer. | Serde round-trip, framing, PTY spawn→exit, replay on reconnect. |
 | 2 | `tui`: Component trait + tree infra. Sidebar + RightPane + Overlays. Feature parity with v1 for browse-only flows. | Key routing, event dispatch, golden render snapshots, focus invariants. |
 | 3 | `llm-proxy` real hyper server (Anthropic + OpenAI). Daemon integration (ProxyCtx injection + records → Events). Dashboard tiles including Cost/Tokens. TerminalStack with multi-terminal. | SSE stream assembly from fixtures, redaction, proxy record attribution, tile ordering. |
 | 4 | GitHub Issues in `gh-provider`. Linear provider. SSH remote + daemon subcommands. Migration shim (v1 ↔ v2 SQLite). Flip default behind opt-in flag. | Fixture-based provider tests, daemon lifecycle idempotence, cross-version SQLite load. |

@@ -7,8 +7,6 @@
 //! The `SessionWrapper` abstraction lives here too — tmux is the
 //! default, but `screen`, `zellij`, or raw PTYs can slot in.
 
-use std::path::Path;
-
 pub mod agent;
 pub mod session_wrapper;
 
@@ -25,12 +23,4 @@ pub fn registry() -> agent::Registry {
 /// Default session wrapper — tmux. Overridable via config.
 pub fn default_wrapper() -> Box<dyn SessionWrapper> {
     Box::new(TmuxWrapper::new())
-}
-
-/// Helper: ensure a directory exists before spawning inside it.
-pub(crate) fn ensure_dir(p: &Path) -> std::io::Result<()> {
-    if !p.exists() {
-        std::fs::create_dir_all(p)?;
-    }
-    Ok(())
 }

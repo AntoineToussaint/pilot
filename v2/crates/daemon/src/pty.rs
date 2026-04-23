@@ -303,9 +303,9 @@ impl DaemonPty {
     }
 
     /// Total bytes ever emitted by the PTY reader — NOT just what's
-    /// retained in the ring. Useful for metrics and testing the
-    /// ring-wraparound path. Production code should prefer `subscribe()`
-    /// + `last_seq` for correctness (seq is chunk-count, not byte-count).
+    /// retained in the ring. Used for byte-count metrics. For gap
+    /// detection across reconnect, use `subscribe().last_seq` instead
+    /// (seq counts chunks, not bytes).
     pub async fn total_written(&self) -> u64 {
         self.ring.lock().await.total_written
     }

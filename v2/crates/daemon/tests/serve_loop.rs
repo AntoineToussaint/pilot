@@ -19,8 +19,11 @@ async fn subscribe_yields_snapshot() {
     let evt = client.recv().await.expect("daemon responds");
     match evt {
         Event::Snapshot { sessions, terminals } => {
-            // Week-1 skeleton ships empty. The contract is "Subscribe
-            // always produces a Snapshot first"; content comes later.
+            // Contract under test: Subscribe ALWAYS replies with a
+            // Snapshot before any live events. With no sessions loaded
+            // and no terminals spawned, both lists are empty; the
+            // provider-polling and terminal-manager subsystems that
+            // populate them come in Week 2.
             assert!(sessions.is_empty());
             assert!(terminals.is_empty());
         }
@@ -59,8 +62,10 @@ async fn unknown_command_does_not_crash() {
             .unwrap();
     });
 
-    // Send a command the Week-1 skeleton doesn't implement. The loop
-    // must keep running, not panic.
+    // Send a command whose handler module isn't wired in yet. The loop
+    // must keep running (trace-log + continue), not panic. This is the
+    // contract that lets us land handlers incrementally without
+    // breaking clients that know about more commands than the daemon.
     client
         .send(Command::MarkRead {
             session_key: "x".into(),

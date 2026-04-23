@@ -1,11 +1,15 @@
 //! pilot-daemon — owns state and IO on behalf of TUI clients.
 //!
-//! Lives as a library so the in-process transport can call `Daemon::start`
-//! without a subprocess. When out-of-process (remote / long-running
-//! service) the separate `pilot-daemon` binary calls the same entrypoint.
+//! Lives as a library so the in-process transport can call `Daemon::serve`
+//! without a subprocess. When out-of-process (remote access, long-running
+//! service), the `pilot` binary's `daemon` subcommand invokes the same
+//! `Daemon::serve` entrypoint over a Unix socket.
 //!
-//! This is a Week-1 skeleton. The actual session/provider/worktree/PTY
-//! wiring moves in from v1 over the following weeks. See `../DESIGN.md`.
+//! Today the daemon exposes the PTY lifecycle (spawn/write/resize/close,
+//! per-terminal ring buffer, reconnect replay) and the serve loop that
+//! accepts `ipc::Command`s and emits `ipc::Event`s. Provider polling,
+//! worktree management, agent hook plumbing, and LLM proxy integration
+//! land on top of this core in the order described in `../DESIGN.md`.
 
 pub mod pty;
 
@@ -44,8 +48,16 @@ impl Daemon {
 
     /// Accept a client connection (either an in-process `Server` from
     /// `ipc::channel::pair` or a remote `Server` from `ipc::socket::serve`).
+    ///
+    /// This serve loop currently handles the lifecycle commands needed
+    /// for the Week-2 TUI build-out: `Subscribe` sends a `Snapshot` and
+    /// holds the stream open, `Shutdown` exits cleanly, and any other
+    /// command is acknowledged as received (for observability) and left
+    /// to the handler modules being wired in for Week 2-3. Each new
+    /// command gets handled here as its backing subsystem lands — not
+    /// by rewriting this loop, but by dispatching to the module that
+    /// owns that concern.
     pub async fn serve(&self, mut server: Server) -> anyhow::Result<()> {
-        // Week-1 stub: accept Subscribe, echo Snapshot, sit idle.
         while let Some(cmd) = server.rx.recv().await {
             tracing::debug!("daemon ← {cmd:?}");
             match cmd {
@@ -56,8 +68,8 @@ impl Daemon {
                     });
                 }
                 pilot_v2_ipc::Command::Shutdown => break,
-                _ => {
-                    // Real handling ships progressively in weeks 2–3.
+                other => {
+                    tracing::trace!("daemon: command handler not yet wired: {other:?}");
                 }
             }
         }

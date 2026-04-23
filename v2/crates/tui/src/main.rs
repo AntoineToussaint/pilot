@@ -6,9 +6,11 @@
 //!   pilot daemon status           show daemon status
 //!   pilot --connect <socket>      connect to an existing daemon
 //!
-//! Week-1 skeleton. The real TUI (component tree, render loop) lands
-//! in Week 2. For now `pilot` opens an in-process channel to the
-//! daemon library, sends `Subscribe`, prints the snapshot, and exits.
+//! The component-tree TUI (sidebar, right pane, overlays) is built out
+//! in Week 2 per `../../DESIGN.md`. The scaffolding in this file —
+//! argv dispatch + `run_embedded` wiring the TUI to an in-process
+//! daemon via `ipc::channel::pair` — is the permanent entry point
+//! that the component tree plugs into.
 
 use pilot_v2_daemon::{Daemon, DaemonConfig};
 use pilot_v2_ipc::{Command, channel};
@@ -43,11 +45,12 @@ async fn run_embedded() -> anyhow::Result<()> {
         }
     });
 
-    // Subscribe and print whatever events arrive. Placeholder until
-    // the real component-tree TUI lands.
+    // Smoke-test entry point for the in-process wiring. The component
+    // tree mounts here in Week 2 — this call site (Subscribe first,
+    // then drive the render loop off `client.recv()`) stays.
     client.send(Command::Subscribe).ok();
-    println!("pilot v2 (skeleton)");
-    println!("See v2/DESIGN.md for the architecture plan.");
+    println!("pilot v2");
+    println!("See v2/DESIGN.md for the architecture.");
     println!("Subscribed. Waiting for Snapshot…");
     if let Some(ev) = client.recv().await {
         println!("{ev:?}");

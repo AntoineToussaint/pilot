@@ -2,7 +2,7 @@
 //! daemon. No serialization, no sockets. This is the default when both
 //! halves live in the same process.
 
-use crate::{Client, Command, Event, Server};
+use crate::{Client, Server};
 use tokio::sync::mpsc;
 
 /// Create a connected `Client` / `Server` pair.
