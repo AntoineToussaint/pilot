@@ -62,7 +62,22 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // New session overlay.
     if let Some(ref input) = app.state.new_session_input {
-        render_new_session_overlay(frame, frame.area(), input);
+        // Pull repo + base from the currently selected session so the
+        // overlay can tell the user exactly what this will do.
+        let ctx = app
+            .selected_session_key()
+            .and_then(|k| app.state.sessions.get(&k).cloned())
+            .and_then(|s| {
+                let repo = s.primary_task.repo.clone()?;
+                let base = s
+                    .primary_task
+                    .base_branch
+                    .clone()
+                    .or_else(|| app.state.default_branch_cache.get(&repo).cloned())
+                    .unwrap_or_else(|| "main".to_string());
+                Some((repo, base))
+            });
+        render_new_session_overlay(frame, frame.area(), input, ctx);
     }
 
     // Quick reply overlay.
@@ -1921,9 +1936,14 @@ fn render_term_content(term: &mut pilot_tui_term::TermSession, frame: &mut Frame
 
 // ─── Picker Overlay ──────────────────────────────────────────────────────
 
-fn render_new_session_overlay(frame: &mut Frame, area: Rect, input: &str) {
-    let modal_w = 50u16.min(area.width.saturating_sub(4));
-    let modal_h = 7u16;
+fn render_new_session_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    input: &str,
+    ctx: Option<(String, String)>,
+) {
+    let modal_w = 66u16.min(area.width.saturating_sub(4));
+    let modal_h = 9u16;
     let x = (area.width.saturating_sub(modal_w)) / 2;
     let y = (area.height.saturating_sub(modal_h)) / 2;
     let modal_area = Rect::new(x, y, modal_w, modal_h);
@@ -1931,15 +1951,32 @@ fn render_new_session_overlay(frame: &mut Frame, area: Rect, input: &str) {
     frame.render_widget(Clear, modal_area);
 
     let display_text = if input.is_empty() {
-        "type a description...".to_string()
+        "feat/my-change (spaces become '-')".to_string()
     } else {
         format!("{input}|")
     };
 
+    // "new worktree in <repo> off <base>" — tells the user exactly what
+    // this creates so it doesn't feel like they're typing into a void.
+    let context_line = match &ctx {
+        Some((repo, base)) => Line::from(vec![
+            Span::styled("  Branch off ", Style::default().fg(C_TEXT_DIM)),
+            Span::styled(repo.as_str(), Style::default().fg(C_ACCENT)),
+            Span::styled(":", Style::default().fg(C_TEXT_DIM)),
+            Span::styled(base.as_str(), Style::default().fg(C_CYAN)),
+        ]),
+        None => Line::from(Span::styled(
+            "  ⚠ no repo context — select a PR first",
+            Style::default().fg(C_ORANGE),
+        )),
+    };
+
     let lines = vec![
         Line::raw(""),
+        context_line,
+        Line::raw(""),
         Line::from(Span::styled(
-            "  Description:",
+            "  Branch name:",
             Style::default().fg(C_TEXT_DIM),
         )),
         Line::from(Span::styled(
@@ -1953,7 +1990,7 @@ fn render_new_session_overlay(frame: &mut Frame, area: Rect, input: &str) {
         Line::raw(""),
         Line::from(vec![
             Span::styled("  Enter", Style::default().fg(C_GREEN).bold()),
-            Span::styled(" create  ", Style::default().fg(C_TEXT_DIM)),
+            Span::styled(" create + open Claude  ", Style::default().fg(C_TEXT_DIM)),
             Span::styled("Esc", Style::default().fg(C_RED).bold()),
             Span::styled(" cancel", Style::default().fg(C_TEXT_DIM)),
         ]),
@@ -1961,7 +1998,7 @@ fn render_new_session_overlay(frame: &mut Frame, area: Rect, input: &str) {
 
     let block = Block::bordered()
         .title(Span::styled(
-            " New Session ",
+            " New worktree ",
             Style::default().fg(C_ACCENT).bold(),
         ))
         .border_type(BorderType::Rounded)

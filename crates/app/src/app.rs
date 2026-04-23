@@ -1237,7 +1237,7 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
         }
 
         Action::Key(key) => {
-            use crossterm::event::KeyCode;
+            use crossterm::event::{KeyCode, KeyModifiers};
             tracing::debug!("KEY {:?} in mode {:?}", key.code, app.state.input_mode);
 
             // ── Confirmation clearing ──
@@ -1255,17 +1255,43 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             }
 
             // ── Absolute-priority Tab handler ──
-            // Tab MUST always cycle panes, no matter the current mode, no
-            // matter which overlay is up. The only exceptions are text
-            // overlays where Tab could be legitimately typed (search, new
-            // session, quick reply) — but even then pressing Tab dismisses
-            // the overlay and cycles, which is what the user wants.
-            if key.code == KeyCode::Tab
-                && key.modifiers.is_empty()
-                && !matches!(app.state.input_mode, InputMode::TextInput(_))
-            {
+            // Tab MUST always cycle panes. Even inside a text overlay Tab
+            // gets out: dismiss the overlay first, THEN cycle. Users
+            // complain HARD about being trapped in a dialog.
+            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+                if let InputMode::TextInput(ref kind) = app.state.input_mode {
+                    let cancel = match kind {
+                        TextInputKind::Search => Action::SearchClear,
+                        TextInputKind::NewSession => Action::NewSessionCancel,
+                        TextInputKind::QuickReply => Action::QuickReplyCancel,
+                    };
+                    handle_action(app, cancel, action_tx);
+                }
                 handle_action(app, Action::FocusPaneNext, action_tx);
                 return;
+            }
+
+            // ── Universal overlay-kill: Esc, Ctrl-C, or Ctrl-\ always
+            // dismisses whatever overlay is up. Belt-and-suspenders on top
+            // of the per-overlay Esc handlers below: if anything ever
+            // shadows the per-overlay match we still have an escape hatch.
+            let is_dismiss = matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Esc, _)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                    | (KeyCode::Char('\\'), KeyModifiers::CONTROL)
+            );
+            if is_dismiss {
+                if let InputMode::TextInput(ref kind) = app.state.input_mode {
+                    let cancel = match kind {
+                        TextInputKind::Search => Action::SearchClear,
+                        TextInputKind::NewSession => Action::NewSessionCancel,
+                        TextInputKind::QuickReply => Action::QuickReplyCancel,
+                    };
+                    handle_action(app, cancel, action_tx);
+                    app.state.input_mode = determine_mode(app);
+                    return;
+                }
             }
 
             // ── Input mode state machine ──

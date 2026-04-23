@@ -766,7 +766,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         Action::NewSession => {
             state.new_session_input = Some(String::new());
             state.input_mode = InputMode::TextInput(TextInputKind::NewSession);
-            state.status = "New session — type description, Enter to create, Esc to cancel".into();
+            state.status = "New worktree — type branch name, Enter to create + open Claude".into();
         }
         Action::NewSessionCancel => {
             state.new_session_input = None;
