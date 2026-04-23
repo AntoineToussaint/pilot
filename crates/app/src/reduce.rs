@@ -1809,27 +1809,38 @@ pub(crate) fn infer_repo_context(state: &State) -> Option<String> {
 ///   - Landed on Detail and no terminal exists → stay; user needs Detail
 ///     to select comments.
 fn skip_empty_detail(state: &mut State) {
-    let selected_has_terminal = match selected_key(state) {
-        Some(k) => state.terminal_index.keys.contains(&k),
-        None => false,
-    };
-    match state.panes.focused_content() {
-        // Landed on Detail and the selected session has a terminal →
-        // skip past to the terminal (typing surface).
-        Some(PaneContent::Detail(_)) if selected_has_terminal => {
-            state.panes.focus_next();
+    // Iterate: a single skip can land us on a dead Terminal leaf, which
+    // previously trapped the user in Normal mode over a Terminal pane.
+    // Keep skipping until we find a valid resting place (live Terminal
+    // or a Detail row that makes sense for the current selection).
+    // Bounded to prevent infinite loops on a pathological pane graph.
+    for _ in 0..4 {
+        let selected_has_terminal = match selected_key(state) {
+            Some(k) => state.terminal_index.keys.contains(&k),
+            None => false,
+        };
+        let should_skip = match state.panes.focused_content() {
+            // On Detail, selected has a terminal → skip past to the
+            // typing surface.
+            Some(PaneContent::Detail(_)) if selected_has_terminal => true,
+            // On a Terminal leaf pointing at a dead key → skip. Never
+            // let Tab land on a Terminal with no PTY.
+            Some(PaneContent::Terminal(leaf_key))
+                if !state.terminal_index.keys.contains(&leaf_key) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !should_skip {
+            tracing::debug!(
+                "skip_empty_detail: stopped on {:?} (selected_has_terminal={selected_has_terminal}, keys={:?})",
+                state.panes.focused_content(),
+                state.terminal_index.keys
+            );
+            return;
         }
-        // Landed on a Terminal leaf — skip ONLY if that leaf's key has no
-        // live PTY (dead leaf, already invisible). If the leaf IS live
-        // we let Tab reach it, even when its target isn't the selected
-        // sidebar row. Users navigate to PR A but want to type in the
-        // already-open terminal for PR B all the time.
-        Some(PaneContent::Terminal(leaf_key))
-            if !state.terminal_index.keys.contains(&leaf_key) =>
-        {
-            state.panes.focus_next();
-        }
-        _ => {}
+        state.panes.focus_next();
     }
 }
 
