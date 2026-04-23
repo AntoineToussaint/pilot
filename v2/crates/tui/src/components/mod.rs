@@ -4,7 +4,9 @@
 pub mod overlays;
 pub mod right_pane;
 pub mod sidebar;
+pub mod terminal_stack;
 
 pub use overlays::{Help, NewWorktree, NewWorktreeResult};
 pub use right_pane::RightPane;
 pub use sidebar::{Mailbox, Sidebar};
+pub use terminal_stack::TerminalStack;
