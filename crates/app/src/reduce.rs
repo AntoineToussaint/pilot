@@ -551,6 +551,18 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             });
         }
 
+        // ── WorktreeFailed — clear the CheckingOut state so the sidebar
+        // stops spinning, keep the session row around so the user can kill
+        // it with Shift-X or retry once the name is fixed.
+        Action::WorktreeFailed { session_key, error } => {
+            if let Some(session) = state.sessions.get_mut(&session_key) {
+                session.state = pilot_core::SessionState::Active;
+                state.status = format!("Worktree failed for {}: {error}", session.display_name);
+            } else {
+                state.status = format!("Worktree failed: {error}");
+            }
+        }
+
         // ── WorktreeReady (async checkout completed) ──
         Action::WorktreeReady { session_key, path } => {
             if let Some(session) = state.sessions.get_mut(&session_key) {
@@ -606,6 +618,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                             owner: owner.to_string(),
                             repo: repo.to_string(),
                             branch,
+                            base: None,
                             session_key: key.clone().into(),
                             then: Some(Box::new(Action::OpenSession(shell_kind))),
                         });
@@ -732,13 +745,75 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             if matches!(state.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
                 state.input_mode = InputMode::Normal;
             }
-            let key = format!("local:{}", clock.chrono.timestamp_millis());
+
+            // Strip whitespace; reject empty.
+            let raw = description.trim().to_string();
+            if raw.is_empty() {
+                state.status = "New session: empty branch name".into();
+                return cmds;
+            }
+            // Slugify: git doesn't allow spaces, `..`, `~`, `^`, `:`, `?`,
+            // `*`, `[`, `\`, `@{`, or a leading `-`. Convert whitespace to
+            // `-` and bounce the input if it still contains illegal chars
+            // instead of silently munging something the user wrote.
+            let branch_name = raw
+                .chars()
+                .map(|c| if c.is_whitespace() { '-' } else { c })
+                .collect::<String>();
+            const BAD_CHARS: &[char] = &['~', '^', ':', '?', '*', '[', '\\'];
+            if branch_name.starts_with('-')
+                || branch_name.contains("..")
+                || branch_name.contains("@{")
+                || branch_name.chars().any(|c| BAD_CHARS.contains(&c))
+            {
+                state.status =
+                    format!("New session: `{branch_name}` is not a valid git branch name");
+                return cmds;
+            }
+
+            // Inherit repo + base from the currently-selected session. No
+            // selection → no repo context → nothing useful to do.
+            let (owner, repo, base_branch) = {
+                let Some(sel) = selected_key(state) else {
+                    state.status = "New session: select a PR first so pilot knows which repo/base to branch off".into();
+                    return cmds;
+                };
+                let Some(session) = state.sessions.get(&sel) else {
+                    state.status = "New session: selected session has no task info".into();
+                    return cmds;
+                };
+                let task = &session.primary_task;
+                let Some(repo_full) = task.repo.as_deref() else {
+                    state.status = "New session: selected session has no repo".into();
+                    return cmds;
+                };
+                let Some((owner, repo)) = repo_full.split_once('/') else {
+                    state.status = format!("New session: unrecognized repo `{repo_full}`");
+                    return cmds;
+                };
+                let base = task
+                    .base_branch
+                    .clone()
+                    .or_else(|| state.default_branch_cache.get(repo_full).cloned())
+                    .unwrap_or_else(|| "main".to_string());
+                (owner.to_string(), repo.to_string(), base)
+            };
+
+            let repo_full = format!("{owner}/{repo}");
+            let key = format!("local:{repo_full}#{branch_name}");
+
+            // Avoid collision: if a session already exists with this key, bail.
+            if state.sessions.contains_key(&key) {
+                state.status = format!("Session {key} already exists");
+                return cmds;
+            }
+
             let task = pilot_core::Task {
                 id: pilot_core::TaskId {
                     source: "local".into(),
                     key: key.clone(),
                 },
-                title: description.clone(),
+                title: branch_name.clone(),
                 body: None,
                 state: pilot_core::TaskState::Open,
                 role: pilot_core::TaskRole::Author,
@@ -747,9 +822,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 checks: vec![],
                 unread_count: 0,
                 url: String::new(),
-                repo: None,
-                branch: None,
-                base_branch: None,
+                repo: Some(repo_full.clone()),
+                branch: Some(branch_name.clone()),
+                base_branch: Some(base_branch.clone()),
                 updated_at: clock.chrono,
                 labels: vec![],
                 reviewers: vec![],
@@ -766,9 +841,34 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 deletions: 0,
             };
             let mut session = pilot_core::Session::new_at(task, clock.chrono);
-            session.state = pilot_core::SessionState::Active;
-            state.sessions.insert(key, session);
-            state.status = format!("Created session: {description}");
+            session.state = pilot_core::SessionState::CheckingOut;
+            state.sessions.insert(key.clone(), session);
+            state.status = format!(
+                "Creating worktree {repo_full}#{branch_name} off {base_branch}…"
+            );
+
+            // Move the sidebar cursor onto the new session so when the
+            // subsequent `OpenSession(Claude)` fires after WorktreeReady,
+            // `selected_key()` returns OUR session (not the one we inherited
+            // repo context from).
+            let items = crate::nav::nav_items_from_state(state);
+            if let Some(idx) = items
+                .iter()
+                .position(|i| matches!(i, crate::nav::NavItem::Session(k) if k == &key))
+            {
+                state.selected = idx;
+            }
+
+            // Create the worktree off base; when ready, land directly in
+            // Claude Code inside it — same flow as clicking `c` on a PR.
+            cmds.push(Command::CheckoutWorktree {
+                owner,
+                repo,
+                branch: branch_name,
+                base: Some(base_branch),
+                session_key: key.clone().into(),
+                then: Some(Box::new(Action::OpenSession(crate::action::ShellKind::Claude))),
+            });
         }
 
         // ── Quick reply overlay ──
@@ -1613,6 +1713,7 @@ pub fn handled_by_reduce(action: &Action) -> bool {
             | Action::UpdateBranch
             | Action::SlackNudge
             | Action::WorktreeReady { .. }
+            | Action::WorktreeFailed { .. }
             | Action::OpenSession(_)
             | Action::NextTab
             | Action::PrevTab
@@ -2230,6 +2331,37 @@ mod tests {
     #[test]
     fn new_session_flow() {
         let mut s = State::new_for_test();
+
+        // Seed one PR so there's a repo context for the new session to
+        // inherit from. `N` requires context — with an empty inbox it
+        // has nothing to branch off.
+        let task = pilot_core::Task {
+            id: pilot_core::TaskId { source: "github".into(), key: "o/r#1".into() },
+            title: "seed".into(), body: None,
+            state: pilot_core::TaskState::Open, role: pilot_core::TaskRole::Author,
+            ci: pilot_core::CiStatus::None, review: pilot_core::ReviewStatus::None,
+            checks: vec![], unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()), branch: Some("topic".into()),
+            base_branch: Some("main".into()), updated_at: chrono::Utc::now(),
+            labels: vec![], reviewers: vec![], assignees: vec![],
+            auto_merge_enabled: false, is_in_merge_queue: false,
+            has_conflicts: false, is_behind_base: false, node_id: None,
+            needs_reply: false, last_commenter: None,
+            recent_activity: vec![], additions: 0, deletions: 0,
+        };
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(task, chrono::Utc::now()),
+        );
+        // Move cursor onto the seeded session (nav[0] is usually the repo
+        // header; nav[1] is the session row).
+        let items = crate::nav::nav_items_from_state(&s);
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(k) if k == "github:o/r#1"))
+            .expect("seeded session visible in nav");
+
         reduce(&mut s, Action::NewSession, &now());
         assert!(s.new_session_input.is_some());
         assert_eq!(
@@ -2237,15 +2369,47 @@ mod tests {
             InputMode::TextInput(TextInputKind::NewSession)
         );
 
-        reduce(
+        let cmds = reduce(
             &mut s,
-            Action::NewSessionConfirm { description: "test".into() },
+            Action::NewSessionConfirm { description: "feat/foo".into() },
             &now(),
         );
         assert!(s.new_session_input.is_none());
         assert_eq!(s.input_mode, InputMode::Normal);
-        // A local session should have been added.
-        assert_eq!(s.sessions.len(), 1);
+        // Original PR + new local session.
+        assert_eq!(s.sessions.len(), 2);
+        let new_key = "local:o/r#feat/foo";
+        let session = s.sessions.get(new_key).expect("local session created");
+        assert_eq!(session.primary_task.repo.as_deref(), Some("o/r"));
+        assert_eq!(session.primary_task.branch.as_deref(), Some("feat/foo"));
+        assert_eq!(session.primary_task.base_branch.as_deref(), Some("main"));
+
+        // A checkout-with-base command must be queued so the worktree gets
+        // created off main, with OpenSession(Claude) chained after.
+        let checkout = cmds
+            .iter()
+            .find(|c| matches!(c, Command::CheckoutWorktree { .. }))
+            .expect("CheckoutWorktree queued");
+        if let Command::CheckoutWorktree { base, branch, then, .. } = checkout {
+            assert_eq!(base.as_deref(), Some("main"));
+            assert_eq!(branch, "feat/foo");
+            assert!(matches!(then.as_deref(), Some(Action::OpenSession(_))));
+        }
+    }
+
+    #[test]
+    fn new_session_without_context_fails_gracefully() {
+        let mut s = State::new_for_test();
+        // Empty inbox — no repo to inherit. NewSessionConfirm must NOT
+        // create a dead-end session without repo/branch info.
+        let cmds = reduce(
+            &mut s,
+            Action::NewSessionConfirm { description: "feat/foo".into() },
+            &now(),
+        );
+        assert_eq!(s.sessions.len(), 0);
+        assert!(!cmds.iter().any(|c| matches!(c, Command::CheckoutWorktree { .. })));
+        assert!(s.status.contains("select a PR first"));
     }
 
     // ── Pane actions ──

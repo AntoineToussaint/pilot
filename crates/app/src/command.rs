@@ -113,10 +113,20 @@ pub enum Command {
         pr_number: String,
     },
     /// Check out (clone/worktree) the branch for a session.
+    ///
+    /// When `base` is `None` (PR-backed flow): fetch `branch` from origin and
+    /// check it out — fails if the branch doesn't exist remotely.
+    ///
+    /// When `base` is `Some(base_branch)` (local-only flow): fetch the base,
+    /// create `branch` off it, check it out. Used by the `N` keybinding to
+    /// spin up a worktree with a fresh branch before any PR exists.
     CheckoutWorktree {
         owner: String,
         repo: String,
         branch: String,
+        /// If set, create `branch` locally off this base instead of fetching
+        /// an existing remote branch.
+        base: Option<String>,
         session_key: SessionKey,
         /// After checkout succeeds, re-dispatch this action so the flow resumes.
         then: Option<Box<Action>>,

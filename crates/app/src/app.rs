@@ -389,17 +389,38 @@ impl App {
                     )));
                 });
             }
-            C::CheckoutWorktree { owner, repo, branch, session_key, then } => {
+            C::CheckoutWorktree { owner, repo, branch, base, session_key, then } => {
                 let tx = action_tx.clone();
+                tracing::info!(
+                    "CheckoutWorktree start: {owner}/{repo} branch={branch} base={base:?} key={session_key}"
+                );
                 tokio::spawn(async move {
+                    let started = std::time::Instant::now();
                     let worktrees = pilot_git_ops::WorktreeManager::default_base();
-                    match worktrees.checkout(&owner, &repo, &branch).await {
+                    let result = match &base {
+                        Some(base_branch) => {
+                            worktrees
+                                .checkout_new_branch(&owner, &repo, &branch, base_branch)
+                                .await
+                        }
+                        None => worktrees.checkout(&owner, &repo, &branch).await,
+                    };
+                    let elapsed = started.elapsed();
+                    match result {
                         Ok(wt) => {
+                            tracing::info!(
+                                "CheckoutWorktree ok ({elapsed:?}): path={}",
+                                wt.path.display()
+                            );
                             let _ = tx.send(Action::WorktreeReady { session_key, path: wt.path });
                             if let Some(a) = then { let _ = tx.send(*a); }
                         }
                         Err(e) => {
-                            let _ = tx.send(Action::StatusMessage(format!("Worktree checkout failed: {e}")));
+                            tracing::error!("CheckoutWorktree failed ({elapsed:?}): {e}");
+                            let _ = tx.send(Action::WorktreeFailed {
+                                session_key,
+                                error: e.to_string(),
+                            });
                         }
                     }
                 });

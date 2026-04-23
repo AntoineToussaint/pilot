@@ -121,6 +121,76 @@ impl WorktreeManager {
         })
     }
 
+    /// Create a worktree on a *new* branch off `base_branch`.
+    /// Used when the user spins up a local task with no PR yet.
+    /// Idempotent: returns the existing worktree if it's already there.
+    pub async fn checkout_new_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        new_branch: &str,
+        base_branch: &str,
+    ) -> Result<Worktree, GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
+        let wt_path = self.worktree_path(owner, repo, new_branch);
+
+        if wt_path.exists() {
+            let name = wt_path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| new_branch.to_string());
+            return Ok(Worktree {
+                name,
+                path: wt_path,
+                branch: new_branch.into(),
+            });
+        }
+
+        if !bare_path.exists() {
+            if let Some(parent) = bare_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let url = format!("git@github.com:{owner}/{repo}.git");
+            run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
+        }
+
+        // Fetch the base branch so we have a commit to branch from.
+        run_git_in(
+            &bare_path,
+            &["fetch", "origin", &format!("{base_branch}:{base_branch}")],
+        )
+        .await?;
+
+        if let Some(parent) = wt_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // `git worktree add -b <new> <path> <base>` creates the branch and
+        // checks it out in the worktree in a single atomic step.
+        run_git_in(
+            &bare_path,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                new_branch,
+                &wt_path.to_string_lossy(),
+                base_branch,
+            ],
+        )
+        .await?;
+
+        let name = wt_path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| new_branch.to_string());
+        Ok(Worktree {
+            name,
+            path: wt_path,
+            branch: new_branch.into(),
+        })
+    }
+
     /// List all active worktrees.
     pub async fn list(&self) -> Result<Vec<Worktree>, GitError> {
         let wt_dir = self.base_dir.join("worktrees");
@@ -158,23 +228,44 @@ impl WorktreeManager {
 }
 
 async fn run_git(args: &[&str]) -> Result<String, GitError> {
+    let started = std::time::Instant::now();
+    tracing::info!("git {}", args.join(" "));
     let output = Command::new("git").args(args).output().await?;
+    let elapsed = started.elapsed();
     if output.status.success() {
+        tracing::info!("git {} ok ({elapsed:?})", args.join(" "));
         Ok(String::from_utf8_lossy(&output.stdout).into())
     } else {
-        Err(GitError::Command(
-            String::from_utf8_lossy(&output.stderr).into(),
-        ))
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        tracing::error!(
+            "git {} failed ({elapsed:?}): {}",
+            args.join(" "),
+            stderr.trim()
+        );
+        Err(GitError::Command(stderr))
     }
 }
 
 async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    let started = std::time::Instant::now();
+    tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
     let output = Command::new("git").current_dir(cwd).args(args).output().await?;
+    let elapsed = started.elapsed();
     if output.status.success() {
+        tracing::info!(
+            "git (in {}) {} ok ({elapsed:?})",
+            cwd.display(),
+            args.join(" ")
+        );
         Ok(String::from_utf8_lossy(&output.stdout).into())
     } else {
-        Err(GitError::Command(
-            String::from_utf8_lossy(&output.stderr).into(),
-        ))
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        tracing::error!(
+            "git (in {}) {} failed ({elapsed:?}): {}",
+            cwd.display(),
+            args.join(" "),
+            stderr.trim()
+        );
+        Err(GitError::Command(stderr))
     }
 }

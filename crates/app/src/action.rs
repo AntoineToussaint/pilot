@@ -122,6 +122,13 @@ pub enum Action {
     TmuxSessionsRefreshed {
         sessions: std::collections::HashSet<String>,
     },
+    /// Worktree checkout failed. Used to clear the `CheckingOut` state so
+    /// the session doesn't show the spinner forever after e.g. an invalid
+    /// branch name or a failed `git clone`.
+    WorktreeFailed {
+        session_key: SessionKey,
+        error: String,
+    },
 
     // -- Picker (reviewer/assignee editing) --
     EditReviewers,
