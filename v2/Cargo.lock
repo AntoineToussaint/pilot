@@ -1802,6 +1802,7 @@ dependencies = [
  "pilot-v2-daemon",
  "pilot-v2-ipc",
  "ratatui 0.29.0",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
