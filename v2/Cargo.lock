@@ -1752,6 +1752,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pilot-v2-llm-proxy"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "humantime-serde",
+ "pilot-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pilot-v2-tui"
 version = "0.2.0"
 dependencies = [

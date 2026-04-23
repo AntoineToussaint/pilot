@@ -30,14 +30,18 @@ of reading the README?* Concretely:
 
 ## Goals
 
-1. **Agent-agnostic.** Codex, Cursor, Claude Code, generic CLI — all
+1. **Source-agnostic.** GitHub PRs, GitHub Issues, Linear tickets,
+   Jira, Gerrit — all first-class via `trait TaskProvider`. The inbox
+   doesn't care where a task came from; filters let the user scope to
+   one provider, one repo, one project.
+2. **Agent-agnostic.** Codex, Cursor, Claude Code, generic CLI — all
    first-class via a `trait Agent` in `crates/agents/`.
-2. **Client / server split.** Daemon owns PTYs and state; TUI is a thin
+3. **Client / server split.** Daemon owns PTYs and state; TUI is a thin
    renderer that talks to the daemon over a socket. Enables remote
    deployment (daemon on a beefy box, TUI on a laptop).
-3. **No class of recurring bugs.** Component tree with single-path focus
+4. **No class of recurring bugs.** Component tree with single-path focus
    replaces the four-slot state desync (see `../REWRITE.md`).
-4. **Multi-terminal right pane.** Shell, agent, log tail, CI output
+5. **Multi-terminal right pane.** Shell, agent, log tail, CI output
    coexist per session — not "one terminal per PR."
 
 ## Non-goals (v2.0)
@@ -190,6 +194,211 @@ App
 └── OverlayStack             — Help / Picker / NewWorktree /
                                ConfirmKill — steals focus when active
 ```
+
+## Sources (`TaskProvider`)
+
+The same trait that exists in v1 `pilot-core` — reused unchanged. Each
+source returns a stream of `Task`s; pilot doesn't care whether a task
+is a GitHub PR, a GitHub issue, or a Linear ticket. All share the
+same row model, sidebar, status tags, search.
+
+### Shipping in v2.0
+
+| Source | Crate | Status |
+|--------|-------|--------|
+| GitHub PRs | `gh-provider` (reused from v1) | parity |
+| GitHub Issues | `gh-provider` | NEW — single GraphQL query alongside PRs |
+| Linear | `crates/linear-provider` (NEW) | Week 3 |
+| GenericHttp | `crates/http-provider` (NEW) | Week 4 — poll any JSON endpoint, map fields via config |
+
+### Per-source behaviors that still matter
+
+- **Merge semantics.** PRs have "merge"; issues have "close"; Linear
+  tickets have "done". The `Task` model already has a neutral
+  `state: TaskState` enum; providers set it.
+- **Comments / replies.** `r` to reply → provider-specific API (GH
+  comment vs Linear comment vs Slack message for integrations).
+- **Worktrees.** Only sources that carry a `branch` get a worktree.
+  Linear tickets with no linked branch are "just an inbox row" —
+  opens a notes pane instead of Claude-in-worktree. A Linear ticket
+  that IS linked to a PR can be rendered as one merged row or two
+  linked rows (config: `display.merge_linked_items`).
+- **Auth.** Each provider builds its own `CredentialProvider` chain.
+  GitHub uses `gh auth token`; Linear uses `LINEAR_API_KEY` env or
+  `pilot auth linear` flow (TBD).
+
+### Filter UX
+
+Search grows provider tokens:
+
+```
+source:github          # only GitHub (PRs + issues)
+source:gh/pr           # only GitHub PRs
+source:gh/issue        # only GitHub issues
+source:linear          # only Linear
+project:ENG            # Linear project key
+```
+
+All existing tokens (`needs:reply`, `ci:failed`, `role:author`,
+`is:unread`, etc.) still work and compose with AND.
+
+## LLM proxy — structured telemetry from agents
+
+Parsing PTY output to understand what an agent is doing is brittle
+(it worked well enough for "working vs asking", but we hit the ceiling
+fast on tool calls, token counts, cost). Instead, v2 interposes as an
+**LLM API proxy**: the daemon runs a tiny HTTP server, injects
+`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` into the agent's env, and
+captures structured metadata on every request/response.
+
+```
+┌──────────────────────────┐
+│ Claude Code (in tmux)    │
+│ ANTHROPIC_BASE_URL=       │
+│   http://127.0.0.1:PORT/  │
+└────────────┬─────────────┘
+             │ /v1/messages
+             ▼
+┌──────────────────────────┐  records:
+│ LLM Proxy                │    - timestamp, session_key
+│ (in daemon)              │    - model, token counts (in/out/cache)
+│                          │    - tool calls (name, args, result size)
+│                          │    - request latency
+│                          │    - estimated cost
+│                          │    - assistant text (for summary / search)
+└────────────┬─────────────┘
+             │ /v1/messages  (forward upstream, verbatim)
+             ▼
+        api.anthropic.com
+```
+
+### What the proxy gives us
+
+- **Token & cost per session.** Live counter in the sidebar row.
+  Aggregate per day / per repo / per agent in the dashboard.
+- **Tool-call timeline.** A real structured list of what the agent did
+  (read file X, ran `cargo test`, edited Y:42) instead of scraping PTY
+  frames. Powers a new "Activity" tile in the right pane dashboard.
+- **Reliable state detection.** "Request in flight" = working,
+  "response ended without tool_use" = idle, "tool_use with name
+  `AskUserQuestion` or `bash` and unresolved" = asking. No more
+  pattern-matching on `Esc to cancel`.
+- **Search the conversation.** Because we have every assistant turn's
+  text, users can `s` for prior conversations. "Find the session where
+  I asked about the config_toml migration".
+- **Budget guardrails.** Optional: cap $/day or tokens/day per agent;
+  return a 429 that the agent surfaces as "your budget is exhausted".
+- **Offline cache / replay.** Not v2.0, but the architecture allows it.
+
+### What it deliberately does NOT do
+
+- **Re-routing / model swap.** Proxy is read-only — it forwards the
+  exact request to the exact upstream the agent chose. No "secretly
+  use Haiku instead of Sonnet." That surprise is not worth the value.
+- **Modification of responses.** Same reason. Observability only.
+- **Policy enforcement by default.** Budgets are opt-in. Default is
+  pure pass-through.
+
+### Implementation
+
+New crate `crates/llm-proxy/`:
+
+```rust
+pub struct ProxyConfig {
+    pub listen: std::net::SocketAddr,      // typically 127.0.0.1:<ephemeral>
+    pub record_bodies: bool,               // true by default
+    pub redact: Vec<String>,                // headers/fields to strip from records
+}
+
+pub struct ProxyServer {
+    /// Records flow out via this channel so the daemon's main loop
+    /// can persist them + emit Events.
+    pub records_tx: mpsc::Sender<ProxyRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyRecord {
+    pub session_key: SessionKey,          // pulled from a request header
+                                           // we inject when spawning
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub duration: std::time::Duration,
+    pub provider: ApiProvider,             // Anthropic / OpenAI / …
+    pub endpoint: String,                  // "/v1/messages"
+    pub request_model: Option<String>,
+    pub tokens_input: Option<u64>,
+    pub tokens_output: Option<u64>,
+    pub tokens_cache_read: Option<u64>,
+    pub tokens_cache_create: Option<u64>,
+    pub estimated_cost_usd: Option<f64>,
+    pub tool_calls: Vec<ToolCall>,
+    pub assistant_text: Option<String>,    // for search
+    pub status: u16,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub name: String,
+    pub args_summary: String,              // truncated / structured
+    pub result_size_bytes: Option<u64>,
+    pub duration: Option<std::time::Duration>,
+}
+```
+
+### Agent wiring
+
+`Agent::spawn` gets a `ProxyCtx` in `SpawnCtx`:
+
+```rust
+pub struct ProxyCtx {
+    pub anthropic_url: Option<String>,     // base URL to inject
+    pub openai_url: Option<String>,
+    pub session_tag: String,               // header value linking
+                                           // requests → session_key
+}
+```
+
+The daemon builds this `ProxyCtx` when starting a terminal, points the
+proxy at the upstream for whichever API keys the user has configured,
+and injects the env vars into the wrapped command. Agent impls don't
+need to know — the env vars are standard.
+
+### Trust model
+
+- **Only listens on 127.0.0.1** — never exposed to the network.
+- **Forwards the agent's `Authorization` header verbatim.** The
+  daemon never sees the user's API key unless the user explicitly
+  configures one for its own polling.
+- **Bodies are recorded by default.** Opt-out via `proxy.record_bodies:
+  false` in config. A redact list strips known-sensitive headers
+  (cookies, extra auth) and JSON paths (`messages[].content` if the
+  user wants content-free telemetry).
+
+### Storage
+
+Proxy records land in SQLite next to sessions. A `proxy_records`
+table keyed by `(session_key, started_at)`. Separate so users can
+easily `DELETE FROM proxy_records` if they change their mind about
+recording bodies.
+
+Rough size budget: a verbose Claude turn is ~50 KB of JSON; a busy day
+is maybe 100 turns. So ~5 MB/day/active-session. Fine for SQLite;
+users who care can enable `record_bodies: false` and keep only the
+counters (tiny).
+
+### Open questions
+
+- **Aider / custom agents that hit a model we don't route?** The env
+  vars are a hint, not a requirement. If the agent ignores them we
+  just don't record that agent. Graceful degrade.
+- **Streaming responses.** Proxy needs to be a duplex streamer, not
+  buffer-then-forward. Hyper's streaming body types work fine; we
+  tee the bytes into a parser that assembles the record as SSE frames
+  arrive.
+- **OpenAI vs Anthropic wire formats.** Different JSON shapes. Crate
+  has a per-provider adapter module.
+- **Cost estimation.** Hard-coded price table by model, updated via
+  a small `prices.rs` module. Acceptable because models change slowly.
 
 ## Agent abstraction
 

@@ -4,6 +4,7 @@ members = [
     "crates/ipc",
     "crates/daemon",
     "crates/agents",
+    "crates/llm-proxy",
     "crates/tui",
 ]
 
@@ -24,8 +25,9 @@ pilot-gh          = { path = "../crates/gh-provider" }
 pilot-tui-term    = { path = "../crates/tui-term" }
 
 # ── v2-local crates ────────────────────────────────────────────────────
-pilot-v2-ipc      = { path = "crates/ipc" }
-pilot-v2-agents   = { path = "crates/agents" }
+pilot-v2-ipc       = { path = "crates/ipc" }
+pilot-v2-agents    = { path = "crates/agents" }
+pilot-v2-llm-proxy = { path = "crates/llm-proxy" }
 
 # ── Third-party ────────────────────────────────────────────────────────
 tokio             = { version = "1", features = ["full"] }
