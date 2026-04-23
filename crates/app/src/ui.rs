@@ -576,10 +576,24 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                 }
 
                 // ── PR number ──
-                let pr_num = task.id.key.rsplit_once('#')
+                // GH sessions: "#1234" (5 chars). Local sessions: the
+                // BRANCH NAME, which can be arbitrarily long — "#db-config",
+                // "#feat/some-long-name", etc. Without truncation these
+                // overflow the 5-char column and shift every row to the
+                // right, breaking alignment with GH rows.
+                let pr_num_full = task.id.key.rsplit_once('#')
                     .map(|(_, n)| format!("#{n}"))
                     .unwrap_or_default();
-                let pr_color = pr_number_color(&pr_num);
+                let pr_color = pr_number_color(&pr_num_full);
+                let pr_num = if pr_num_full.chars().count() > 5 {
+                    // Truncate with ellipsis so both local and GH rows share
+                    // the same 5-char column footprint.
+                    let mut c = pr_num_full.chars().take(4).collect::<String>();
+                    c.push('\u{2026}'); // …
+                    c
+                } else {
+                    pr_num_full
+                };
 
                 // ── Title style ──
                 let title_style = if is_cursor {
