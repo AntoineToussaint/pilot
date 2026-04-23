@@ -62,21 +62,20 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // New session overlay.
     if let Some(ref input) = app.state.new_session_input {
-        // Pull repo + base from the currently selected session so the
-        // overlay can tell the user exactly what this will do.
-        let ctx = app
-            .selected_session_key()
-            .and_then(|k| app.state.sessions.get(&k).cloned())
-            .and_then(|s| {
-                let repo = s.primary_task.repo.clone()?;
-                let base = s
-                    .primary_task
-                    .base_branch
-                    .clone()
-                    .or_else(|| app.state.default_branch_cache.get(&repo).cloned())
-                    .unwrap_or_else(|| "main".to_string());
-                Some((repo, base))
-            });
+        // Pull repo + base from the cursor position — works whether the
+        // cursor sits on a session row or a repo header. Matches what the
+        // reducer does on confirm, so the overlay preview never lies.
+        let ctx = crate::reduce::infer_repo_context(&app.state).map(|repo| {
+            let base = app
+                .state
+                .sessions
+                .values()
+                .find(|s| s.primary_task.repo.as_deref() == Some(repo.as_str()))
+                .and_then(|s| s.primary_task.base_branch.clone())
+                .or_else(|| app.state.default_branch_cache.get(&repo).cloned())
+                .unwrap_or_else(|| "main".to_string());
+            (repo, base)
+        });
         render_new_session_overlay(frame, frame.area(), input, ctx);
     }
 

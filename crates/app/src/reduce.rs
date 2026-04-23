@@ -806,30 +806,28 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 return cmds;
             }
 
-            // Inherit repo + base from the currently-selected session. No
-            // selection → no repo context → nothing useful to do.
+            // Inherit repo + base from wherever the sidebar cursor is:
+            //   - On a session row: use that session's repo + base_branch
+            //   - On a repo header: use that repo; base is the first
+            //     session's base_branch (they're all off the same trunk) or
+            //     the cached default branch, or "main".
+            //   - On nothing: bail.
             let (owner, repo, base_branch) = {
-                let Some(sel) = selected_key(state) else {
-                    state.status = "New session: select a PR first so pilot knows which repo/base to branch off".into();
-                    return cmds;
-                };
-                let Some(session) = state.sessions.get(&sel) else {
-                    state.status = "New session: selected session has no task info".into();
-                    return cmds;
-                };
-                let task = &session.primary_task;
-                let Some(repo_full) = task.repo.as_deref() else {
-                    state.status = "New session: selected session has no repo".into();
+                let Some(repo_full) = infer_repo_context(state) else {
+                    state.status =
+                        "New session: select a PR or a repo header first".into();
                     return cmds;
                 };
                 let Some((owner, repo)) = repo_full.split_once('/') else {
                     state.status = format!("New session: unrecognized repo `{repo_full}`");
                     return cmds;
                 };
-                let base = task
-                    .base_branch
-                    .clone()
-                    .or_else(|| state.default_branch_cache.get(repo_full).cloned())
+                let base = state
+                    .sessions
+                    .values()
+                    .find(|s| s.primary_task.repo.as_deref() == Some(repo_full.as_str()))
+                    .and_then(|s| s.primary_task.base_branch.clone())
+                    .or_else(|| state.default_branch_cache.get(&repo_full).cloned())
                     .unwrap_or_else(|| "main".to_string());
                 (owner.to_string(), repo.to_string(), base)
             };
@@ -1708,6 +1706,18 @@ fn selected_key(state: &State) -> Option<String> {
     }
 }
 
+/// Repo the sidebar cursor is currently "in" — works whether the user is
+/// on a session row or a repo header. Returns "owner/repo".
+pub(crate) fn infer_repo_context(state: &State) -> Option<String> {
+    let items = crate::nav::nav_items_from_state(state);
+    match items.get(state.selected)? {
+        crate::nav::NavItem::Session(k) => {
+            state.sessions.get(k)?.primary_task.repo.clone()
+        }
+        crate::nav::NavItem::Repo(r) => Some(r.clone()),
+    }
+}
+
 /// After a focus move, step past panes that aren't meaningful for the
 /// CURRENT selection:
 ///   - Landed on Detail but the selected session has a live terminal →
@@ -2479,7 +2489,7 @@ mod tests {
         );
         assert_eq!(s.sessions.len(), 0);
         assert!(!cmds.iter().any(|c| matches!(c, Command::CheckoutWorktree { .. })));
-        assert!(s.status.contains("select a PR first"));
+        assert!(s.status.contains("select a PR or a repo header first"));
     }
 
     // ── Pane actions ──
