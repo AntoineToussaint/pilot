@@ -93,13 +93,12 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Fetch the branch tip to the standard remote-tracking ref. Bare
-        // clones default to `refs/heads/*:refs/heads/*` so a plain fetch
-        // touches the local ref — when ANOTHER worktree has that branch
-        // checked out, that fails with "refusing to fetch into branch X".
-        // Remote-tracking refs (`refs/remotes/origin/*`) aren't claimed by
-        // any worktree, so they're always safe to update.
-        run_git_in(
+        // Try to refresh the remote-tracking ref. We tolerate failure here:
+        // if the remote branch was deleted (common right after merge), the
+        // fetch drops the remote-tracking ref and we fall back to the local
+        // branch below. Target a remote-tracking ref (not refs/heads/*) so
+        // we don't collide with another worktree holding the same branch.
+        let _ = run_git_in(
             &bare_path,
             &[
                 "fetch",
@@ -107,14 +106,24 @@ impl WorktreeManager {
                 &format!("+{branch}:refs/remotes/origin/{branch}"),
             ],
         )
-        .await?;
+        .await;
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        // `-B <branch>` creates the local branch (or resets it) pointing
-        // at the fetched remote ref, then checks it out in the new
-        // worktree. Only the target worktree claims the branch.
+        // Prefer the fresh remote-tracking ref; fall back to the local
+        // ref when the remote branch was deleted (e.g. auto-delete after
+        // merge). Worst case, `-B` uses whichever commit we have.
+        let start_point = if ref_exists(&bare_path, &format!("refs/remotes/origin/{branch}")).await
+        {
+            format!("refs/remotes/origin/{branch}")
+        } else if ref_exists(&bare_path, &format!("refs/heads/{branch}")).await {
+            format!("refs/heads/{branch}")
+        } else {
+            return Err(GitError::Command(format!(
+                "branch '{branch}' not found locally or on origin"
+            )));
+        };
         run_git_in(
             &bare_path,
             &[
@@ -123,7 +132,7 @@ impl WorktreeManager {
                 &wt_path.to_string_lossy(),
                 "-B",
                 branch,
-                &format!("refs/remotes/origin/{branch}"),
+                &start_point,
             ],
         )
         .await?;
@@ -172,11 +181,9 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Fetch the base's tip into the standard remote-tracking ref so
-        // we get the latest commit without touching `refs/heads/<base>`
-        // (which may already be checked out in another worktree). See the
-        // `checkout()` function above for the detailed rationale.
-        run_git_in(
+        // Fetch the base's tip. Tolerate failure: if the base was deleted
+        // remotely we fall back to the local ref below.
+        let _ = run_git_in(
             &bare_path,
             &[
                 "fetch",
@@ -184,15 +191,27 @@ impl WorktreeManager {
                 &format!("+{base_branch}:refs/remotes/origin/{base_branch}"),
             ],
         )
-        .await?;
+        .await;
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        // Branch the new worktree off the remote-tracking ref. Only the
-        // NEW branch gets checked out in the new worktree; the base's
-        // other worktree stays untouched.
+        let start_point = if ref_exists(
+            &bare_path,
+            &format!("refs/remotes/origin/{base_branch}"),
+        )
+        .await
+        {
+            format!("refs/remotes/origin/{base_branch}")
+        } else if ref_exists(&bare_path, &format!("refs/heads/{base_branch}")).await {
+            format!("refs/heads/{base_branch}")
+        } else {
+            return Err(GitError::Command(format!(
+                "base branch '{base_branch}' not found locally or on origin"
+            )));
+        };
+
         run_git_in(
             &bare_path,
             &[
@@ -201,7 +220,7 @@ impl WorktreeManager {
                 "-b",
                 new_branch,
                 &wt_path.to_string_lossy(),
-                &format!("refs/remotes/origin/{base_branch}"),
+                &start_point,
             ],
         )
         .await?;
@@ -251,6 +270,18 @@ impl WorktreeManager {
         }
         Ok(())
     }
+}
+
+/// Cheap existence check for a git ref. Uses `show-ref --verify --quiet`;
+/// exit 0 = ref exists, non-zero = missing or ambiguous.
+async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
+    Command::new("git")
+        .current_dir(bare_path)
+        .args(["show-ref", "--verify", "--quiet", ref_name])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 async fn run_git(args: &[&str]) -> Result<String, GitError> {

@@ -142,6 +142,64 @@ together (worse than either alone).
 - No theming system. Colors stay hard-coded.
 - No plugin loader. Components are compiled in.
 
+## Worktree invariants that pilot can't currently enforce
+
+Several bug classes we've hit are "pilot assumes X about worktrees but
+git will happily violate X." Fix by owning worktree state more tightly
+in the rewrite.
+
+### Branch swap inside a worktree
+
+A user (or Claude) can `cd` into pilot's worktree and `git checkout`
+a different branch. Now pilot's session records `branch = X` but the
+worktree is actually on branch `Y`, and branch `Y` is "stolen" from
+any other worktree that might want it. Next `c` on the PR whose head
+is `Y` fails with "`Y` is already used by worktree at ...".
+
+**Rewrite rule:** worktree ownership is one-way. Pilot writes the
+branch at creation time and treats any subsequent branch swap as a
+corruption. Either:
+  - Re-assert on every attach (`git -C <wt> checkout <expected>`),
+    respecting uncommitted changes via stash.
+  - Detect drift and surface a clear error + one-keystroke rescue
+    ("your worktree switched branches — stash and reset? [y/N]").
+
+Do NOT silently let git's flexibility leak into pilot's data model.
+
+### Stacked PRs sharing state
+
+Stacked PRs (PR B based on PR A's head) cause several conflicts:
+  - Creating a worktree for B while A's worktree already has A's
+    head checked out → the "refusing to fetch into branch X" family
+    we spent a day patching with remote-tracking refs.
+  - Rebasing A's head invalidates every downstream stack's commit
+    tree; pilot's per-PR monitor can loop on this.
+  - A branch being force-deleted from origin (common after
+    squash-merge auto-delete) leaves pilot's cached ref stale; the
+    next `c` fails unless we fall back to the local ref.
+
+**Rewrite rule:** the worktree subsystem needs first-class awareness
+of stack graphs. Operations should be stack-aware:
+  - "Update A" → optionally offer to rebase the stack's children.
+  - Creating a child worktree should reuse the parent's tip rather
+    than re-fetching if the parent is already local.
+  - Remote-tracking ref + local-branch fallback (what git-ops does
+    now) needs to be the explicit contract, not an accident.
+
+### Local-branch collision
+
+Today `git worktree add <path> <branch>` fails if the branch is
+checked out elsewhere, even when "elsewhere" is a stale/irrelevant
+worktree. We work around it by fetching to a remote-tracking ref and
+`-B <branch>` the new worktree. That's fragile — it relies on no
+other process claiming the local branch ref at the same time.
+
+**Rewrite rule:** pilot is the sole writer for worktree layout. On
+startup it reconciles `git worktree list` against its session database,
+moves / renames / removes anything that doesn't match, and refuses to
+proceed until the view is consistent. No "silently work around git's
+weirdness" — assert the invariant.
+
 ## Open questions
 
 - **Persistence granularity.** Per-component `Persist` or a single

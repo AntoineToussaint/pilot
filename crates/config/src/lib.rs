@@ -25,6 +25,60 @@ pub struct Config {
     pub slack: SlackConfig,
     pub agent: AgentSection,
     pub shell: ShellSection,
+    pub hooks: HooksConfig,
+}
+
+/// Periodic scripts pilot runs to keep the user's environment tidy —
+/// cargo sweep, worktree GC, whatever. Users drop shell scripts into
+/// `hooks.dir/<bucket>/` and pilot runs each bucket on its cadence.
+/// Pilot never knows or cares what the scripts do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    pub enabled: bool,
+    /// Directory with `daily/`, `hourly/`, `on_idle/` subfolders.
+    pub dir: PathBuf,
+    /// Per-bucket schedule. Bucket is the subfolder name under `dir`.
+    pub schedule: HooksSchedule,
+    /// Max runtime for a single script. Killed with SIGTERM on overrun.
+    #[serde(with = "humantime_serde")]
+    pub script_timeout: Duration,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        Self {
+            enabled: true,
+            dir: PathBuf::from(home).join(".pilot").join("hooks"),
+            schedule: HooksSchedule::default(),
+            script_timeout: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksSchedule {
+    #[serde(with = "humantime_serde")]
+    pub daily: Duration,
+    #[serde(with = "humantime_serde")]
+    pub hourly: Duration,
+    /// Runs when the inbox has been quiet (no key / no new activity) for
+    /// this long. Good for "don't run cargo-sweep while the user is
+    /// actively coding" kinds of tasks.
+    #[serde(with = "humantime_serde")]
+    pub on_idle: Duration,
+}
+
+impl Default for HooksSchedule {
+    fn default() -> Self {
+        Self {
+            daily: Duration::from_secs(24 * 3600),
+            hourly: Duration::from_secs(3600),
+            on_idle: Duration::from_secs(15 * 60),
+        }
+    }
 }
 
 
