@@ -1794,6 +1794,7 @@ name = "pilot-v2-tui"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm 0.29.0",
  "pilot-config",
  "pilot-core",

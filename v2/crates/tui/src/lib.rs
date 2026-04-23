@@ -14,6 +14,7 @@
 //!   edges, and focus state. Owns the key and event dispatch loops.
 
 pub mod component;
+pub mod components;
 pub mod tree;
 
 pub use component::{Component, ComponentId, Outcome};

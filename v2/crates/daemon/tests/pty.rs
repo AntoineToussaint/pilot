@@ -53,22 +53,25 @@ async fn echo_produces_output_then_exits() {
     )
     .expect("spawn echo");
 
-    // Subscribe BEFORE waiting for exit so we don't miss bytes on a
-    // fast echo.
-    let sub = pty.subscribe().await;
-    // `echo hello-pilot` emits ~14 bytes; wait for a chunk worth.
-    let output = collect_until_bytes(sub.live, 1).await;
-    let text = String::from_utf8_lossy(&output);
-    assert!(
-        text.contains("hello-pilot"),
-        "expected 'hello-pilot' in output, got {text:?}"
-    );
-
+    // Wait for the child to finish so ring is populated deterministically.
+    // (We tested the live-stream path in the cat round-trip below, where
+    // the child stays alive long enough to observe the race-free case.)
     let code = tokio::time::timeout(Duration::from_secs(5), pty.wait_exit())
         .await
         .expect("exit within timeout");
     assert_eq!(code, Some(0), "echo should exit 0");
     assert!(pty.is_finished());
+
+    // Give the reader thread one more tick to flush to the ring.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let sub = pty.subscribe().await;
+    let text = String::from_utf8_lossy(&sub.replay);
+    assert!(
+        text.contains("hello-pilot"),
+        "expected 'hello-pilot' in replay, got {text:?}"
+    );
+    assert!(sub.last_seq > 0);
 }
 
 #[tokio::test]
