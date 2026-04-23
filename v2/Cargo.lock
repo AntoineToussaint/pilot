@@ -1752,6 +1752,7 @@ dependencies = [
  "pilot-tui-term",
  "pilot-v2-agents",
  "pilot-v2-ipc",
+ "portable-pty",
  "serde",
  "thiserror 1.0.69",
  "tokio",

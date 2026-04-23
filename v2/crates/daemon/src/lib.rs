@@ -7,6 +7,8 @@
 //! This is a Week-1 skeleton. The actual session/provider/worktree/PTY
 //! wiring moves in from v1 over the following weeks. See `../DESIGN.md`.
 
+pub mod pty;
+
 use pilot_v2_agents::Registry;
 use pilot_v2_ipc::{Event, Server};
 
