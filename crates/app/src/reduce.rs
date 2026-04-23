@@ -1814,10 +1814,19 @@ fn skip_empty_detail(state: &mut State) {
         None => false,
     };
     match state.panes.focused_content() {
+        // Landed on Detail and the selected session has a terminal →
+        // skip past to the terminal (typing surface).
         Some(PaneContent::Detail(_)) if selected_has_terminal => {
             state.panes.focus_next();
         }
-        Some(PaneContent::Terminal(_)) if !selected_has_terminal => {
+        // Landed on a Terminal leaf — skip ONLY if that leaf's key has no
+        // live PTY (dead leaf, already invisible). If the leaf IS live
+        // we let Tab reach it, even when its target isn't the selected
+        // sidebar row. Users navigate to PR A but want to type in the
+        // already-open terminal for PR B all the time.
+        Some(PaneContent::Terminal(leaf_key))
+            if !state.terminal_index.keys.contains(&leaf_key) =>
+        {
             state.panes.focus_next();
         }
         _ => {}
