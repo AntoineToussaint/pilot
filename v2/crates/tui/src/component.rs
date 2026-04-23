@@ -33,6 +33,25 @@ use crossterm::event::KeyEvent;
 use pilot_v2_ipc::{Command, Event};
 use ratatui::prelude::Rect;
 use ratatui::Frame;
+use std::any::Any;
+
+/// Blanket supertrait that gives every `Component` free `Any` downcast
+/// methods. The tree uses these to let the app read typed overlay
+/// state (branch name on `NewWorktree`, etc.) without requiring each
+/// Component impl to write boilerplate.
+pub trait AsAny: 'static {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: 'static> AsAny for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
 
 /// Globally unique identifier for a component inside one `ComponentTree`.
 ///
@@ -66,6 +85,11 @@ impl ComponentId {
 /// - `FocusId`: consume the key AND move focus to a specific
 ///   component. Fails silently if the id isn't in the tree; this is a
 ///   soft contract since overlays can be mounted/dismounted at runtime.
+/// - `Dismiss`: consume the key AND unmount the component that
+///   returned this outcome. Focus falls back to the unmounted
+///   component's parent. This is how overlays (Help, NewWorktree)
+///   self-close on Esc / Enter — they don't have to know who mounted
+///   them, they just signal "I'm done."
 ///
 /// There is intentionally no "consumed AND bubbled" — every variant is
 /// exclusive, which keeps reasoning about dispatch linear.
@@ -76,13 +100,19 @@ pub enum Outcome {
     FocusNext,
     FocusPrev,
     FocusId(ComponentId),
+    Dismiss,
 }
 
 /// The contract every UI component implements.
 ///
 /// Default impls cover the "I'm a boring leaf" case: no key handling,
 /// no event subscriptions, no children. Override selectively.
-pub trait Component {
+///
+/// The `AsAny` supertrait (blanket-implemented for every `'static`
+/// type) gives components free `Any` downcast support so the app /
+/// tree can retrieve typed state from an overlay without every impl
+/// having to write `as_any` boilerplate.
+pub trait Component: AsAny {
     /// The component's id. Must be stable for the component's lifetime.
     fn id(&self) -> ComponentId;
 

@@ -308,9 +308,30 @@ impl ComponentTree {
                     self.set_focus(target);
                     break;
                 }
+                Outcome::Dismiss => {
+                    // Unmount the component that asked to dismiss.
+                    // unmount() falls focus back to its parent.
+                    self.unmount(id);
+                    break;
+                }
             }
         }
         cmds
+    }
+
+    /// Typed lookup: get `&T` if the component at `id` is a `T`.
+    /// Useful for overlays that expose typed state (e.g. an input
+    /// buffer) for the app to read after a `Dismiss`.
+    pub fn get<T: Component + 'static>(&self, id: ComponentId) -> Option<&T> {
+        self.components.get(&id)?.as_any().downcast_ref::<T>()
+    }
+
+    /// Typed mutable lookup. Symmetric with `get`.
+    pub fn get_mut<T: Component + 'static>(&mut self, id: ComponentId) -> Option<&mut T> {
+        self.components
+            .get_mut(&id)?
+            .as_any_mut()
+            .downcast_mut::<T>()
     }
 
     /// Fan an event out to every mounted component in mount order.
