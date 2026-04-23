@@ -1,0 +1,24 @@
+[package]
+name = "pilot-v2-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pilot"
+path = "src/main.rs"
+
+[dependencies]
+pilot-core       = { workspace = true }
+pilot-config     = { workspace = true }
+pilot-tui-term   = { workspace = true }
+pilot-v2-ipc     = { workspace = true }
+pilot-v2-agents  = { workspace = true }
+pilot-v2-daemon  = { path = "../daemon" }
+
+tokio            = { workspace = true }
+anyhow           = { workspace = true }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossterm        = { workspace = true }
+ratatui          = { workspace = true }

@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ipc",
+    "crates/daemon",
+    "crates/agents",
+    "crates/tui",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# ── Shared crates reused from v1 via path ──────────────────────────────
+pilot-core        = { path = "../crates/core" }
+pilot-auth        = { path = "../crates/auth" }
+pilot-events      = { path = "../crates/events" }
+pilot-store       = { path = "../crates/store" }
+pilot-config      = { path = "../crates/config" }
+pilot-git-ops     = { path = "../crates/git-ops" }
+pilot-gh          = { path = "../crates/gh-provider" }
+pilot-tui-term    = { path = "../crates/tui-term" }
+
+# ── v2-local crates ────────────────────────────────────────────────────
+pilot-v2-ipc      = { path = "crates/ipc" }
+pilot-v2-agents   = { path = "crates/agents" }
+
+# ── Third-party ────────────────────────────────────────────────────────
+tokio             = { version = "1", features = ["full"] }
+serde             = { version = "1", features = ["derive"] }
+bincode           = "1.3"
+thiserror         = "1"
+anyhow            = "1"
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+crossterm         = { version = "0.29", features = ["event-stream"] }
+ratatui           = "0.29"
+chrono            = { version = "0.4", features = ["serde"] }
