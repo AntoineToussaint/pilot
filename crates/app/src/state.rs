@@ -96,6 +96,9 @@ pub struct State {
     /// the NewSession overlay. On confirm we DELETE this session instead
     /// of leaving it around next to the successful one.
     pub(crate) new_session_replaces: Option<String>,
+    /// Session key armed for a KillSession — next Shift-X confirms.
+    /// Matches the two-press pattern used for Merge and UpdateBranch.
+    pub(crate) kill_pending: Option<String>,
 
     // ── First-poll bookkeeping ──
     pub(crate) loaded: bool,
@@ -174,6 +177,7 @@ impl State {
             merge_pending: None,
             update_branch_pending: None,
             new_session_replaces: None,
+            kill_pending: None,
             loaded: false,
             purged_stale: false,
             first_poll_keys: HashSet::new(),

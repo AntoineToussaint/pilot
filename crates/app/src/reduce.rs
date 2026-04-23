@@ -697,50 +697,58 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             // but no pilot PTY is attached to it yet.
             let target = selected_key(state);
             let tab_key = state.terminal_index.active_key().cloned();
-            let key = tab_key.or(target);
-            if let Some(key) = key {
-                let tmux_name = key.replace([':', '/'], "_");
-                state.live_tmux_sessions.remove(&tmux_name);
+            let key = match tab_key.or(target) {
+                Some(k) => k,
+                None => return cmds,
+            };
 
-                // For source="local" sessions (created via `N` with no PR
-                // backing them), Shift-X means DELETE: they have no PR to
-                // track, their tmux might never have existed (stuck
-                // checkout), and leaving the row in the sidebar gives the
-                // user no way out. For source="github" PRs we only kill
-                // the terminal — the PR row stays.
-                let is_local = state
-                    .sessions
-                    .get(&key)
-                    .map(|s| s.primary_task.id.source == "local")
-                    .unwrap_or(false);
+            let is_local = state
+                .sessions
+                .get(&key)
+                .map(|s| s.primary_task.id.source == "local")
+                .unwrap_or(false);
 
-                if let Some(session) = state.sessions.get_mut(&key) {
-                    session.state = pilot_core::SessionState::Active;
-                }
-                // Wipe ALL per-session transient state — if we only called
-                // CloseTerminal, those keys would be cleaned, but if the
-                // tmux session was alive without a pilot PTY attached, a
-                // queued prompt / agent-state / asking-flag would linger.
-                state.pending_prompts.remove(&key);
-                state.notified_asking.remove(&key);
-                state.agent_states.remove(&key);
-                cmds.push(Command::KillTmuxSession { tmux_name });
-                if state.terminal_index.contains_key(&key) {
-                    cmds.push(Command::CloseTerminal { session_key: key.clone().into() });
-                }
-
-                if is_local {
-                    let task_id_opt = state.sessions.get(&key).map(|s| s.primary_task.id.clone());
-                    state.sessions.remove(&key);
-                    if let Some(task_id) = task_id_opt {
-                        cmds.push(Command::StoreDeleteSession { task_id });
-                    }
-                    // Step cursor back so it doesn't dangle past end-of-list.
-                    state.selected = state.selected.saturating_sub(1);
-                    state.status = format!("Removed local session {key}");
+            // Two-press confirm so a stray Shift-X can't wipe a tmux
+            // session (or a local row) the user cares about.
+            if state.kill_pending.as_deref() != Some(key.as_str()) {
+                state.kill_pending = Some(key.clone());
+                state.status = if is_local {
+                    format!("Delete local session {key}? Press Shift-X again to confirm.")
                 } else {
-                    state.status = format!("Killed tmux session for {key}");
+                    format!("Kill tmux session for {key}? Press Shift-X again to confirm.")
+                };
+                return cmds;
+            }
+            state.kill_pending = None;
+
+            let tmux_name = key.replace([':', '/'], "_");
+            state.live_tmux_sessions.remove(&tmux_name);
+
+            if let Some(session) = state.sessions.get_mut(&key) {
+                session.state = pilot_core::SessionState::Active;
+            }
+            // Wipe ALL per-session transient state — if we only called
+            // CloseTerminal, those keys would be cleaned, but if the
+            // tmux session was alive without a pilot PTY attached, a
+            // queued prompt / agent-state / asking-flag would linger.
+            state.pending_prompts.remove(&key);
+            state.notified_asking.remove(&key);
+            state.agent_states.remove(&key);
+            cmds.push(Command::KillTmuxSession { tmux_name });
+            if state.terminal_index.contains_key(&key) {
+                cmds.push(Command::CloseTerminal { session_key: key.clone().into() });
+            }
+
+            if is_local {
+                let task_id_opt = state.sessions.get(&key).map(|s| s.primary_task.id.clone());
+                state.sessions.remove(&key);
+                if let Some(task_id) = task_id_opt {
+                    cmds.push(Command::StoreDeleteSession { task_id });
                 }
+                state.selected = state.selected.saturating_sub(1);
+                state.status = format!("Removed local session {key}");
+            } else {
+                state.status = format!("Killed tmux session for {key}");
             }
         }
 

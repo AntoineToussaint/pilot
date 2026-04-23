@@ -1284,6 +1284,10 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 app.state.merge_pending = None;
                 app.state.status = String::new();
             }
+            if app.state.kill_pending.is_some() && key.code != KeyCode::Char('X') {
+                app.state.kill_pending = None;
+                app.state.status = String::new();
+            }
 
             // ── Absolute-priority Tab handler ──
             // Tab MUST always cycle panes. Even inside a text overlay Tab
