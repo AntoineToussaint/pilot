@@ -1292,6 +1292,16 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         // ── External events from providers ──
         Action::ExternalEvent(event) => {
+            // Remember which session the cursor was on so we can restore
+            // it after the mutation. Without this, a poll that inserts a
+            // new session in an earlier repo group shifts every row below,
+            // and the sidebar cursor lands on a different PR.
+            let prior_selected_key: Option<String> =
+                match crate::nav::selected_nav_item_from_state(state) {
+                    Some(crate::nav::NavItem::Session(k)) => Some(k),
+                    _ => None,
+                };
+
             let event = *event; // unbox once; event.kind is consumed below
             state.notifications.insert(0, event.summary());
             if state.notifications.len() > 100 {
@@ -1461,6 +1471,30 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     // as a signal that a stored session is gone.
                     if !state.purged_stale {
                         state.first_poll_had_errors = true;
+                    }
+                }
+            }
+
+            // Restore the sidebar cursor onto the same session it was on
+            // before the event. `state.selected` is an INDEX: after a new
+            // session insert shifts rows (new repo group sorts earlier
+            // alphabetically, or an is_session_visible flip hides/shows
+            // rows), the index points at a different session. Re-resolve
+            // by key so the user doesn't see the cursor teleport on every
+            // poll.
+            if let Some(prior_key) = prior_selected_key {
+                let items = crate::nav::nav_items_from_state(state);
+                if let Some(idx) = items
+                    .iter()
+                    .position(|i| matches!(i, crate::nav::NavItem::Session(k) if k == &prior_key))
+                {
+                    state.selected = idx;
+                } else {
+                    // Prior session vanished (merged, closed, filtered out).
+                    // Clamp to a valid index — don't jump to zero.
+                    let n = items.len();
+                    if n > 0 && state.selected >= n {
+                        state.selected = n - 1;
                     }
                 }
             }
