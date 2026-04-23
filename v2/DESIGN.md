@@ -457,14 +457,40 @@ across the switch. Hook IPC directory (`~/.pilot/ipc/`) stays the same.
 - **Dashboard tile layout.** Fixed grid (2×2) or stacked (1×N with user
   reorder)? Leaning: stacked, user can drag/reorder later.
 
-## Phase plan (rough)
+## Testing discipline (non-negotiable)
 
-| Week | Deliverable |
-|------|-------------|
-| 1 | `ipc` crate (wire types + transport). `daemon` binary that can spawn one PTY and stream it to a CLI test client. |
-| 2 | `tui` crate with Component tree. Sidebar + Detail feature parity with v1 (reads from daemon). |
-| 3 | `agents` crate: Claude + Codex + GenericCli. RightPane Dashboard + TerminalStack. Shell-in-worktree. |
-| 4 | SSH remote mode. Migration shim (v1 ↔ v2 on same SQLite). Flip default. |
+The class of bugs we shipped in v1 came from "I tested it worked once,
+edge case broke later." v2 rule: **every public function has a test;
+every component has a render snapshot; every bug fix lands with a
+regression test.**
+
+| Layer | What gets tested |
+|-------|------------------|
+| `ipc` | Serde round-trip per Command/Event variant; framing on synthetic streams; property tests for arbitrary frame sizes + malformed bytes. |
+| `agents` | Registry lookup; each Agent's spawn/resume argv snapshotted; SessionWrapper behaviors (tmux mocked by intercepting Command). |
+| `llm-proxy` | Record serde round-trip; pricing rates for known models; Unknown returns None; redaction on headers + nested JSON; streaming SSE assembly from recorded fixtures. |
+| `daemon` | End-to-end via `channel::pair` — Subscribe → Snapshot; PTY spawn → output stream → exit; ring buffer wraparound; reconnect replay fidelity. |
+| `tui` components | Pure key-routing tests (no render). Golden render snapshots via `insta` + ratatui `TestBackend`. Event-subscription dispatch tests. Focus chain invariants. |
+| providers | GraphQL fixtures checked into `tests/fixtures/`. Never hit live APIs in unit tests. One opt-in integration test per provider gated on env var. |
+| Cross-crate | Integration suite in `v2/tests/` exercising the full in-process stack (TUI → in-process daemon → mock provider → mock agent). |
+
+CI matrix: Linux + macOS, `cargo test --workspace` + `cargo clippy
+--workspace -- -D warnings` + `cargo fmt --check` on every PR.
+`cargo test --doc` enabled. Coverage tracked via `cargo llvm-cov` —
+target 80% on library crates (daemon/ipc/agents/llm-proxy/providers).
+TUI render tests count as coverage via the ratatui TestBackend.
+
+## Phase plan (rough — each week ships fully tested)
+
+Each phase is "not done" until CI is green, coverage hits the target,
+and every golden snapshot is reviewed.
+
+| Week | Deliverable | Key tests |
+|------|-------------|-----------|
+| 1 | `ipc` wire types + transport. `agents` trait + builtins. `llm-proxy` types + pricing. `daemon` skeleton with PTY lifecycle + ring buffer. | Serde round-trip, framing, PTY spawn→exit, replay on reconnect. |
+| 2 | `tui`: Component trait + tree infra. Sidebar + RightPane + Overlays. Feature parity with v1 for browse-only flows. | Key routing, event dispatch, golden render snapshots, focus invariants. |
+| 3 | `llm-proxy` real hyper server (Anthropic + OpenAI). Daemon integration (ProxyCtx injection + records → Events). Dashboard tiles including Cost/Tokens. TerminalStack with multi-terminal. | SSE stream assembly from fixtures, redaction, proxy record attribution, tile ordering. |
+| 4 | GitHub Issues in `gh-provider`. Linear provider. SSH remote + daemon subcommands. Migration shim (v1 ↔ v2 SQLite). Flip default behind opt-in flag. | Fixture-based provider tests, daemon lifecycle idempotence, cross-version SQLite load. |
 
 ## What stays from v1
 
