@@ -935,6 +935,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 | Action::ToggleRepo(_)
                 | Action::CollapseSelected
                 | Action::ExpandSelected
+                | Action::JumpToNextAsking
+                | Action::ResetLayout
         );
         let clock = crate::reduce::Clock::now();
         let cmds = crate::reduce::reduce(&mut app.state, action, &clock);

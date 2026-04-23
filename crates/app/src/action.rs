@@ -129,6 +129,11 @@ pub enum Action {
         session_key: SessionKey,
         error: String,
     },
+    /// Nuclear-option escape hatch: rebuild the pane tree from scratch
+    /// (Inbox + Detail), resync it to the current selection, re-focus the
+    /// sidebar. For when pane-tree state gets wedged and the user wants
+    /// out without quitting pilot entirely.
+    ResetLayout,
 
     // -- Picker (reviewer/assignee editing) --
     EditReviewers,

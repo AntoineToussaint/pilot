@@ -551,6 +551,16 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             });
         }
 
+        // ── ResetLayout — nuclear escape hatch. Wipe the pane tree back
+        // to defaults, put focus on the sidebar, force Normal input mode,
+        // then let `sync_for_selection` rebuild Detail/Terminal leaves on
+        // the next tick based on the current selection.
+        Action::ResetLayout => {
+            state.panes = crate::pane::PaneManager::default_layout();
+            state.input_mode = crate::input::InputMode::Normal;
+            state.status = "Layout reset".into();
+        }
+
         // ── WorktreeFailed — clear the CheckingOut state so the sidebar
         // stops spinning, keep the session row around so the user can kill
         // it with Shift-X or retry once the name is fixed.
@@ -1714,6 +1724,7 @@ pub fn handled_by_reduce(action: &Action) -> bool {
             | Action::SlackNudge
             | Action::WorktreeReady { .. }
             | Action::WorktreeFailed { .. }
+            | Action::ResetLayout
             | Action::OpenSession(_)
             | Action::NextTab
             | Action::PrevTab

@@ -78,6 +78,7 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Char('q'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::Quit, short: "q", label: "quit", description: "Quit pilot" },
         Binding { key: KeyCode::Char('?'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ToggleHelp, short: "?", label: "help", description: "Show all keybindings" },
         Binding { key: KeyCode::Char('H'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ToggleHelp, short: "H", label: "help", description: "Show all keybindings (alias for ?)" },
+        Binding { key: KeyCode::Char('\\'), modifiers: KeyModifiers::CONTROL, modes: &[KeyMode::Normal, KeyMode::Detail, KeyMode::Terminal], action: || Action::ResetLayout, short: "^\\", label: "reset", description: "Reset pane layout — escape hatch when the UI gets wedged" },
     ]),
 ];
 
