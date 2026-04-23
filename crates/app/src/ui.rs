@@ -1950,10 +1950,14 @@ fn render_new_session_overlay(
 
     frame.render_widget(Clear, modal_area);
 
-    let display_text = if input.is_empty() {
-        "feat/my-change (spaces become '-')".to_string()
+    // Show a visible caret always — without one, an empty input box
+    // looks "frozen" and users think Enter is broken. When empty, the
+    // caret sits before italic placeholder text; when typed, caret trails
+    // the input.
+    let (display_text, placeholder_style) = if input.is_empty() {
+        ("▌ feat/my-change (spaces become '-')".to_string(), true)
     } else {
-        format!("{input}|")
+        (format!("{input}▌"), false)
     };
 
     // "new worktree in <repo> off <base>" — tells the user exactly what
@@ -1981,7 +1985,7 @@ fn render_new_session_overlay(
         )),
         Line::from(Span::styled(
             format!("  {display_text}"),
-            if input.is_empty() {
+            if placeholder_style {
                 Style::default().fg(C_TEXT_DIM).italic()
             } else {
                 Style::default().fg(C_TEXT_BRIGHT)

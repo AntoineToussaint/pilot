@@ -1334,10 +1334,16 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 }
                                 KeyCode::Enter => {
                                     let desc = app.state.new_session_input.clone().unwrap_or_default();
-                                    if !desc.trim().is_empty() {
+                                    if desc.trim().is_empty() {
+                                        // Silent no-op was the worst option: user thinks
+                                        // Enter is broken. Keep the overlay up but surface
+                                        // a status so they know what's missing.
+                                        app.state.status =
+                                            "Type a branch name before Enter (Esc to cancel)".into();
+                                    } else {
                                         handle_action(app, Action::NewSessionConfirm { description: desc }, action_tx);
+                                        app.state.input_mode = determine_mode(app);
                                     }
-                                    app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Backspace => {
                                     if let Some(ref mut input) = app.state.new_session_input {
