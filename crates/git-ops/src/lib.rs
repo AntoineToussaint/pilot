@@ -93,20 +93,38 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Fetch the branch.
+        // Fetch the branch tip to the standard remote-tracking ref. Bare
+        // clones default to `refs/heads/*:refs/heads/*` so a plain fetch
+        // touches the local ref — when ANOTHER worktree has that branch
+        // checked out, that fails with "refusing to fetch into branch X".
+        // Remote-tracking refs (`refs/remotes/origin/*`) aren't claimed by
+        // any worktree, so they're always safe to update.
         run_git_in(
             &bare_path,
-            &["fetch", "origin", &format!("{branch}:{branch}")],
+            &[
+                "fetch",
+                "origin",
+                &format!("+{branch}:refs/remotes/origin/{branch}"),
+            ],
         )
         .await?;
 
-        // Create worktree.
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        // `-B <branch>` creates the local branch (or resets it) pointing
+        // at the fetched remote ref, then checks it out in the new
+        // worktree. Only the target worktree claims the branch.
         run_git_in(
             &bare_path,
-            &["worktree", "add", &wt_path.to_string_lossy(), branch],
+            &[
+                "worktree",
+                "add",
+                &wt_path.to_string_lossy(),
+                "-B",
+                branch,
+                &format!("refs/remotes/origin/{branch}"),
+            ],
         )
         .await?;
 
@@ -154,21 +172,27 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Fetch the base branch's tip into FETCH_HEAD, WITHOUT updating the
-        // local ref. Using `base:base` as the refspec fails with "refusing
-        // to fetch into branch X checked out at <path>" when another
-        // worktree (another pilot session) has that same base checked out.
-        // FETCH_HEAD sidesteps the constraint — we just need the commit,
-        // not a local branch.
-        run_git_in(&bare_path, &["fetch", "origin", base_branch]).await?;
+        // Fetch the base's tip into the standard remote-tracking ref so
+        // we get the latest commit without touching `refs/heads/<base>`
+        // (which may already be checked out in another worktree). See the
+        // `checkout()` function above for the detailed rationale.
+        run_git_in(
+            &bare_path,
+            &[
+                "fetch",
+                "origin",
+                &format!("+{base_branch}:refs/remotes/origin/{base_branch}"),
+            ],
+        )
+        .await?;
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        // `git worktree add -b <new> <path> FETCH_HEAD` creates the branch
-        // off the just-fetched tip without requiring `base` to exist as a
-        // local ref.
+        // Branch the new worktree off the remote-tracking ref. Only the
+        // NEW branch gets checked out in the new worktree; the base's
+        // other worktree stays untouched.
         run_git_in(
             &bare_path,
             &[
@@ -177,7 +201,7 @@ impl WorktreeManager {
                 "-b",
                 new_branch,
                 &wt_path.to_string_lossy(),
-                "FETCH_HEAD",
+                &format!("refs/remotes/origin/{base_branch}"),
             ],
         )
         .await?;
