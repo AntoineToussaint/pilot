@@ -764,7 +764,24 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         // ── New session overlay ──
         Action::NewSession => {
-            state.new_session_input = Some(String::new());
+            // If the cursor is on a local session whose worktree never
+            // materialized (invalid branch name, checkout killed, etc.),
+            // pre-fill with a slugified version of its branch so the user
+            // can fix-and-retry with one keystroke instead of re-typing.
+            let prefill = selected_key(state)
+                .and_then(|k| state.sessions.get(&k).cloned())
+                .filter(|s| {
+                    s.primary_task.id.source == "local"
+                        && s.worktree_path.is_none()
+                })
+                .and_then(|s| s.primary_task.branch.clone())
+                .map(|b| {
+                    b.chars()
+                        .map(|c| if c.is_whitespace() { '-' } else { c })
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            state.new_session_input = Some(prefill);
             state.input_mode = InputMode::TextInput(TextInputKind::NewSession);
             state.status = "New worktree — type branch name, Enter to create + open Claude".into();
         }
@@ -1290,15 +1307,14 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         // ── External events from providers ──
         Action::ExternalEvent(event) => {
-            // Remember which session the cursor was on so we can restore
-            // it after the mutation. Without this, a poll that inserts a
-            // new session in an earlier repo group shifts every row below,
-            // and the sidebar cursor lands on a different PR.
-            let prior_selected_key: Option<String> =
-                match crate::nav::selected_nav_item_from_state(state) {
-                    Some(crate::nav::NavItem::Session(k)) => Some(k),
-                    _ => None,
-                };
+            // Remember what the cursor was on so we can restore it after
+            // the mutation. Capture either a session key OR a repo header —
+            // users spend most of their time on repo headers too (that's
+            // where `N` is most useful). Without this, a poll that inserts
+            // a new session in an earlier repo group shifts every row below
+            // and the cursor lands on a different item.
+            let prior_nav_item: Option<crate::nav::NavItem> =
+                crate::nav::selected_nav_item_from_state(state);
 
             let event = *event; // unbox once; event.kind is consumed below
             state.notifications.insert(0, event.summary());
@@ -1480,16 +1496,21 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             // rows), the index points at a different session. Re-resolve
             // by key so the user doesn't see the cursor teleport on every
             // poll.
-            if let Some(prior_key) = prior_selected_key {
+            if let Some(prior) = prior_nav_item {
                 let items = crate::nav::nav_items_from_state(state);
-                if let Some(idx) = items
-                    .iter()
-                    .position(|i| matches!(i, crate::nav::NavItem::Session(k) if k == &prior_key))
-                {
+                let new_idx = match &prior {
+                    crate::nav::NavItem::Session(k) => items.iter().position(|i| {
+                        matches!(i, crate::nav::NavItem::Session(x) if x == k)
+                    }),
+                    crate::nav::NavItem::Repo(r) => items.iter().position(|i| {
+                        matches!(i, crate::nav::NavItem::Repo(x) if x == r)
+                    }),
+                };
+                if let Some(idx) = new_idx {
                     state.selected = idx;
                 } else {
-                    // Prior session vanished (merged, closed, filtered out).
-                    // Clamp to a valid index — don't jump to zero.
+                    // Prior item vanished (session merged, repo emptied,
+                    // filtered out). Clamp rather than snap to zero.
                     let n = items.len();
                     if n > 0 && state.selected >= n {
                         state.selected = n - 1;
