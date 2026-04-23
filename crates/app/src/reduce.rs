@@ -701,6 +701,19 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             if let Some(key) = key {
                 let tmux_name = key.replace([':', '/'], "_");
                 state.live_tmux_sessions.remove(&tmux_name);
+
+                // For source="local" sessions (created via `N` with no PR
+                // backing them), Shift-X means DELETE: they have no PR to
+                // track, their tmux might never have existed (stuck
+                // checkout), and leaving the row in the sidebar gives the
+                // user no way out. For source="github" PRs we only kill
+                // the terminal — the PR row stays.
+                let is_local = state
+                    .sessions
+                    .get(&key)
+                    .map(|s| s.primary_task.id.source == "local")
+                    .unwrap_or(false);
+
                 if let Some(session) = state.sessions.get_mut(&key) {
                     session.state = pilot_core::SessionState::Active;
                 }
@@ -715,7 +728,19 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 if state.terminal_index.contains_key(&key) {
                     cmds.push(Command::CloseTerminal { session_key: key.clone().into() });
                 }
-                state.status = format!("Killed tmux session for {key}");
+
+                if is_local {
+                    let task_id_opt = state.sessions.get(&key).map(|s| s.primary_task.id.clone());
+                    state.sessions.remove(&key);
+                    if let Some(task_id) = task_id_opt {
+                        cmds.push(Command::StoreDeleteSession { task_id });
+                    }
+                    // Step cursor back so it doesn't dangle past end-of-list.
+                    state.selected = state.selected.saturating_sub(1);
+                    state.status = format!("Removed local session {key}");
+                } else {
+                    state.status = format!("Killed tmux session for {key}");
+                }
             }
         }
 

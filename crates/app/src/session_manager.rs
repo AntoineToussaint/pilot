@@ -85,7 +85,7 @@ impl SessionManager {
         if let Ok(records) = store.list_sessions() {
             for record in records {
                 if let Some(json) = &record.session_json
-                    && let Ok(session) = serde_json::from_str::<Session>(json) {
+                    && let Ok(mut session) = serde_json::from_str::<Session>(json) {
                         // Skip merged/closed — they're done.
                         if matches!(
                             session.primary_task.state,
@@ -93,6 +93,18 @@ impl SessionManager {
                         ) {
                             let _ = store.delete_session(&session.task_id);
                             continue;
+                        }
+                        // If a session was persisted mid-checkout, the git
+                        // process that was supposed to land it in Active is
+                        // long gone. Don't boot into a spinner that nothing
+                        // can resolve — reset to Active and let the user
+                        // retry with `c` or delete it with `Shift-X`.
+                        if matches!(session.state, pilot_core::SessionState::CheckingOut) {
+                            tracing::info!(
+                                "Resetting stuck CheckingOut session on load: {}",
+                                session.task_id
+                            );
+                            session.state = pilot_core::SessionState::Active;
                         }
                         self.insert(record.task_id.clone(), session);
                     }

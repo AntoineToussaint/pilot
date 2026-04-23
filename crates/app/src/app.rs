@@ -1203,6 +1203,37 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     );
                 }
             }
+
+            // ── CheckingOut watchdog ──
+            // A session in CheckingOut with no worktree_path after 60 s
+            // means the git process died without signalling us (user quit,
+            // SIGKILL, whatever). Auto-fail so the UI stops spinning and
+            // the user can retry or Shift-X it. We check infrequently
+            // (once per ~2 s at 10 Hz) to keep the cost negligible.
+            if app.state.tick_count.is_multiple_of(20) {
+                let now = chrono::Utc::now();
+                let mut stuck: Vec<(String, String)> = Vec::new();
+                for (key, session) in app.state.sessions.iter() {
+                    if matches!(session.state, pilot_core::SessionState::CheckingOut)
+                        && session.worktree_path.is_none()
+                    {
+                        let age = now.signed_duration_since(session.primary_task.updated_at);
+                        if age.num_seconds() > 60 {
+                            stuck.push((
+                                key.clone(),
+                                format!("timed out after {}s", age.num_seconds()),
+                            ));
+                        }
+                    }
+                }
+                for (key, reason) in stuck {
+                    tracing::warn!("CheckingOut watchdog: {key} {reason}");
+                    let _ = action_tx.send(Action::WorktreeFailed {
+                        session_key: key.into(),
+                        error: format!("checkout {reason}"),
+                    });
+                }
+            }
         }
 
         Action::Key(key) => {
