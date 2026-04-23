@@ -22,6 +22,10 @@ pub struct VisibilityCtx<'a> {
     /// The reference "now" used for snooze/staleness decisions. Injected so
     /// the predicate is pure and testable.
     pub now: DateTime<Utc>,
+    /// Which mailbox is currently being rendered. Inbox hides snoozed;
+    /// Snoozed shows ONLY currently-snoozed sessions (the "done with this,
+    /// check back later" view).
+    pub mailbox: crate::state::Mailbox,
 }
 
 /// Pure predicate: is this session currently visible in the sidebar?
@@ -29,14 +33,29 @@ pub struct VisibilityCtx<'a> {
 /// Encapsulates the filter rules — merged/closed hidden, snoozed hidden,
 /// "done my part as a reviewer" hidden, old sessions hidden via time cutoff.
 pub fn is_session_visible(session: &Session, ctx: &VisibilityCtx) -> bool {
+    // Mailbox gate runs first — activity cutoff / approved-by-me filters
+    // don't apply to Snoozed (you parked it for a reason, the view shouldn't
+    // hide it from you further).
+    let snoozed = session.is_snoozed(ctx.now);
+    match ctx.mailbox {
+        crate::state::Mailbox::Inbox => {
+            if snoozed {
+                return false;
+            }
+        }
+        crate::state::Mailbox::Snoozed => {
+            return snoozed
+                && !matches!(
+                    session.primary_task.state,
+                    TaskState::Merged | TaskState::Closed
+                );
+        }
+    }
     if let Some(cutoff) = ctx.activity_cutoff
         && session.primary_task.updated_at < cutoff {
             return false;
         }
     if matches!(session.primary_task.state, TaskState::Merged | TaskState::Closed) {
-        return false;
-    }
-    if session.is_snoozed(ctx.now) {
         return false;
     }
     if ctx.hide_approved_by_me
@@ -161,6 +180,7 @@ pub(crate) fn build_repo_groups_from_state(
             None
         },
         now,
+        mailbox: state.mailbox,
     };
     build_repo_groups_inner(state, &ctx)
 }
@@ -361,6 +381,7 @@ mod tests {
             hide_approved_by_me: true,
             activity_cutoff: None,
             now: Utc::now(),
+            mailbox: crate::state::Mailbox::Inbox,
         }
     }
 
@@ -392,6 +413,7 @@ mod tests {
             hide_approved_by_me: false,
             activity_cutoff: None,
             now: Utc::now(),
+            mailbox: crate::state::Mailbox::Inbox,
         };
         // Still mentioned + waiting-on-others → hidden by the other rule.
         assert!(!is_session_visible(&s, &c));
@@ -406,6 +428,7 @@ mod tests {
             hide_approved_by_me: false,
             activity_cutoff: Some(Utc::now() - chrono::Duration::days(7)),
             now: Utc::now(),
+            mailbox: crate::state::Mailbox::Inbox,
         };
         assert!(!is_session_visible(&s, &c));
     }

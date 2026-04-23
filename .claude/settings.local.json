@@ -8,7 +8,11 @@
       "Bash(pkill -f \"pilot daemon\")",
       "Bash(rm -f ~/.pilot/daemon.sock)",
       "Bash(tmux -V)",
-      "Bash(claude --version)"
+      "Bash(claude --version)",
+      "Bash(tmux ls *)",
+      "Bash(pgrep -lf \"target.*/pilot$\")",
+      "Bash(pgrep -lf \"pilot$\")",
+      "Bash(tmux new-session *)"
     ]
   }
 }

@@ -134,6 +134,12 @@ pub enum Action {
     /// sidebar. For when pane-tree state gets wedged and the user wants
     /// out without quitting pilot entirely.
     ResetLayout,
+    /// Toggle the sidebar between the Inbox and Snoozed mailboxes.
+    ToggleMailbox,
+    /// Snooze the selected session for ~1 year — "I'm off this PR, don't
+    /// show it in my inbox again." Still accessible from the Snoozed
+    /// mailbox and can be un-snoozed with `z`.
+    SnoozeForever,
 
     // -- Picker (reviewer/assignee editing) --
     EditReviewers,

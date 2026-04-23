@@ -157,7 +157,39 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                             Some(clock.chrono + chrono::Duration::hours(4));
                         state.status = format!("Snoozed for 4h: {}", session.display_name);
                     }
+                    // Persist so the snooze state survives restart.
+                    cmds.push(Command::StoreSaveSession { session_key: key.into() });
                 }
+        }
+
+        // ── SnoozeForever: "I'm done with this PR" — park it in the
+        // Snoozed mailbox for ~1 year. Still reachable from Shift-S.
+        Action::SnoozeForever => {
+            if let Some(key) = selected_key(state)
+                && let Some(session) = state.sessions.get_mut(&key) {
+                    session.snoozed_until =
+                        Some(clock.chrono + chrono::Duration::days(365));
+                    state.status = format!(
+                        "Archived to Snoozed: {} (Shift-S to find it)",
+                        session.display_name
+                    );
+                    cmds.push(Command::StoreSaveSession { session_key: key.into() });
+                }
+        }
+
+        // ── Toggle between Inbox and Snoozed mailboxes ──
+        Action::ToggleMailbox => {
+            state.mailbox = match state.mailbox {
+                crate::state::Mailbox::Inbox => crate::state::Mailbox::Snoozed,
+                crate::state::Mailbox::Snoozed => crate::state::Mailbox::Inbox,
+            };
+            state.selected = 0;
+            state.status = match state.mailbox {
+                crate::state::Mailbox::Inbox => "Inbox".into(),
+                crate::state::Mailbox::Snoozed => {
+                    "Snoozed — press z on a row to restore to Inbox".into()
+                }
+            };
         }
 
         // ── Panes (pure — no terminal lifecycle) ──
@@ -1842,6 +1874,8 @@ pub fn handled_by_reduce(action: &Action) -> bool {
             | Action::WorktreeReady { .. }
             | Action::WorktreeFailed { .. }
             | Action::ResetLayout
+            | Action::ToggleMailbox
+            | Action::SnoozeForever
             | Action::OpenSession(_)
             | Action::NextTab
             | Action::PrevTab

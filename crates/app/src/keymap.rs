@@ -43,7 +43,9 @@ pub static BINDINGS: &[(&str, &[Binding])] = &[
         Binding { key: KeyCode::Char('U'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::UpdateBranch, short: "U", label: "update", description: "Update branch from base (⇣ PRs only, double-press)" },
         Binding { key: KeyCode::Char('w'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ToggleMonitor, short: "w", label: "watch", description: "Toggle automatic monitor (CI fix + rebase)" },
         Binding { key: KeyCode::Char('N'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::NewSession, short: "N", label: "new", description: "Create new standalone session" },
-        Binding { key: KeyCode::Char('z'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::Snooze, short: "z", label: "snooze", description: "Snooze session for 4 hours" },
+        Binding { key: KeyCode::Char('z'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal], action: || Action::Snooze, short: "z", label: "snooze", description: "Snooze session for 4 hours (un-snoozes if already snoozed)" },
+        Binding { key: KeyCode::Char('Z'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal], action: || Action::SnoozeForever, short: "Z", label: "archive", description: "Send to Snoozed mailbox (~1y) — for PRs you're done with" },
+        Binding { key: KeyCode::Char('S'), modifiers: KeyModifiers::SHIFT, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::ToggleMailbox, short: "S", label: "mailbox", description: "Toggle sidebar between Inbox and Snoozed" },
     ]),
     ("PR Actions", &[
         Binding { key: KeyCode::Char('R'), modifiers: KeyModifiers::NONE, modes: &[KeyMode::Normal, KeyMode::Detail], action: || Action::EditReviewers, short: "R", label: "reviewers", description: "Edit PR reviewers" },

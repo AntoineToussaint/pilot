@@ -1839,8 +1839,16 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         crate::app::determine_mode(app)
     };
+    let normal_label = match app.state.mailbox {
+        crate::state::Mailbox::Inbox => "INBOX",
+        crate::state::Mailbox::Snoozed => "SNOOZED",
+    };
+    let normal_bg = match app.state.mailbox {
+        crate::state::Mailbox::Inbox => C_ACCENT,
+        crate::state::Mailbox::Snoozed => C_ORANGE,
+    };
     let (label, label_bg) = match effective_mode {
-        InputMode::Normal => ("INBOX", C_ACCENT),
+        InputMode::Normal => (normal_label, normal_bg),
         InputMode::Detail => ("DETAIL", C_MAGENTA),
         InputMode::PanePrefix => ("PANE", C_ORANGE),
         InputMode::Terminal => ("TERM", C_GREEN),

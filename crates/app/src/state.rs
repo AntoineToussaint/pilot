@@ -23,6 +23,17 @@ use crate::input::InputMode;
 use crate::pane::PaneManager;
 use crate::session_manager::SessionManager;
 
+/// Which logical "mailbox" of sessions the sidebar is currently showing.
+/// Inbox = active PRs; Snoozed = PRs the user set aside via `z` / `Shift-Z`.
+/// The mailbox filters `is_session_visible`; everything else (grouping,
+/// sorting, search) is identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mailbox {
+    #[default]
+    Inbox,
+    Snoozed,
+}
+
 /// A read-only snapshot of the live terminal map. The shell refreshes this
 /// whenever terminals are spawned, closed, or reaped, so reduce can look at
 /// tab order / active tab / key set without touching `TerminalManager` (whose
@@ -99,6 +110,8 @@ pub struct State {
     /// Session key armed for a KillSession — next Shift-X confirms.
     /// Matches the two-press pattern used for Merge and UpdateBranch.
     pub(crate) kill_pending: Option<String>,
+    /// Which sidebar mailbox is currently visible (Inbox vs Snoozed).
+    pub(crate) mailbox: Mailbox,
 
     // ── First-poll bookkeeping ──
     pub(crate) loaded: bool,
@@ -178,6 +191,7 @@ impl State {
             update_branch_pending: None,
             new_session_replaces: None,
             kill_pending: None,
+            mailbox: Mailbox::Inbox,
             loaded: false,
             purged_stale: false,
             first_poll_keys: HashSet::new(),
