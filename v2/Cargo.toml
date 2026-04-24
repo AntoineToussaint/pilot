@@ -4,6 +4,7 @@ members = [
     "crates/ipc",
     "crates/daemon",
     "crates/agents",
+    "crates/linear-provider",
     "crates/llm-proxy",
     "crates/tui",
 ]

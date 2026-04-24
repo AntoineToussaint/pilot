@@ -53,25 +53,31 @@ async fn echo_produces_output_then_exits() {
     )
     .expect("spawn echo");
 
-    // Wait for the child to finish so ring is populated deterministically.
-    // (We tested the live-stream path in the cat round-trip below, where
-    // the child stays alive long enough to observe the race-free case.)
-    let code = tokio::time::timeout(Duration::from_secs(5), pty.wait_exit())
+    // Wait for the child to finish so the ring is populated
+    // deterministically. Timeout is generous — tests run in parallel
+    // on CI, and echo-spawn+exit under concurrency can take a beat.
+    let code = tokio::time::timeout(Duration::from_secs(10), pty.wait_exit())
         .await
         .expect("exit within timeout");
     assert_eq!(code, Some(0), "echo should exit 0");
     assert!(pty.is_finished());
 
-    // Give the reader thread one more tick to flush to the ring.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let sub = pty.subscribe().await;
-    let text = String::from_utf8_lossy(&sub.replay);
-    assert!(
-        text.contains("hello-pilot"),
-        "expected 'hello-pilot' in replay, got {text:?}"
-    );
-    assert!(sub.last_seq > 0);
+    // Poll the ring until output shows up. The reader thread writes
+    // asynchronously; under load there can be a 100-200ms gap between
+    // wait_exit returning and the ring being flushed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let sub = pty.subscribe().await;
+        let text = String::from_utf8_lossy(&sub.replay).into_owned();
+        if text.contains("hello-pilot") {
+            assert!(sub.last_seq > 0);
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("expected 'hello-pilot' in replay after 3s, got {text:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]

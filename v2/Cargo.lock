@@ -1748,6 +1748,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pilot-linear"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "pilot-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pilot-store"
 version = "0.1.0"
 dependencies = [
