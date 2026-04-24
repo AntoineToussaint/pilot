@@ -216,6 +216,96 @@ impl GhClient {
         Ok(tasks)
     }
 
+    /// Fetch all open GitHub Issues involving the authenticated user,
+    /// paginated. Separate from `fetch_all_prs` so callers opt in
+    /// explicitly — v1 doesn't call this; v2 does.
+    pub async fn fetch_all_issues(&self) -> Result<Vec<Task>, GhError> {
+        let search_query = graphql::build_issues_query(&self.user, &self.filters);
+        tracing::info!("GraphQL issues search: {search_query}");
+
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut page = 0usize;
+        loop {
+            let body = graphql::issues_query_body(&search_query, cursor.as_deref());
+            let response: graphql::GqlIssueResponse = self
+                .inner
+                .post("/graphql", Some(&body))
+                .await
+                .map_err(|e| {
+                    tracing::error!("Issues HTTP error (page {page}): {e}");
+                    GhError::Api(e)
+                })?;
+
+            if let Some(errors) = &response.errors {
+                let joined = errors
+                    .iter()
+                    .map(|e| e.full())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                tracing::error!("Issues GraphQL errors (page {page}): {joined}");
+                return Err(GhError::Graphql(joined));
+            }
+
+            let data = response
+                .data
+                .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
+
+            if let Some(rl) = &data.rate_limit {
+                tracing::debug!(
+                    "GitHub rate limit after issues: {}/5000 remaining",
+                    rl.remaining
+                );
+            }
+
+            tasks.extend(
+                data.search
+                    .nodes
+                    .iter()
+                    .map(|issue| graphql::issue_to_task(issue, &self.user)),
+            );
+
+            let page_info = data.search.page_info.unwrap_or_default();
+            if !page_info.has_next_page {
+                break;
+            }
+            cursor = page_info.end_cursor;
+            if cursor.is_none() {
+                tracing::warn!("Issues paged: hasNextPage=true but endCursor=null");
+                break;
+            }
+            page += 1;
+            if page >= 20 {
+                tracing::warn!("Issues paged: bailing after {page} pages");
+                break;
+            }
+        }
+
+        tracing::info!("GraphQL returned {} issues", tasks.len());
+        Ok(tasks)
+    }
+
+    /// Fetch PRs + Issues in parallel, combine into one `Vec<Task>`.
+    /// Errors from either side surface; we prefer a partial result
+    /// over a hard failure — the TUI degrades gracefully if one
+    /// source is down.
+    pub async fn fetch_all(&self) -> Result<Vec<Task>, GhError> {
+        let (prs, issues) = tokio::join!(self.fetch_all_prs(), self.fetch_all_issues());
+        let mut tasks = Vec::new();
+        match prs {
+            Ok(v) => tasks.extend(v),
+            Err(e) => tracing::warn!("PRs fetch failed: {e}"),
+        }
+        match issues {
+            Ok(v) => tasks.extend(v),
+            Err(e) => tracing::warn!("Issues fetch failed: {e}"),
+        }
+        if tasks.is_empty() {
+            return Err(GhError::Graphql("both PR and issue fetches failed".into()));
+        }
+        Ok(tasks)
+    }
+
     /// Merge the base branch into this PR's head — same as the "Update
     /// branch" button on github.com. Requires the PR's GraphQL node ID.
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {

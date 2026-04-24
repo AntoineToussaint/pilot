@@ -743,6 +743,226 @@ fn extract_repo_from_url(url: &str) -> String {
     }
 }
 
+// ─── GitHub Issues ─────────────────────────────────────────────────────
+//
+// v2 additive extension: Issues get fetched alongside PRs by a separate
+// GraphQL query. Issues are strictly a subset of PR fields (no branches,
+// no CI, no reviewers) so the query is simpler. v1 doesn't call any of
+// the following functions; they're only used by the v2 daemon.
+
+const ISSUES_QUERY: &str = r#"
+query($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on Issue {
+        id
+        number
+        title
+        body
+        url
+        updatedAt
+        createdAt
+        state
+        author { login }
+        labels(first: 10) { nodes { name } }
+        assignees(first: 10) { nodes { login } }
+        comments(first: 30) {
+          nodes {
+            id
+            author { login }
+            body
+            createdAt
+          }
+        }
+        repository {
+          nameWithOwner
+        }
+      }
+    }
+  }
+  rateLimit {
+    remaining
+    resetAt
+  }
+}
+"#;
+
+#[derive(Deserialize, Debug)]
+pub struct GqlIssue {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub number: u64,
+    pub title: String,
+    pub body: Option<String>,
+    pub url: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: DateTime<Utc>,
+    pub state: String, // OPEN, CLOSED
+    pub author: Option<GqlAuthor>,
+    pub labels: GqlLabels,
+    pub assignees: GqlAssignees,
+    pub comments: GqlComments,
+    #[serde(default)]
+    pub repository: Option<GqlIssueRepo>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlIssueRepo {
+    #[serde(rename = "nameWithOwner")]
+    pub name_with_owner: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlIssueSearch {
+    pub nodes: Vec<GqlIssue>,
+    #[serde(rename = "pageInfo", default)]
+    pub page_info: Option<GqlPageInfo>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlIssueData {
+    pub search: GqlIssueSearch,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlIssueResponse {
+    pub data: Option<GqlIssueData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+pub fn build_issues_query(username: &str, filters: &[String]) -> String {
+    let mut parts = vec![
+        "is:open".to_string(),
+        "is:issue".to_string(),
+        format!("involves:{username}"),
+        "archived:false".to_string(),
+    ];
+    parts.extend(filters.iter().cloned());
+    parts.join(" ")
+}
+
+pub fn issues_query_body(search_query: &str, after: Option<&str>) -> serde_json::Value {
+    let variables = match after {
+        Some(cursor) => serde_json::json!({
+            "query": search_query,
+            "first": 100,
+            "after": cursor,
+        }),
+        None => serde_json::json!({
+            "query": search_query,
+            "first": 100,
+        }),
+    };
+    serde_json::json!({
+        "query": ISSUES_QUERY,
+        "variables": variables,
+    })
+}
+
+/// Convert a GraphQL Issue into our `Task` type. Issues have no
+/// branch/CI/reviewers — those fields stay empty / None / Default.
+/// Role is determined from author + assignees against `my_username`.
+pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
+    let repo = issue
+        .repository
+        .as_ref()
+        .map(|r| r.name_with_owner.clone())
+        .unwrap_or_else(|| extract_repo_from_url(&issue.url));
+
+    let is_author = issue
+        .author
+        .as_ref()
+        .map(|a| a.login == my_username)
+        .unwrap_or(false);
+    let is_assignee = issue
+        .assignees
+        .nodes
+        .iter()
+        .any(|a| a.login == my_username);
+    let role = if is_author {
+        TaskRole::Author
+    } else if is_assignee {
+        TaskRole::Assignee
+    } else {
+        TaskRole::Mentioned
+    };
+
+    let state = match issue.state.as_str() {
+        "OPEN" => TaskState::Open,
+        "CLOSED" => TaskState::Closed,
+        _ => TaskState::Open,
+    };
+
+    let comments: Vec<Activity> = issue
+        .comments
+        .nodes
+        .iter()
+        .filter(|c| c.author.is_some())
+        .map(|c| Activity {
+            author: c.author.as_ref().unwrap().login.clone(),
+            body: c.body.clone(),
+            created_at: c.created_at,
+            kind: ActivityKind::Comment,
+            node_id: c.id.clone(),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        })
+        .collect();
+
+    let needs_reply = comments
+        .last()
+        .map(|c| c.author != my_username)
+        .unwrap_or(false);
+    let last_commenter = comments
+        .iter()
+        .filter(|a| a.author != my_username)
+        .last()
+        .map(|a| a.author.clone());
+
+    Task {
+        id: TaskId {
+            source: "github".into(),
+            key: format!("{repo}#{}", issue.number),
+        },
+        title: issue.title.clone(),
+        body: issue.body.clone(),
+        state,
+        role,
+        ci: CiStatus::None,
+        review: ReviewStatus::None,
+        checks: vec![],
+        unread_count: comments.len() as u32,
+        url: issue.url.clone(),
+        repo: Some(repo),
+        branch: None,
+        base_branch: None,
+        updated_at: issue.updated_at,
+        labels: issue.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+        reviewers: vec![],
+        assignees: issue
+            .assignees
+            .nodes
+            .iter()
+            .map(|a| a.login.clone())
+            .collect(),
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        has_conflicts: false,
+        is_behind_base: false,
+        node_id: issue.id.clone(),
+        needs_reply,
+        last_commenter,
+        recent_activity: comments,
+        additions: 0,
+        deletions: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,5 +998,180 @@ mod tests {
         let q = build_query("bob", &["org:myorg".into()]);
         assert!(q.contains("org:myorg"));
         assert!(q.contains("involves:bob"));
+    }
+
+    // ── Issues ────────────────────────────────────────────────────────
+
+    #[test]
+    fn issues_query_filters_to_issues() {
+        let q = build_issues_query("alice", &[]);
+        assert!(q.contains("is:open"));
+        assert!(q.contains("is:issue"));
+        assert!(!q.contains("is:pr"));
+        assert!(q.contains("involves:alice"));
+    }
+
+    fn make_issue(
+        number: u64,
+        title: &str,
+        author: Option<&str>,
+        assignees: &[&str],
+    ) -> GqlIssue {
+        GqlIssue {
+            id: Some(format!("I_{number}")),
+            number,
+            title: title.into(),
+            body: None,
+            url: format!("https://github.com/o/r/issues/{number}"),
+            updated_at: chrono::Utc::now(),
+            state: "OPEN".into(),
+            author: author.map(|login| GqlAuthor {
+                login: login.into(),
+            }),
+            labels: GqlLabels { nodes: vec![] },
+            assignees: GqlAssignees {
+                nodes: assignees
+                    .iter()
+                    .map(|l| GqlAuthor {
+                        login: (*l).into(),
+                    })
+                    .collect(),
+            },
+            comments: GqlComments { nodes: vec![] },
+            repository: Some(GqlIssueRepo {
+                name_with_owner: "o/r".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn issue_to_task_author_role() {
+        let issue = make_issue(1, "something", Some("alice"), &[]);
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.role, TaskRole::Author);
+        assert_eq!(task.state, TaskState::Open);
+        assert_eq!(task.branch, None, "issues have no branch");
+        assert_eq!(task.ci, CiStatus::None);
+        assert_eq!(task.review, ReviewStatus::None);
+        assert_eq!(task.id.key, "o/r#1");
+        assert_eq!(task.id.source, "github");
+    }
+
+    #[test]
+    fn issue_to_task_assignee_role() {
+        let issue = make_issue(2, "t", Some("someone-else"), &["alice"]);
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.role, TaskRole::Assignee);
+        assert!(task.assignees.contains(&"alice".to_string()));
+    }
+
+    #[test]
+    fn issue_to_task_mentioned_role_when_neither() {
+        let issue = make_issue(3, "t", Some("other"), &["another"]);
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.role, TaskRole::Mentioned);
+    }
+
+    #[test]
+    fn issue_to_task_closed_state() {
+        let mut issue = make_issue(4, "done", Some("alice"), &[]);
+        issue.state = "CLOSED".into();
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.state, TaskState::Closed);
+    }
+
+    #[test]
+    fn issue_to_task_uses_repository_field_when_present() {
+        let mut issue = make_issue(5, "t", None, &[]);
+        issue.repository = Some(GqlIssueRepo {
+            name_with_owner: "other-org/other-repo".into(),
+        });
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.repo.as_deref(), Some("other-org/other-repo"));
+    }
+
+    #[test]
+    fn issue_to_task_falls_back_to_url_parsing() {
+        let mut issue = make_issue(6, "t", None, &[]);
+        issue.repository = None;
+        issue.url = "https://github.com/owner/repo/issues/6".into();
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.repo.as_deref(), Some("owner/repo"));
+    }
+
+    #[test]
+    fn issue_to_task_ingests_comments_as_activities() {
+        let mut issue = make_issue(7, "t", Some("alice"), &[]);
+        issue.comments = GqlComments {
+            nodes: vec![
+                GqlComment {
+                    id: Some("c1".into()),
+                    author: Some(GqlAuthor {
+                        login: "bob".into(),
+                    }),
+                    body: "first".into(),
+                    created_at: chrono::Utc::now(),
+                    path: None,
+                    line: None,
+                    original_line: None,
+                    diff_hunk: None,
+                },
+                GqlComment {
+                    id: Some("c2".into()),
+                    author: Some(GqlAuthor {
+                        login: "alice".into(),
+                    }),
+                    body: "reply".into(),
+                    created_at: chrono::Utc::now(),
+                    path: None,
+                    line: None,
+                    original_line: None,
+                    diff_hunk: None,
+                },
+            ],
+        };
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.recent_activity.len(), 2);
+        assert_eq!(task.recent_activity[0].author, "bob");
+        assert_eq!(task.recent_activity[0].kind, ActivityKind::Comment);
+        // Last comment is me — so no reply needed.
+        assert!(!task.needs_reply);
+    }
+
+    #[test]
+    fn issue_to_task_needs_reply_when_last_comment_is_from_other() {
+        let mut issue = make_issue(8, "t", Some("alice"), &[]);
+        issue.comments = GqlComments {
+            nodes: vec![GqlComment {
+                id: Some("c1".into()),
+                author: Some(GqlAuthor {
+                    login: "bob".into(),
+                }),
+                body: "question".into(),
+                created_at: chrono::Utc::now(),
+                path: None,
+                line: None,
+                original_line: None,
+                diff_hunk: None,
+            }],
+        };
+        let task = issue_to_task(&issue, "alice");
+        assert!(task.needs_reply);
+        assert_eq!(task.last_commenter.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn issues_query_body_omits_after_when_none() {
+        let body = issues_query_body("test", None);
+        let vars = &body["variables"];
+        assert!(vars.get("after").is_none(), "after must be omitted");
+        assert_eq!(vars["first"], 100);
+        assert_eq!(vars["query"], "test");
+    }
+
+    #[test]
+    fn issues_query_body_includes_after_when_set() {
+        let body = issues_query_body("test", Some("cursor-abc"));
+        assert_eq!(body["variables"]["after"], "cursor-abc");
     }
 }
