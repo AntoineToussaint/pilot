@@ -22,6 +22,27 @@ pub struct Worktree {
     pub branch: String,
 }
 
+/// Where `link_at` is relative to the worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Resolve `link_at` inside the worktree's root. The link looks
+    /// like part of the repo from a process running inside.
+    Inside,
+    /// Resolve `link_at` one level above the worktree, in the sibling
+    /// space shared with every other worktree of every repo. Use for
+    /// caches and other things genuinely shared across checkouts.
+    Above,
+}
+
+/// One mount. `source` is an absolute path on the host; `link_at` is
+/// the name/path we symlink it to, interpreted per `placement`.
+#[derive(Debug, Clone)]
+pub struct Mount {
+    pub source: PathBuf,
+    pub link_at: PathBuf,
+    pub placement: Placement,
+}
+
 /// Manages git worktrees under a base directory.
 ///
 /// Layout:
@@ -233,6 +254,102 @@ impl WorktreeManager {
             path: wt_path,
             branch: new_branch.into(),
         })
+    }
+
+    /// Apply configured mount points to a worktree. Each mount creates
+    /// a symlink from `source` to `link_at`, where `link_at` is either
+    /// a path relative to the worktree root (`Placement::Inside`) or
+    /// one level above the worktree (`Placement::Above`).
+    ///
+    /// Why:
+    /// - `Inside` is for things that should LOOK like they're part of
+    ///   the repo: shared configs, test fixtures, credential dirs the
+    ///   code inside the worktree can read.
+    /// - `Above` is for things shared ACROSS all worktrees: a single
+    ///   `node_modules`, a shared cargo target, a mounted doc set.
+    ///
+    /// Idempotent. If `link_at` already exists and points to the same
+    /// `source`, the call is a no-op. If it exists but points elsewhere,
+    /// we error — we won't silently replace the user's symlinks.
+    ///
+    /// Parent directories for `link_at` are created as needed.
+    pub async fn apply_mounts(
+        &self,
+        worktree: &Worktree,
+        mounts: &[Mount],
+    ) -> Result<(), GitError> {
+        for mount in mounts {
+            let target = match mount.placement {
+                Placement::Inside => worktree.path.join(&mount.link_at),
+                Placement::Above => {
+                    let parent = worktree
+                        .path
+                        .parent()
+                        .ok_or_else(|| {
+                            GitError::Command(
+                                "worktree has no parent directory".into(),
+                            )
+                        })?;
+                    parent.join(&mount.link_at)
+                }
+            };
+
+            if let Some(parent) = target.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
+            // Idempotent path: if the link already points where we
+            // want, nothing to do. If it points elsewhere, refuse.
+            if target.exists() || target.is_symlink() {
+                match tokio::fs::read_link(&target).await {
+                    Ok(existing) if existing == mount.source => continue,
+                    Ok(other) => {
+                        return Err(GitError::Command(format!(
+                            "mount {} already exists but points to {} (expected {})",
+                            target.display(),
+                            other.display(),
+                            mount.source.display()
+                        )));
+                    }
+                    Err(_) => {
+                        return Err(GitError::Command(format!(
+                            "mount target {} exists and is not a symlink",
+                            target.display()
+                        )));
+                    }
+                }
+            }
+
+            // Symlink. Use async-safe std::os path since tokio doesn't
+            // expose a Unix-specific symlink helper.
+            tokio::task::spawn_blocking({
+                let source = mount.source.clone();
+                let target = target.clone();
+                move || {
+                    #[cfg(unix)]
+                    {
+                        std::os::unix::fs::symlink(&source, &target)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        // v2.0 targets Unix; windows support is out of scope.
+                        Err(std::io::Error::other(
+                            "mount points require Unix symlinks",
+                        ))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| GitError::Command(format!("symlink task: {e}")))?
+            .map_err(|e| {
+                GitError::Command(format!(
+                    "symlink {} -> {}: {e}",
+                    target.display(),
+                    mount.source.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     /// List all active worktrees.

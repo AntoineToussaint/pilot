@@ -26,6 +26,41 @@ pub struct Config {
     pub agent: AgentSection,
     pub shell: ShellSection,
     pub hooks: HooksConfig,
+    pub worktree: WorktreeConfig,
+}
+
+/// Worktree-layout configuration — mount points, mostly. The daemon
+/// calls `WorktreeManager::apply_mounts` after every checkout with
+/// the list assembled from this section so users see consistent
+/// layouts across every session.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WorktreeConfig {
+    /// Paths to symlink into / above each worktree. See
+    /// `pilot_git_ops::Mount` for semantics.
+    pub mounts: Vec<MountSpec>,
+}
+
+/// Serializable form of `pilot_git_ops::Mount`. Kept separate so
+/// config doesn't depend on git-ops; the daemon converts on the way
+/// in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountSpec {
+    /// Absolute host path (or `~/...`; expanded on load).
+    pub source: PathBuf,
+    /// Path relative to either the worktree root or one level up.
+    pub link_at: PathBuf,
+    /// `"inside"` (default) or `"above"`.
+    #[serde(default)]
+    pub placement: PlacementSpec,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PlacementSpec {
+    #[default]
+    Inside,
+    Above,
 }
 
 /// Periodic scripts pilot runs to keep the user's environment tidy —
