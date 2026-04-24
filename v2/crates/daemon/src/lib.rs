@@ -11,6 +11,7 @@
 //! worktree management, agent hook plumbing, and LLM proxy integration
 //! land on top of this core in the order described in `../DESIGN.md`.
 
+pub mod agent_spawn;
 pub mod pty;
 
 use pilot_v2_agents::Registry;

@@ -138,6 +138,11 @@ pub enum Event {
         title: String,
         body: String,
     },
+    /// Structured telemetry from the LLM proxy: one record per
+    /// request/response the agent made through the daemon-injected
+    /// HTTP proxy. Clients use this to populate the Cost/Tokens tile
+    /// and the tool-call activity timeline.
+    ProxyRecord(pilot_v2_llm_proxy::ProxyRecord),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

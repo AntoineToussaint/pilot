@@ -13,8 +13,9 @@ pilot-config     = { workspace = true }
 pilot-gh         = { workspace = true }
 pilot-git-ops    = { workspace = true }
 pilot-tui-term   = { workspace = true }
-pilot-v2-ipc     = { workspace = true }
-pilot-v2-agents  = { workspace = true }
+pilot-v2-ipc       = { workspace = true }
+pilot-v2-agents    = { workspace = true }
+pilot-v2-llm-proxy = { workspace = true }
 
 tokio            = { workspace = true }
 serde            = { workspace = true }
@@ -24,3 +25,10 @@ tracing          = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono           = { workspace = true }
 portable-pty     = "0.8"
+
+[dev-dependencies]
+bytes          = "1"
+hyper          = { version = "1", features = ["server", "http1"] }
+hyper-util     = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
+tokio          = { workspace = true, features = ["full", "test-util"] }

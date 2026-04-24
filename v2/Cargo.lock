@@ -1788,7 +1788,11 @@ name = "pilot-v2-daemon"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "pilot-auth",
  "pilot-config",
  "pilot-core",
@@ -1799,6 +1803,7 @@ dependencies = [
  "pilot-tui-term",
  "pilot-v2-agents",
  "pilot-v2-ipc",
+ "pilot-v2-llm-proxy",
  "portable-pty",
  "serde",
  "thiserror 1.0.69",
@@ -1814,6 +1819,7 @@ dependencies = [
  "bincode",
  "chrono",
  "pilot-core",
+ "pilot-v2-llm-proxy",
  "proptest",
  "serde",
  "thiserror 1.0.69",
