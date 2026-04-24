@@ -146,7 +146,11 @@ impl GqlError {
         {
             let path_str = path
                 .iter()
-                .filter_map(|v| v.as_str().map(String::from).or_else(|| v.as_u64().map(|n| n.to_string())))
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .or_else(|| v.as_u64().map(|n| n.to_string()))
+                })
                 .collect::<Vec<_>>()
                 .join(".");
             s.push_str(&format!(" [at {path_str}]"));
@@ -451,11 +455,18 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     let repo = extract_repo_from_url(&pr.url);
 
     // Determine role.
-    let is_author = pr.author.as_ref().map(|a| a.login == my_username).unwrap_or(false);
+    let is_author = pr
+        .author
+        .as_ref()
+        .map(|a| a.login == my_username)
+        .unwrap_or(false);
     // Did I already approve this PR?
     let i_approved = pr.reviews.nodes.iter().any(|r| {
         r.state == "APPROVED"
-            && r.author.as_ref().map(|a| a.login == my_username).unwrap_or(false)
+            && r.author
+                .as_ref()
+                .map(|a| a.login == my_username)
+                .unwrap_or(false)
     });
     let role = if is_author {
         TaskRole::Author
@@ -490,9 +501,15 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
 
     // Issue comments.
     for c in &pr.comments.nodes {
-        if c.body.trim().is_empty() { continue; }
+        if c.body.trim().is_empty() {
+            continue;
+        }
         activities.push(Activity {
-            author: c.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "?".into()),
+            author: c
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_else(|| "?".into()),
             body: c.body.clone(),
             created_at: c.created_at,
             kind: ActivityKind::Comment,
@@ -507,15 +524,27 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     // Review threads (with resolution + outdated status).
     for thread in &pr.review_threads.nodes {
         // Thread-level path/line fall back to the first comment's values.
-        let thread_path = thread.path.clone()
+        let thread_path = thread
+            .path
+            .clone()
             .or_else(|| thread.comments.nodes.first().and_then(|c| c.path.clone()));
-        let thread_line = thread.line
-            .or(thread.original_line)
-            .or_else(|| thread.comments.nodes.first().and_then(|c| c.line.or(c.original_line)));
+        let thread_line = thread.line.or(thread.original_line).or_else(|| {
+            thread
+                .comments
+                .nodes
+                .first()
+                .and_then(|c| c.line.or(c.original_line))
+        });
 
         for (i, c) in thread.comments.nodes.iter().enumerate() {
-            let author = c.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "?".into());
-            if c.body.trim().is_empty() { continue; }
+            let author = c
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_else(|| "?".into());
+            if c.body.trim().is_empty() {
+                continue;
+            }
             let mut body = c.body.clone();
 
             // Prefix with context.
@@ -566,7 +595,11 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             format!("✓ {}", r.state)
         };
         activities.push(Activity {
-            author: r.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "?".into()),
+            author: r
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_else(|| "?".into()),
             body: display,
             created_at: r.submitted_at.unwrap_or(pr.updated_at),
             kind: ActivityKind::Review,
@@ -583,14 +616,18 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     // Needs reply: check three signals.
     let needs_reply = needs_reply_check(pr, my_username);
 
-    let last_commenter = activities.first()
+    let last_commenter = activities
+        .first()
         .filter(|a| a.author != my_username)
         .map(|a| a.author.clone());
 
     let unread_count = activities.len() as u32;
 
     Task {
-        id: TaskId { source: "github".into(), key: format!("{repo}#{}", pr.number) },
+        id: TaskId {
+            source: "github".into(),
+            key: format!("{repo}#{}", pr.number),
+        },
         title: pr.title.clone(),
         body: pr.body.clone(),
         state,
@@ -609,16 +646,17 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         },
         updated_at: pr.updated_at,
         labels: pr.labels.nodes.iter().map(|l| l.name.clone()).collect(),
-        reviewers: pr.review_requests.nodes.iter()
+        reviewers: pr
+            .review_requests
+            .nodes
+            .iter()
             .filter_map(|rr| rr.requested_reviewer.as_ref())
             .map(|rr| match rr {
                 GqlRequestedReviewer::User { login } => login.clone(),
                 GqlRequestedReviewer::Team { name } => format!("team/{name}"),
             })
             .collect(),
-        assignees: pr.assignees.nodes.iter()
-            .map(|a| a.login.clone())
-            .collect(),
+        assignees: pr.assignees.nodes.iter().map(|a| a.login.clone()).collect(),
         auto_merge_enabled: pr.auto_merge_request.is_some(),
         is_in_merge_queue: pr.is_in_merge_queue,
         has_conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
@@ -643,29 +681,53 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
         }
         if let Some(last) = t.comments.nodes.last()
             && let Some(author) = &last.author
-                && author.login != my_username {
-                    return true;
-                }
+            && author.login != my_username
+        {
+            return true;
+        }
     }
 
     // 2. Latest issue comment is from someone else (and after our last response).
-    let my_last_comment = pr.comments.nodes.iter()
-        .filter(|c| c.author.as_ref().map(|a| a.login == my_username).unwrap_or(false))
+    let my_last_comment = pr
+        .comments
+        .nodes
+        .iter()
+        .filter(|c| {
+            c.author
+                .as_ref()
+                .map(|a| a.login == my_username)
+                .unwrap_or(false)
+        })
         .map(|c| c.created_at)
         .max();
-    let last_others_comment = pr.comments.nodes.iter()
-        .filter(|c| c.author.as_ref().map(|a| a.login != my_username).unwrap_or(false))
+    let last_others_comment = pr
+        .comments
+        .nodes
+        .iter()
+        .filter(|c| {
+            c.author
+                .as_ref()
+                .map(|a| a.login != my_username)
+                .unwrap_or(false)
+        })
         .map(|c| c.created_at)
         .max();
     if let Some(other) = last_others_comment
-        && my_last_comment.map(|m| other > m).unwrap_or(true) {
-            return true;
-        }
+        && my_last_comment.map(|m| other > m).unwrap_or(true)
+    {
+        return true;
+    }
 
     // 3. Latest review with body from someone else (after our last review/comment).
-    let last_others_review = pr.reviews.nodes.iter()
+    let last_others_review = pr
+        .reviews
+        .nodes
+        .iter()
         .filter(|r| {
-            r.author.as_ref().map(|a| a.login != my_username).unwrap_or(false)
+            r.author
+                .as_ref()
+                .map(|a| a.login != my_username)
+                .unwrap_or(false)
                 && r.body.as_deref().map(|b| !b.is_empty()).unwrap_or(false)
         })
         .filter_map(|r| r.submitted_at)
@@ -708,18 +770,29 @@ fn extract_check_runs(pr: &GqlPr) -> Vec<CheckRun> {
         .nodes
         .iter()
         .map(|ctx| match ctx {
-            GqlCheckContext::CheckRun { name, conclusion, permalink, .. } => CheckRun {
+            GqlCheckContext::CheckRun {
+                name,
+                conclusion,
+                permalink,
+                ..
+            } => CheckRun {
                 name: name.clone(),
                 status: match conclusion.as_deref() {
                     Some("SUCCESS") => CiStatus::Success,
-                    Some("FAILURE") | Some("ACTION_REQUIRED") | Some("TIMED_OUT") => CiStatus::Failure,
+                    Some("FAILURE") | Some("ACTION_REQUIRED") | Some("TIMED_OUT") => {
+                        CiStatus::Failure
+                    }
                     Some("CANCELLED") => CiStatus::Failure,
                     Some(_) => CiStatus::None,
                     None => CiStatus::Running,
                 },
                 url: permalink.clone(),
             },
-            GqlCheckContext::StatusContext { context, state, target_url } => CheckRun {
+            GqlCheckContext::StatusContext {
+                context,
+                state,
+                target_url,
+            } => CheckRun {
                 name: context.clone(),
                 status: match state.as_str() {
                     "SUCCESS" => CiStatus::Success,
@@ -877,11 +950,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         .as_ref()
         .map(|a| a.login == my_username)
         .unwrap_or(false);
-    let is_assignee = issue
-        .assignees
-        .nodes
-        .iter()
-        .any(|a| a.login == my_username);
+    let is_assignee = issue.assignees.nodes.iter().any(|a| a.login == my_username);
     let role = if is_author {
         TaskRole::Author
     } else if is_assignee {
@@ -1011,12 +1080,7 @@ mod tests {
         assert!(q.contains("involves:alice"));
     }
 
-    fn make_issue(
-        number: u64,
-        title: &str,
-        author: Option<&str>,
-        assignees: &[&str],
-    ) -> GqlIssue {
+    fn make_issue(number: u64, title: &str, author: Option<&str>, assignees: &[&str]) -> GqlIssue {
         GqlIssue {
             id: Some(format!("I_{number}")),
             number,
@@ -1032,9 +1096,7 @@ mod tests {
             assignees: GqlAssignees {
                 nodes: assignees
                     .iter()
-                    .map(|l| GqlAuthor {
-                        login: (*l).into(),
-                    })
+                    .map(|l| GqlAuthor { login: (*l).into() })
                     .collect(),
             },
             comments: GqlComments { nodes: vec![] },

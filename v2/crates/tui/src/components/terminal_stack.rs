@@ -261,7 +261,8 @@ impl Component for TerminalStack {
                 }
             }
             Event::SessionRemoved(session_key) => {
-                self.terminals.retain(|_, slot| slot.session_key != *session_key);
+                self.terminals
+                    .retain(|_, slot| slot.session_key != *session_key);
                 self.clamp_active_tab();
             }
             _ => {}
@@ -291,11 +292,7 @@ impl Component for TerminalStack {
         }
 
         // Row 0: tab bar; row 1..: active terminal content.
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(inner);
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
 
         let tab_bar: Vec<Span> = visible
             .iter()
@@ -319,10 +316,7 @@ impl Component for TerminalStack {
                     Color::Reset
                 };
                 vec![
-                    Span::styled(
-                        format!(" {label} "),
-                        Style::default().fg(fg).bg(bg).bold(),
-                    ),
+                    Span::styled(format!(" {label} "), Style::default().fg(fg).bg(bg).bold()),
                     Span::raw(" "),
                 ]
             })
@@ -390,10 +384,7 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
                             i += 1;
                             break;
                         }
-                        if input[i] == 0x1b
-                            && i + 1 < input.len()
-                            && input[i + 1] == b'\\'
-                        {
+                        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
                             i += 2;
                             break;
                         }

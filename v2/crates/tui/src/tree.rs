@@ -69,13 +69,8 @@ impl MountError {
 impl std::fmt::Debug for MountError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MountError::MissingParent(c) => f
-                .debug_tuple("MissingParent")
-                .field(&c.id())
-                .finish(),
-            MountError::DuplicateId(c) => {
-                f.debug_tuple("DuplicateId").field(&c.id()).finish()
-            }
+            MountError::MissingParent(c) => f.debug_tuple("MissingParent").field(&c.id()).finish(),
+            MountError::DuplicateId(c) => f.debug_tuple("DuplicateId").field(&c.id()).finish(),
         }
     }
 }
@@ -235,10 +230,7 @@ impl ComponentTree {
     }
 
     pub fn children_of(&self, id: ComponentId) -> &[ComponentId] {
-        self.children
-            .get(&id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.children.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Move focus to `id`. No-op if `id` isn't in the tree.
@@ -359,14 +351,6 @@ impl ComponentTree {
         if let Some(comp) = self.components.get_mut(&id) {
             comp.render(area, frame, focused);
         }
-    }
-
-    // ── Test / introspection hooks ─────────────────────────────────────
-
-    /// Look up a component by id for test assertions.
-    #[cfg(test)]
-    pub(crate) fn component(&self, id: ComponentId) -> Option<&dyn Component> {
-        self.components.get(&id).map(|b| b.as_ref())
     }
 
     pub fn component_count(&self) -> usize {

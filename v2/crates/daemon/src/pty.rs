@@ -13,9 +13,7 @@
 //! stream of new bytes. Dropped subscribers are cleaned up in the
 //! main loop when `send` errors.
 
-use portable_pty::{
-    CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem,
-};
+use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -296,9 +294,7 @@ impl DaemonPty {
     /// once per PTY; subsequent calls return None.
     pub async fn wait_exit(&self) -> Option<i32> {
         let mut slot = self.exit_rx.lock().await;
-        let Some(rx) = slot.take() else {
-            return None;
-        };
+        let rx = slot.take()?;
         rx.await.ok().flatten()
     }
 

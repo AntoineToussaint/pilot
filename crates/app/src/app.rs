@@ -6,7 +6,7 @@ use futures::StreamExt;
 use pilot_auth::{CommandProvider, CredentialChain, EnvProvider};
 use pilot_config::Config;
 use pilot_core::{Session, SessionState};
-use pilot_events::{event_bus, EventProducer};
+use pilot_events::{EventProducer, event_bus};
 use pilot_gh::{GhClient, GhPoller};
 use pilot_store::{SqliteStore, Store};
 use pilot_tui_term::{PtySize, TermSession};
@@ -16,9 +16,7 @@ use tokio::sync::mpsc;
 use crate::action::{Action, ShellKind};
 use crate::input::{InputMode, TextInputKind};
 use crate::keys;
-use crate::nav::{
-    resort_sessions, selected_session_from_nav, handle_sidebar_click,
-};
+use crate::nav::{handle_sidebar_click, resort_sessions, selected_session_from_nav};
 use crate::pane::PaneContent;
 use crate::session_manager::SessionManager;
 use crate::terminal_manager::TerminalManager;
@@ -104,7 +102,8 @@ impl App {
     /// Get the currently selected session (if cursor is on one).
     #[allow(dead_code)]
     pub fn selected_session(&self) -> Option<&Session> {
-        self.selected_session_key().and_then(|k| self.state.sessions.get(&k))
+        self.selected_session_key()
+            .and_then(|k| self.state.sessions.get(&k))
     }
 
     /// Close a terminal and clean up ALL associated state — including the
@@ -120,8 +119,7 @@ impl App {
         // stale "asking" / "idle" from the previous run.
         crate::claude_hooks::clear_state(key);
         // Sweep any pane leaves still pointing at dead terminal keys.
-        let live: std::collections::BTreeSet<String> =
-            self.terminals.keys().cloned().collect();
+        let live: std::collections::BTreeSet<String> = self.terminals.keys().cloned().collect();
         self.state.panes.prune_dead_terminals(&live);
         // Recompute input_mode from the (now-pruned) pane tree.
         apply_determined_mode(self);
@@ -189,7 +187,10 @@ impl App {
                     }
                 }
             }
-            C::StoreMarkRead { task_id, seen_count } => {
+            C::StoreMarkRead {
+                task_id,
+                seen_count,
+            } => {
                 if let Err(e) = self.store.mark_read(&task_id, seen_count) {
                     tracing::warn!("mark_read: {e}");
                 }
@@ -208,9 +209,13 @@ impl App {
                 tokio::spawn(async move {
                     let out = tokio::process::Command::new("curl")
                         .args([
-                            "-s", "-X", "POST",
-                            "-H", "Content-Type: application/json",
-                            "-d", &serde_json::to_string(&body).unwrap_or_default(),
+                            "-s",
+                            "-X",
+                            "POST",
+                            "-H",
+                            "Content-Type: application/json",
+                            "-d",
+                            &serde_json::to_string(&body).unwrap_or_default(),
                             &url,
                         ])
                         .output()
@@ -222,7 +227,11 @@ impl App {
             }
 
             // ── gh CLI ──
-            C::RunGhMerge { repo, pr_number, session_key } => {
+            C::RunGhMerge {
+                repo,
+                pr_number,
+                session_key,
+            } => {
                 let tx = action_tx.clone();
                 tokio::spawn(async move {
                     let out = tokio::process::Command::new("gh")
@@ -232,7 +241,8 @@ impl App {
                     match out {
                         Ok(o) if o.status.success() => {
                             let _ = tx.send(Action::MergeCompleted { session_key });
-                            let _ = tx.send(Action::StatusMessage(format!("Merged {repo}#{pr_number}")));
+                            let _ = tx
+                                .send(Action::StatusMessage(format!("Merged {repo}#{pr_number}")));
                         }
                         Ok(o) => {
                             let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
@@ -253,11 +263,14 @@ impl App {
                         .await;
                     match out {
                         Ok(o) if o.status.success() => {
-                            let _ = tx.send(Action::StatusMessage(format!("Approved {repo}#{pr_number}")));
+                            let _ = tx.send(Action::StatusMessage(format!(
+                                "Approved {repo}#{pr_number}"
+                            )));
                         }
                         Ok(o) => {
                             let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                            let _ = tx.send(Action::StatusMessage(format!("Approve failed: {err}")));
+                            let _ =
+                                tx.send(Action::StatusMessage(format!("Approve failed: {err}")));
                         }
                         Err(e) => {
                             let _ = tx.send(Action::StatusMessage(format!("Approve error: {e}")));
@@ -265,7 +278,11 @@ impl App {
                     }
                 });
             }
-            C::RunGhUpdateBranch { repo, pr_number, session_key } => {
+            C::RunGhUpdateBranch {
+                repo,
+                pr_number,
+                session_key,
+            } => {
                 // `gh api -X PUT /repos/<repo>/pulls/<num>/update-branch` is
                 // the exact same API the github.com "Update branch" button
                 // uses. Works for both merge and rebase — GitHub chooses
@@ -296,26 +313,37 @@ impl App {
                             )));
                         }
                         Err(e) => {
-                            let _ = tx.send(Action::StatusMessage(format!(
-                                "Update branch error: {e}"
-                            )));
+                            let _ =
+                                tx.send(Action::StatusMessage(format!("Update branch error: {e}")));
                         }
                     }
                 });
             }
-            C::RunGhComment { repo, pr_number, body, reply_to_node_id } => {
+            C::RunGhComment {
+                repo,
+                pr_number,
+                body,
+                reply_to_node_id,
+            } => {
                 let tx = action_tx.clone();
                 tokio::spawn(async move {
                     let mut args = vec![
-                        "pr".to_string(), "comment".to_string(),
-                        pr_number, "--body".to_string(), body,
-                        "--repo".to_string(), repo,
+                        "pr".to_string(),
+                        "comment".to_string(),
+                        pr_number,
+                        "--body".to_string(),
+                        body,
+                        "--repo".to_string(),
+                        repo,
                     ];
                     if let Some(id) = reply_to_node_id {
                         args.push("--reply-to".into());
                         args.push(id);
                     }
-                    let out = tokio::process::Command::new("gh").args(&args).output().await;
+                    let out = tokio::process::Command::new("gh")
+                        .args(&args)
+                        .output()
+                        .await;
                     match out {
                         Ok(o) if o.status.success() => {
                             let _ = tx.send(Action::StatusMessage("Reply posted".into()));
@@ -330,7 +358,13 @@ impl App {
                     }
                 });
             }
-            C::RunGhEditCollaborators { repo, pr_number, kind, added, removed } => {
+            C::RunGhEditCollaborators {
+                repo,
+                pr_number,
+                kind,
+                added,
+                removed,
+            } => {
                 use crate::action::PickerKind;
                 let (add_flag, remove_flag) = match kind {
                     PickerKind::Reviewer => ("--add-reviewer", "--remove-reviewer"),
@@ -339,12 +373,24 @@ impl App {
                 let tx = action_tx.clone();
                 tokio::spawn(async move {
                     let mut args = vec![
-                        "pr".to_string(), "edit".to_string(), pr_number,
-                        "--repo".to_string(), repo,
+                        "pr".to_string(),
+                        "edit".to_string(),
+                        pr_number,
+                        "--repo".to_string(),
+                        repo,
                     ];
-                    for user in &added { args.push(add_flag.into()); args.push(user.clone()); }
-                    for user in &removed { args.push(remove_flag.into()); args.push(user.clone()); }
-                    let out = tokio::process::Command::new("gh").args(&args).output().await;
+                    for user in &added {
+                        args.push(add_flag.into());
+                        args.push(user.clone());
+                    }
+                    for user in &removed {
+                        args.push(remove_flag.into());
+                        args.push(user.clone());
+                    }
+                    let out = tokio::process::Command::new("gh")
+                        .args(&args)
+                        .output()
+                        .await;
                     match out {
                         Ok(o) if o.status.success() => {
                             let _ = tx.send(Action::StatusMessage("Collaborators updated".into()));
@@ -359,22 +405,30 @@ impl App {
                     }
                 });
             }
-            C::FetchCollaborators { repo, kind, session_key, pr_number } => {
+            C::FetchCollaborators {
+                repo,
+                kind,
+                session_key,
+                pr_number,
+            } => {
                 let tx = action_tx.clone();
                 tokio::spawn(async move {
                     // Fetch repo collaborators via gh CLI.
                     let out = tokio::process::Command::new("gh")
-                        .args(["api", &format!("repos/{repo}/collaborators"), "--jq", ".[].login"])
+                        .args([
+                            "api",
+                            &format!("repos/{repo}/collaborators"),
+                            "--jq",
+                            ".[].login",
+                        ])
                         .output()
                         .await;
                     let collaborators: Vec<String> = match out {
-                        Ok(o) if o.status.success() => {
-                            String::from_utf8_lossy(&o.stdout)
-                                .lines()
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        }
+                        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                            .lines()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
                         _ => vec![],
                     };
                     let _ = tx.send(Action::CollaboratorsLoaded(Box::new(
@@ -389,7 +443,14 @@ impl App {
                     )));
                 });
             }
-            C::CheckoutWorktree { owner, repo, branch, base, session_key, then } => {
+            C::CheckoutWorktree {
+                owner,
+                repo,
+                branch,
+                base,
+                session_key,
+                then,
+            } => {
                 let tx = action_tx.clone();
                 tracing::info!(
                     "CheckoutWorktree start: {owner}/{repo} branch={branch} base={base:?} key={session_key}"
@@ -412,8 +473,13 @@ impl App {
                                 "CheckoutWorktree ok ({elapsed:?}): path={}",
                                 wt.path.display()
                             );
-                            let _ = tx.send(Action::WorktreeReady { session_key, path: wt.path });
-                            if let Some(a) = then { let _ = tx.send(*a); }
+                            let _ = tx.send(Action::WorktreeReady {
+                                session_key,
+                                path: wt.path,
+                            });
+                            if let Some(a) = then {
+                                let _ = tx.send(*a);
+                            }
                         }
                         Err(e) => {
                             tracing::error!("CheckoutWorktree failed ({elapsed:?}): {e}");
@@ -430,35 +496,46 @@ impl App {
                 tokio::spawn(async move {
                     let out = tokio::process::Command::new("gh")
                         .args([
-                            "api", &format!("repos/{owner}/{repo}"),
-                            "--jq", ".default_branch",
+                            "api",
+                            &format!("repos/{owner}/{repo}"),
+                            "--jq",
+                            ".default_branch",
                         ])
                         .output()
                         .await;
                     if let Ok(o) = out
-                        && o.status.success() {
-                            let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if !b.is_empty() {
-                                let _ = tx.send(Action::CacheDefaultBranch {
-                                    repo: format!("{owner}/{repo}"),
-                                    branch: b,
-                                });
-                            }
+                        && o.status.success()
+                    {
+                        let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if !b.is_empty() {
+                            let _ = tx.send(Action::CacheDefaultBranch {
+                                repo: format!("{owner}/{repo}"),
+                                branch: b,
+                            });
                         }
+                    }
                 });
             }
 
             // ── Terminal ──
             C::WriteToTerminal { session_key, bytes } => {
                 if let Some(term) = self.terminals.get_mut(&session_key)
-                    && let Err(e) = term.write(&bytes) {
-                        tracing::error!("terminal write: {e}");
-                    }
+                    && let Err(e) = term.write(&bytes)
+                {
+                    tracing::error!("terminal write: {e}");
+                }
             }
-            C::ResizeTerminal { session_key, cols, rows } => {
+            C::ResizeTerminal {
+                session_key,
+                cols,
+                rows,
+            } => {
                 if let Some(term) = self.terminals.get_mut(&session_key) {
                     let _ = term.resize(pilot_tui_term::PtySize {
-                        cols, rows, pixel_width: 0, pixel_height: 0,
+                        cols,
+                        rows,
+                        pixel_width: 0,
+                        pixel_height: 0,
                     });
                 }
             }
@@ -480,31 +557,38 @@ impl App {
             C::FocusTerminalPane { session_key } => {
                 let key_str: &str = session_key.as_str();
                 // Retarget or create a terminal pane for this key, then focus it.
-                let existing = self.state.panes.find_pane(
-                    |c| matches!(c, PaneContent::Terminal(_))
-                );
+                let existing = self
+                    .state
+                    .panes
+                    .find_pane(|c| matches!(c, PaneContent::Terminal(_)));
                 match existing {
                     Some(term_id) => {
-                        self.state.panes.set_content(
-                            term_id,
-                            PaneContent::Terminal(key_str.to_string()),
-                        );
+                        self.state
+                            .panes
+                            .set_content(term_id, PaneContent::Terminal(key_str.to_string()));
                         self.state.panes.focus(term_id);
                     }
                     None => {
-                        if let Some(detail_id) = self.state.panes.find_pane(
-                            |c| matches!(c, PaneContent::Detail(_))
-                        ) {
+                        if let Some(detail_id) = self
+                            .state
+                            .panes
+                            .find_pane(|c| matches!(c, PaneContent::Detail(_)))
+                        {
                             self.state.panes.focused = detail_id;
-                            self.state.panes.split_vertical_above(
-                                PaneContent::Terminal(key_str.to_string()),
-                            );
+                            self.state
+                                .panes
+                                .split_vertical_above(PaneContent::Terminal(key_str.to_string()));
                         }
                     }
                 }
                 apply_determined_mode(self);
             }
-            C::SpawnTerminal { session_key, cwd, kind, focus } => {
+            C::SpawnTerminal {
+                session_key,
+                cwd,
+                kind,
+                focus,
+            } => {
                 spawn_terminal(self, &session_key, cwd, kind, focus);
             }
 
@@ -520,9 +604,13 @@ impl App {
                 tokio::spawn(async move {
                     let out = tokio::process::Command::new("gh")
                         .args([
-                            "pr", "view", &pr_number,
-                            "--repo", &repo,
-                            "--json", "mergeable",
+                            "pr",
+                            "view",
+                            &pr_number,
+                            "--repo",
+                            &repo,
+                            "--json",
+                            "mergeable",
                         ])
                         .output()
                         .await;
@@ -530,8 +618,7 @@ impl App {
                         Ok(o) if o.status.success() => {
                             let json: serde_json::Value =
                                 serde_json::from_slice(&o.stdout).unwrap_or_default();
-                            json.get("mergeable").and_then(|v| v.as_str())
-                                == Some("CONFLICTING")
+                            json.get("mergeable").and_then(|v| v.as_str()) == Some("CONFLICTING")
                         }
                         _ => false,
                     };
@@ -573,11 +660,12 @@ impl App {
                                 .output()
                                 .await;
                             if let Ok(p) = push
-                                && p.status.success() {
-                                    let _ = tx.send(Action::MonitorTick { session_key });
-                                } else {
-                                    tracing::error!("Monitor: push after rebase failed");
-                                }
+                                && p.status.success()
+                            {
+                                let _ = tx.send(Action::MonitorTick { session_key });
+                            } else {
+                                tracing::error!("Monitor: push after rebase failed");
+                            }
                         }
                         _ => {
                             tracing::warn!("Monitor: rebase failed, aborting");
@@ -621,7 +709,10 @@ impl App {
                     let _ = tx.send(Action::TmuxSessionsRefreshed { sessions });
                 });
             }
-            C::WriteMonitorContext { session_key, content } => {
+            C::WriteMonitorContext {
+                session_key,
+                content,
+            } => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                 let context_dir = std::path::PathBuf::from(&home)
                     .join(".pilot")
@@ -631,7 +722,8 @@ impl App {
                 } else {
                     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
                     let safe_key = session_key.replace([':', '/'], "_");
-                    let context_file = context_dir.join(format!("{safe_key}_monitor_{timestamp}.md"));
+                    let context_file =
+                        context_dir.join(format!("{safe_key}_monitor_{timestamp}.md"));
                     if let Err(e) = std::fs::write(&context_file, &content) {
                         tracing::error!("Failed to write monitor context: {e}");
                     } else {
@@ -643,7 +735,10 @@ impl App {
             }
 
             // ── Shared state write-through ──
-            C::UpdateMonitoredSet { session_key, monitored } => {
+            C::UpdateMonitoredSet {
+                session_key,
+                monitored,
+            } => {
                 let mut set = lock_monitored(&self.monitored_sessions);
                 if monitored {
                     set.insert(session_key.to_string());
@@ -666,9 +761,10 @@ impl App {
             self.state.viewing_since = None;
         }
         if let Some(task_id) = parse_task_id(key)
-            && let Err(e) = self.store.delete_session(&task_id) {
-                tracing::error!("Failed to delete session {key} from store: {e}");
-            }
+            && let Err(e) = self.store.delete_session(&task_id)
+        {
+            tracing::error!("Failed to delete session {key} from store: {e}");
+        }
     }
 
     /// Run cross-cutting invariants that repair the UI state. Called after
@@ -700,8 +796,7 @@ impl App {
         for key in &exited {
             if self.state.pending_prompts.contains_key(key) {
                 tracing::warn!("Pending prompt lost for {key} (terminal exited)");
-                self.state.status =
-                    "Warning: queued prompt lost — terminal exited".into();
+                self.state.status = "Warning: queued prompt lost — terminal exited".into();
             }
             self.state.agent_states.remove(key);
             self.state.pending_prompts.remove(key);
@@ -725,10 +820,10 @@ impl App {
         }
 
         // (2-3) Pane tree cleanup.
-        let live: std::collections::BTreeSet<String> =
-            self.terminals.keys().cloned().collect();
+        let live: std::collections::BTreeSet<String> = self.terminals.keys().cloned().collect();
         let active = self.terminals.active_tab_key().cloned();
-        self.state.panes
+        self.state
+            .panes
             .enforce_terminal_invariant(&live, active.as_deref());
 
         // (4) Selection bounds.
@@ -778,7 +873,10 @@ pub async fn run(app: &mut App) -> Result<()> {
                 }
                 CtEvent::Mouse(mouse) => Action::Mouse(mouse),
                 CtEvent::Paste(text) => Action::Paste(text),
-                CtEvent::Resize(w, h) => Action::Resize { width: w, height: h },
+                CtEvent::Resize(w, h) => Action::Resize {
+                    width: w,
+                    height: h,
+                },
                 _ => continue,
             };
             if tx.send(action).is_err() {
@@ -809,7 +907,8 @@ pub async fn run(app: &mut App) -> Result<()> {
     match github_creds.resolve("github").await {
         Ok(cred) => {
             tracing::info!(source = %cred.source, "GitHub credential resolved");
-            let filters: Vec<String> = app.state
+            let filters: Vec<String> = app
+                .state
                 .config
                 .providers
                 .github
@@ -821,7 +920,8 @@ pub async fn run(app: &mut App) -> Result<()> {
 
             match GhClient::from_credential(cred).await {
                 Ok(gh) => {
-                    let watch_repos: Vec<String> = app.state
+                    let watch_repos: Vec<String> = app
+                        .state
                         .config
                         .providers
                         .github
@@ -861,7 +961,6 @@ pub async fn run(app: &mut App) -> Result<()> {
             app.state.credentials_ok = false;
         }
     }
-
 
     // ── Reattach tmux sessions that survived the last pilot quit ──
     //
@@ -968,16 +1067,25 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             {
                 use crate::agent_state::{AgentState, detect_state};
                 let asking_patterns = &app.state.config.agent.config.asking_patterns;
-                let claude_keys: Vec<String> = app.terminals.keys()
-                    .filter(|k| app.terminals.kind(k)
-                        .map(|kind| matches!(kind, ShellKind::Claude))
-                        .unwrap_or(false))
+                let claude_keys: Vec<String> = app
+                    .terminals
+                    .keys()
+                    .filter(|k| {
+                        app.terminals
+                            .kind(k)
+                            .map(|kind| matches!(kind, ShellKind::Claude))
+                            .unwrap_or(false)
+                    })
                     .cloned()
                     .collect();
 
                 for key in &claude_keys {
                     if let Some(term) = app.terminals.get(key) {
-                        let prev = app.state.agent_states.get(key).copied()
+                        let prev = app
+                            .state
+                            .agent_states
+                            .get(key)
+                            .copied()
                             .unwrap_or(AgentState::Active);
                         // Prefer Claude's lifecycle hooks, but override when
                         // the PTY clearly shows an in-turn dialog that the
@@ -1032,9 +1140,14 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             if new_state == AgentState::Active {
                                 app.state.notified_asking.remove(key);
                             }
-                            if new_state == AgentState::Asking && !app.state.notified_asking.contains(key) {
+                            if new_state == AgentState::Asking
+                                && !app.state.notified_asking.contains(key)
+                            {
                                 app.state.notified_asking.insert(key.clone());
-                                let title = app.state.sessions.get(key)
+                                let title = app
+                                    .state
+                                    .sessions
+                                    .get(key)
                                     .map(|s| s.display_name.clone())
                                     .unwrap_or_else(|| key.clone());
                                 app.state.status = format!("Claude needs input: {title}");
@@ -1055,7 +1168,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     crate::notify::send_notification(
                                         &format!("pilot: {title_clone}"),
                                         "Claude needs your input",
-                                    ).await;
+                                    )
+                                    .await;
                                 });
                             }
                         }
@@ -1064,19 +1178,29 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 }
 
                 // Clean up states for removed terminals.
-                app.state.agent_states.retain(|k, _| app.terminals.contains_key(k));
+                app.state
+                    .agent_states
+                    .retain(|k, _| app.terminals.contains_key(k));
             }
             // Inject pending prompts when Claude becomes idle (or after 5s timeout).
             {
                 use crate::agent_state::AgentState;
-                let ready_keys: Vec<String> = app.state.pending_prompts.keys()
+                let ready_keys: Vec<String> = app
+                    .state
+                    .pending_prompts
+                    .keys()
                     .filter(|key| {
-                        let is_idle = app.state.agent_states.get(*key)
+                        let is_idle = app
+                            .state
+                            .agent_states
+                            .get(*key)
                             .map(|s| *s == AgentState::Idle)
                             .unwrap_or(false);
                         // Also inject if terminal exists and we've waited 5+ seconds.
                         let has_terminal = app.terminals.contains_key(key);
-                        let waited_long = app.state.last_claude_send
+                        let waited_long = app
+                            .state
+                            .last_claude_send
                             .map(|t| t.elapsed().as_secs() >= 5)
                             .unwrap_or(false);
                         is_idle || (has_terminal && waited_long)
@@ -1085,16 +1209,21 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     .collect();
                 for key in ready_keys {
                     if let Some(prompt) = app.state.pending_prompts.remove(&key)
-                        && let Some(term) = app.terminals.get_mut(&key) {
-                            if let Err(e) = term.write(prompt.as_bytes()) {
-                                tracing::error!("Terminal write failed for prompt injection into {key}: {e}");
-                            } else if let Err(e) = term.write(b"\r") {
-                                tracing::error!("Terminal write failed for prompt newline into {key}: {e}");
-                            } else {
-                                tracing::info!("Injected pending prompt into {key}");
-                                app.state.status = "Prompt sent to Claude".into();
-                            }
+                        && let Some(term) = app.terminals.get_mut(&key)
+                    {
+                        if let Err(e) = term.write(prompt.as_bytes()) {
+                            tracing::error!(
+                                "Terminal write failed for prompt injection into {key}: {e}"
+                            );
+                        } else if let Err(e) = term.write(b"\r") {
+                            tracing::error!(
+                                "Terminal write failed for prompt newline into {key}: {e}"
+                            );
+                        } else {
+                            tracing::info!("Injected pending prompt into {key}");
+                            app.state.status = "Prompt sent to Claude".into();
                         }
+                    }
                 }
             }
 
@@ -1139,7 +1268,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 let prior_nav = crate::nav::selected_nav_item_from_state(&app.state);
 
                 app.state.purged_stale = true;
-                let stale: Vec<String> = app.state.sessions.order().iter()
+                let stale: Vec<String> = app
+                    .state
+                    .sessions
+                    .order()
+                    .iter()
                     .filter(|k| k.starts_with("github:") && !app.state.first_poll_keys.contains(*k))
                     .cloned()
                     .collect();
@@ -1154,23 +1287,32 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                 // Re-resolve the prior nav item; clamp if it's gone.
                 let items = crate::nav::nav_items_from_state(&app.state);
                 let new_idx = prior_nav.as_ref().and_then(|prior| match prior {
-                    crate::nav::NavItem::Session(k) => items.iter().position(|i| {
-                        matches!(i, crate::nav::NavItem::Session(x) if x == k)
-                    }),
-                    crate::nav::NavItem::Repo(r) => items.iter().position(|i| {
-                        matches!(i, crate::nav::NavItem::Repo(x) if x == r)
-                    }),
+                    crate::nav::NavItem::Session(k) => items
+                        .iter()
+                        .position(|i| matches!(i, crate::nav::NavItem::Session(x) if x == k)),
+                    crate::nav::NavItem::Repo(r) => items
+                        .iter()
+                        .position(|i| matches!(i, crate::nav::NavItem::Repo(x) if x == r)),
                 });
                 if let Some(idx) = new_idx {
                     app.state.selected = idx;
                 } else {
                     let n = items.len();
-                    app.state.selected = if n == 0 { 0 } else { app.state.selected.min(n - 1) };
+                    app.state.selected = if n == 0 {
+                        0
+                    } else {
+                        app.state.selected.min(n - 1)
+                    };
                 }
                 update_detail_pane(app);
                 app.state.status = format!(
                     "Loaded — {} as {}",
-                    app.state.config.providers.github.filters.iter()
+                    app.state
+                        .config
+                        .providers
+                        .github
+                        .filters
+                        .iter()
                         .filter_map(|f| f.org.as_ref())
                         .next()
                         .unwrap_or(&"all repos".to_string()),
@@ -1199,7 +1341,10 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
 
             // Periodic merge conflict check for monitored sessions (~30s).
             if app.state.tick_count.is_multiple_of(300) {
-                let rebase_candidates: Vec<_> = app.state.sessions.iter()
+                let rebase_candidates: Vec<_> = app
+                    .state
+                    .sessions
+                    .iter()
                     .filter(|(_, s)| matches!(s.monitor, Some(pilot_core::MonitorState::Idle)))
                     .filter_map(|(k, s)| {
                         let wt_path = s.worktree_path.clone()?;
@@ -1334,7 +1479,6 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             // ── Input mode state machine ──
             // Exactly one arm runs per key event. No fallthrough.
             match app.state.input_mode {
-
                 // 1. Help overlay -- any key dismisses.
                 InputMode::Help => {
                     app.state.show_help = false;
@@ -1370,15 +1514,21 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                     app.state.input_mode = determine_mode(app);
                                 }
                                 KeyCode::Enter => {
-                                    let desc = app.state.new_session_input.clone().unwrap_or_default();
+                                    let desc =
+                                        app.state.new_session_input.clone().unwrap_or_default();
                                     if desc.trim().is_empty() {
                                         // Silent no-op was the worst option: user thinks
                                         // Enter is broken. Keep the overlay up but surface
                                         // a status so they know what's missing.
                                         app.state.status =
-                                            "Type a branch name before Enter (Esc to cancel)".into();
+                                            "Type a branch name before Enter (Esc to cancel)"
+                                                .into();
                                     } else {
-                                        handle_action(app, Action::NewSessionConfirm { description: desc }, action_tx);
+                                        handle_action(
+                                            app,
+                                            Action::NewSessionConfirm { description: desc },
+                                            action_tx,
+                                        );
                                         app.state.input_mode = determine_mode(app);
                                     }
                                 }
@@ -1395,32 +1545,39 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                                 _ => {}
                             }
                         }
-                        TextInputKind::QuickReply => {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    handle_action(app, Action::QuickReplyCancel, action_tx);
-                                    app.state.input_mode = determine_mode(app);
-                                }
-                                KeyCode::Enter => {
-                                    let body = app.state.quick_reply_input.as_ref().map(|(_, t, _)| t.clone()).unwrap_or_default();
-                                    if !body.trim().is_empty() {
-                                        handle_action(app, Action::QuickReplyConfirm { body }, action_tx);
-                                    }
-                                    app.state.input_mode = determine_mode(app);
-                                }
-                                KeyCode::Backspace => {
-                                    if let Some((_, ref mut text, _)) = app.state.quick_reply_input {
-                                        text.pop();
-                                    }
-                                }
-                                KeyCode::Char(c) => {
-                                    if let Some((_, ref mut text, _)) = app.state.quick_reply_input {
-                                        text.push(c);
-                                    }
-                                }
-                                _ => {}
+                        TextInputKind::QuickReply => match key.code {
+                            KeyCode::Esc => {
+                                handle_action(app, Action::QuickReplyCancel, action_tx);
+                                app.state.input_mode = determine_mode(app);
                             }
-                        }
+                            KeyCode::Enter => {
+                                let body = app
+                                    .state
+                                    .quick_reply_input
+                                    .as_ref()
+                                    .map(|(_, t, _)| t.clone())
+                                    .unwrap_or_default();
+                                if !body.trim().is_empty() {
+                                    handle_action(
+                                        app,
+                                        Action::QuickReplyConfirm { body },
+                                        action_tx,
+                                    );
+                                }
+                                app.state.input_mode = determine_mode(app);
+                            }
+                            KeyCode::Backspace => {
+                                if let Some((_, ref mut text, _)) = app.state.quick_reply_input {
+                                    text.pop();
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                if let Some((_, ref mut text, _)) = app.state.quick_reply_input {
+                                    text.push(c);
+                                }
+                            }
+                            _ => {}
+                        },
                     }
                 }
 
@@ -1434,11 +1591,13 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                         KeyCode::Enter => {
                             // If nothing was changed yet, toggle the current item first.
                             if let Some(ref mut picker) = app.state.picker {
-                                let any_changed = picker.items.iter().any(|i| i.selected != i.was_selected);
+                                let any_changed =
+                                    picker.items.iter().any(|i| i.selected != i.was_selected);
                                 if !any_changed {
                                     let filtered = picker.filtered_indices();
                                     if let Some(&real_idx) = filtered.get(picker.cursor) {
-                                        picker.items[real_idx].selected = !picker.items[real_idx].selected;
+                                        picker.items[real_idx].selected =
+                                            !picker.items[real_idx].selected;
                                     }
                                 }
                             }
@@ -1457,7 +1616,11 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             if let Some(ref mut picker) = app.state.picker {
                                 let count = picker.filtered_indices().len();
                                 if count > 0 {
-                                    picker.cursor = if picker.cursor == 0 { count - 1 } else { picker.cursor - 1 };
+                                    picker.cursor = if picker.cursor == 0 {
+                                        count - 1
+                                    } else {
+                                        picker.cursor - 1
+                                    };
                                 }
                             }
                         }
@@ -1465,7 +1628,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                             if let Some(ref mut picker) = app.state.picker {
                                 let filtered = picker.filtered_indices();
                                 if let Some(&real_idx) = filtered.get(picker.cursor) {
-                                    picker.items[real_idx].selected = !picker.items[real_idx].selected;
+                                    picker.items[real_idx].selected =
+                                        !picker.items[real_idx].selected;
                                 }
                             }
                         }
@@ -1554,9 +1718,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
             }
         }
 
-
         Action::Mouse(mouse) => {
-            use crossterm::event::{MouseEventKind, MouseButton};
+            use crossterm::event::{MouseButton, MouseEventKind};
             let (term_w, _term_h) = app.state.last_term_area;
             // The sidebar border is at sidebar_pct% of the terminal width.
             let border_col = (term_w as u32 * app.state.sidebar_pct as u32 / 100) as u16;
@@ -1579,7 +1742,8 @@ fn handle_action(app: &mut App, action: Action, action_tx: &mpsc::UnboundedSende
                     } else {
                         // Click on detail/terminal area.
                         // Check if there's a running terminal for the selected session.
-                        let has_term = app.selected_session_key()
+                        let has_term = app
+                            .selected_session_key()
                             .and_then(|k| app.terminals.get(&k).map(|_| ()))
                             .is_some();
                         // Click in upper part → detail, lower part → terminal (if exists).
@@ -1685,8 +1849,7 @@ fn list_tmux_sessions() -> Vec<String> {
 /// left off. Assumes `ShellKind::Claude` (the common case); users who were
 /// in a shell can close the pane and press `b` to reopen as a shell.
 fn resume_tmux_sessions(app: &mut App) {
-    let live_tmux: std::collections::HashSet<String> =
-        list_tmux_sessions().into_iter().collect();
+    let live_tmux: std::collections::HashSet<String> = list_tmux_sessions().into_iter().collect();
     app.state.live_tmux_sessions.clone_from(&live_tmux);
     if live_tmux.is_empty() {
         return;
@@ -1697,22 +1860,19 @@ fn resume_tmux_sessions(app: &mut App) {
         .state
         .sessions
         .iter()
-        .filter(|(_, s)| s.primary_task.state == pilot_core::TaskState::Open
-                      || s.primary_task.state == pilot_core::TaskState::Draft
-                      || s.primary_task.state == pilot_core::TaskState::InReview
-                      || s.primary_task.state == pilot_core::TaskState::InProgress)
+        .filter(|(_, s)| {
+            s.primary_task.state == pilot_core::TaskState::Open
+                || s.primary_task.state == pilot_core::TaskState::Draft
+                || s.primary_task.state == pilot_core::TaskState::InReview
+                || s.primary_task.state == pilot_core::TaskState::InProgress
+        })
         .filter_map(|(key, s)| {
             if !live_tmux.contains(&tmux_name_for(key)) {
                 return None;
             }
-            let cwd = s
-                .worktree_path
-                .clone()
-                .unwrap_or_else(|| {
-                    std::path::PathBuf::from(
-                        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
-                    )
-                });
+            let cwd = s.worktree_path.clone().unwrap_or_else(|| {
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+            });
             Some((key.clone(), cwd))
         })
         .collect();
@@ -1797,9 +1957,10 @@ pub(crate) fn spawn_terminal(
 
     // Mark that Claude has been used in this session.
     if matches!(kind, ShellKind::Claude)
-        && let Some(session) = app.state.sessions.get_mut(session_key) {
-            session.had_claude = true;
-        }
+        && let Some(session) = app.state.sessions.get_mut(session_key)
+    {
+        session.had_claude = true;
+    }
 
     // Env vars that get inherited by the inner Claude / shell process.
     let session = app.state.sessions.get(session_key);
@@ -1850,24 +2011,29 @@ pub(crate) fn spawn_terminal(
                 session.state = SessionState::Working;
             }
             // Auto-split: if no terminal pane exists, split the detail pane.
-            let has_term_pane = app.state
+            let has_term_pane = app
+                .state
                 .panes
                 .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
                 .is_some();
             if !has_term_pane {
-                if let Some(detail_id) = app.state
+                if let Some(detail_id) = app
+                    .state
                     .panes
                     .find_pane(|c| matches!(c, PaneContent::Detail(_)))
                 {
                     app.state.panes.focused = detail_id;
-                    app.state.panes
+                    app.state
+                        .panes
                         .split_vertical_above(PaneContent::Terminal(session_key.to_string()));
                 }
-            } else if let Some(term_id) = app.state
+            } else if let Some(term_id) = app
+                .state
                 .panes
                 .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
             {
-                app.state.panes
+                app.state
+                    .panes
                     .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
             }
 
@@ -1969,10 +2135,11 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     // Debounce: ignore if we sent something in the last 1.5s.
     let now = std::time::Instant::now();
     if let Some(last) = app.state.last_claude_send
-        && now.duration_since(last).as_millis() < 1500 {
-            app.state.status = "Wait — Claude was just fed. Press again in a sec.".into();
-            return;
-        }
+        && now.duration_since(last).as_millis() < 1500
+    {
+        app.state.status = "Wait — Claude was just fed. Press again in a sec.".into();
+        return;
+    }
 
     let Some(session_key) = app.selected_session_key() else {
         app.state.status = "No session selected".into();
@@ -1993,7 +2160,10 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 
     // Detect what needs fixing: conflicts, CI failure, review comments, or combination.
     let ci_failing = task.ci == pilot_core::CiStatus::Failure;
-    let has_failed_checks = task.checks.iter().any(|c| c.status == pilot_core::CiStatus::Failure);
+    let has_failed_checks = task
+        .checks
+        .iter()
+        .any(|c| c.status == pilot_core::CiStatus::Failure);
     let has_conflicts = task.has_conflicts;
 
     // Gather selected comments (or all unread if none selected).
@@ -2018,10 +2188,18 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
 
     // Determine the task description based on what's broken.
     let mut issues: Vec<&str> = vec![];
-    if has_conflicts { issues.push("resolve merge conflicts"); }
-    if ci_failing { issues.push("fix CI failures"); }
-    if has_comments && mode == "fix" { issues.push("address review comments"); }
-    if has_comments && mode == "reply" { issues.push("draft replies to review comments"); }
+    if has_conflicts {
+        issues.push("resolve merge conflicts");
+    }
+    if ci_failing {
+        issues.push("fix CI failures");
+    }
+    if has_comments && mode == "fix" {
+        issues.push("address review comments");
+    }
+    if has_comments && mode == "reply" {
+        issues.push("draft replies to review comments");
+    }
 
     let action_word = if issues.is_empty() {
         "investigate this PR"
@@ -2055,7 +2233,9 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
     // CI failure details.
     if ci_failing || has_failed_checks {
         prompt.push_str("\n## CI Failures\n\n");
-        let failed: Vec<_> = task.checks.iter()
+        let failed: Vec<_> = task
+            .checks
+            .iter()
             .filter(|c| c.status == pilot_core::CiStatus::Failure)
             .collect();
         if failed.is_empty() {
@@ -2091,7 +2271,9 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
                     pilot_core::ActivityKind::StatusChange => "Status",
                     pilot_core::ActivityKind::CiUpdate => "CI",
                 };
-                let quoted_body = activity.body.lines()
+                let quoted_body = activity
+                    .body
+                    .lines()
                     .map(|line| format!("> {line}"))
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -2110,12 +2292,15 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
                     prompt.push_str(&format!("- **thread_id:** `{tid}`\n"));
                 }
                 if let Some(hunk) = &activity.diff_hunk
-                    && !hunk.is_empty() {
-                        prompt.push_str("\n```diff\n");
-                        prompt.push_str(hunk);
-                        if !hunk.ends_with('\n') { prompt.push('\n'); }
-                        prompt.push_str("```\n");
+                    && !hunk.is_empty()
+                {
+                    prompt.push_str("\n```diff\n");
+                    prompt.push_str(hunk);
+                    if !hunk.ends_with('\n') {
+                        prompt.push('\n');
                     }
+                    prompt.push_str("```\n");
+                }
                 prompt.push_str(&format!("\n{quoted_body}\n\n"));
             }
         }
@@ -2130,15 +2315,20 @@ fn fix_or_reply_with_claude(app: &mut App, action_tx: &mpsc::UnboundedSender<Act
         prompt.push_str("1. Make the changes locally (you're already in the worktree)\n");
         prompt.push_str("2. `git push` (or `git push --force-with-lease` after a rebase)\n");
         prompt.push_str("3. `gh pr checks` to confirm CI\n");
-        prompt.push_str("4. Reply to each comment via `gh api graphql` (threaded) as shown above\n");
+        prompt
+            .push_str("4. Reply to each comment via `gh api graphql` (threaded) as shown above\n");
     } else {
-        prompt.push_str("Draft concise, professional replies. Post each reply as a \
-threaded GraphQL reply using the thread_id above so it lands on the right file/line.\n");
+        prompt.push_str(
+            "Draft concise, professional replies. Post each reply as a \
+threaded GraphQL reply using the thread_id above so it lands on the right file/line.\n",
+        );
     }
 
     // Write context to file with timestamp to avoid race conditions.
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let context_dir = std::path::PathBuf::from(&home).join(".pilot").join("context");
+    let context_dir = std::path::PathBuf::from(&home)
+        .join(".pilot")
+        .join("context");
     if let Err(e) = std::fs::create_dir_all(&context_dir) {
         tracing::error!("Failed to create context dir: {e}");
         app.state.status = format!("Failed to create context dir: {e}");
@@ -2160,11 +2350,18 @@ threaded GraphQL reply using the thread_id above so it lands on the right file/l
 
     // Queue the prompt — it will be injected when Claude is idle.
     tracing::info!("Queued prompt for {session_key} ({} bytes)", prompt.len());
-    app.state.pending_prompts.insert(session_key.clone(), prompt);
+    app.state
+        .pending_prompts
+        .insert(session_key.clone(), prompt);
     app.state.selected_comments.clear();
     app.state.last_claude_send = Some(now);
 
-    if let Some(idx) = app.terminals.tab_order().iter().position(|k| k == &session_key) {
+    if let Some(idx) = app
+        .terminals
+        .tab_order()
+        .iter()
+        .position(|k| k == &session_key)
+    {
         app.terminals.set_active_tab(idx);
     }
     // Terminal may exist in the map but have no visible pane (e.g. user
@@ -2180,11 +2377,14 @@ threaded GraphQL reply using the thread_id above so it lands on the right file/l
     }
 }
 
-
 /// Focus the terminal pane if one exists in the layout. Called after tab
 /// switches so the user ends up in Terminal mode consistently.
 pub(crate) fn focus_terminal_pane(app: &mut App) {
-    if let Some(id) = app.state.panes.find_pane(|c| matches!(c, PaneContent::Terminal(_))) {
+    if let Some(id) = app
+        .state
+        .panes
+        .find_pane(|c| matches!(c, PaneContent::Terminal(_)))
+    {
         app.state.panes.focus(id);
     }
 }
@@ -2195,22 +2395,26 @@ pub(crate) fn focus_terminal_pane(app: &mut App) {
 /// terminal exists in `app.terminals` and we want the user to see it, call
 /// this — otherwise you get the silent "prompt sent but no terminal" bug.
 pub(crate) fn ensure_terminal_pane_for(app: &mut App, session_key: &str) {
-    let existing = app.state
+    let existing = app
+        .state
         .panes
         .find_pane(|c| matches!(c, PaneContent::Terminal(_)));
     match existing {
         Some(term_id) => {
-            app.state.panes
+            app.state
+                .panes
                 .set_content(term_id, PaneContent::Terminal(session_key.to_string()));
             app.state.panes.focus(term_id);
         }
         None => {
-            if let Some(detail_id) = app.state
+            if let Some(detail_id) = app
+                .state
                 .panes
                 .find_pane(|c| matches!(c, PaneContent::Detail(_)))
             {
                 app.state.panes.focused = detail_id;
-                app.state.panes
+                app.state
+                    .panes
                     .split_vertical_above(PaneContent::Terminal(session_key.to_string()));
             }
         }
@@ -2233,8 +2437,6 @@ pub(crate) fn update_detail_pane(app: &mut App) {
         .panes
         .sync_for_selection(selected.as_deref(), has_term);
 }
-
-
 
 /// Parse a session key (`"source:key"`) back into a `TaskId` — used when
 /// the caller only has the string form but needs to talk to the store.

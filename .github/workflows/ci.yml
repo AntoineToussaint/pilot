@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ── v2 workspace ─────────────────────────────────────────────────────
+  # v2/ lives in its own workspace. It doesn't depend on libghostty-rs
+  # (client side doesn't hold the VT — see DESIGN.md), so we skip the
+  # Zig + sibling-checkout dance and just build with stable Rust.
+  v2:
+    name: v2 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: v2
+
+      - name: cargo fmt --check
+        working-directory: v2
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -- -D warnings
+        working-directory: v2
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        working-directory: v2
+        run: cargo test --workspace --all-targets
+
+      - name: cargo test --doc
+        working-directory: v2
+        run: cargo test --workspace --doc
+
+  # ── v1 workspace ─────────────────────────────────────────────────────
+  # v1 uses libghostty-rs as a path dep in a sibling checkout. Requires
+  # Zig for the C-side of libghostty-vt.
+  v1:
+    name: v1 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout pilot
+        uses: actions/checkout@v4
+        with:
+          path: pilot
+
+      - name: Checkout libghostty-rs (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: ghostty-org/libghostty-rs
+          path: libghostty-rs
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pilot
+
+      - name: cargo clippy (v1)
+        working-directory: pilot
+        # v1's clippy has accumulated warnings we're consciously
+        # carrying — don't fail on warnings yet, only on errors.
+        run: cargo clippy --workspace --all-targets
+
+      - name: cargo test (v1)
+        working-directory: pilot
+        run: cargo test --workspace --all-targets

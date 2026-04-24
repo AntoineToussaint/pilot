@@ -256,14 +256,8 @@ impl Component for NewWorktree {
             Span::styled("Esc", Style::default().fg(Color::Red).bold()),
             Span::raw(" cancel"),
         ]);
-        let para = Paragraph::new(vec![
-            prompt,
-            Line::raw(""),
-            input_line,
-            Line::raw(""),
-            help,
-        ])
-        .wrap(Wrap { trim: false });
+        let para = Paragraph::new(vec![prompt, Line::raw(""), input_line, Line::raw(""), help])
+            .wrap(Wrap { trim: false });
         frame.render_widget(para, inner);
     }
 }

@@ -71,8 +71,14 @@ fn default_proxy_config_binds_localhost() {
     // Hard-coded assertion so a future "let's listen on 0.0.0.0"
     // change is caught in review.
     let cfg = ProxyConfig::default();
-    assert!(cfg.listen.ip().is_loopback(), "proxy must bind to loopback only");
-    assert!(cfg.record_bodies, "recording is on by default for useful out-of-the-box UX");
+    assert!(
+        cfg.listen.ip().is_loopback(),
+        "proxy must bind to loopback only"
+    );
+    assert!(
+        cfg.record_bodies,
+        "recording is on by default for useful out-of-the-box UX"
+    );
     // Sensitive headers stripped by default.
     for h in ["authorization", "x-api-key", "cookie"] {
         assert!(

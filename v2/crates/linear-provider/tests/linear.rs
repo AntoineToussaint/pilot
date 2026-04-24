@@ -9,8 +9,8 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use pilot_core::{TaskRole, TaskState};
-use pilot_linear::graphql::{self, Issue, IssueState, Labels, Label, Person, Team};
 use pilot_linear::LinearClient;
+use pilot_linear::graphql::{self, Issue, IssueState, Label, Labels, Person, Team};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -137,13 +137,9 @@ fn make_issue(
             id: id.into(),
             name: Some("Creator".into()),
         }),
-        team: Some(Team {
-            key: "ENG".into(),
-        }),
+        team: Some(Team { key: "ENG".into() }),
         labels: Some(Labels {
-            nodes: vec![Label {
-                name: "bug".into(),
-            }],
+            nodes: vec![Label { name: "bug".into() }],
         }),
     }
 }

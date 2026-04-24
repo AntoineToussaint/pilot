@@ -48,7 +48,11 @@ async fn drain(mut rx: broadcast::Receiver<OutputChunk>, want: usize) -> (Vec<u8
 #[tokio::test]
 async fn first_subscription_sees_output() {
     let pty = DaemonPty::spawn(
-        &["sh".into(), "-c".into(), "printf first-round; sleep 0.2; printf second-round".into()],
+        &[
+            "sh".into(),
+            "-c".into(),
+            "printf first-round; sleep 0.2; printf second-round".into(),
+        ],
         default_size(),
         None,
         vec![],
@@ -132,11 +136,7 @@ async fn sequence_numbers_are_monotonic_across_subscribers() {
     let mut sub_b = pty.subscribe().await;
     let mut seq_b_first = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
-            Some(d) => d,
-            None => break,
-        };
+    while let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) {
         match tokio::time::timeout(remaining, sub_b.live.recv()).await {
             Ok(Ok(chunk)) => {
                 seq_b_first = Some(chunk.seq);

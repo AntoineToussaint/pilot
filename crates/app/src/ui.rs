@@ -5,7 +5,7 @@ use ratatui::widgets::*;
 
 use crate::app::App;
 use crate::input::InputMode;
-use crate::nav::{NavItem, nav_items, build_repo_groups};
+use crate::nav::{NavItem, build_repo_groups, nav_items};
 use crate::picker::PickerState;
 use pilot_core::SessionColor;
 
@@ -43,7 +43,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     );
 
     let outer = Layout::vertical([
-        Constraint::Length(if app.terminals.tab_order().is_empty() { 0 } else { 1 }),
+        Constraint::Length(if app.terminals.tab_order().is_empty() {
+            0
+        } else {
+            1
+        }),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
@@ -134,20 +138,53 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Span::styled("Status tags", Style::default().fg(C_ACCENT).bold()),
     ]));
     let tag_rows: [(&str, Color, Color, &str); 9] = [
-        ("CONFLICT", C_TEXT_BRIGHT, C_RED,     "Merge conflicts with base branch"),
-        ("CI FAIL",  C_TEXT_BRIGHT, C_RED,     "CI checks failed"),
-        ("CHANGES",  C_TEXT_BRIGHT, C_ORANGE,  "Reviewer requested changes"),
-        ("QUEUED",   C_TEXT_BRIGHT, C_MAGENTA, "Sitting in GitHub's merge queue"),
-        ("READY",    C_TEXT_BRIGHT, C_GREEN,   "Approved + CI green — merge now"),
-        ("AUTO",     C_TEXT_BRIGHT, C_MAGENTA, "Auto-merge armed — will merge when checks pass"),
-        ("REVIEW",   C_TEXT_BRIGHT, C_YELLOW,  "Awaiting review"),
-        ("CI",       C_TEXT_BRIGHT, C_YELLOW,  "CI still running (pulses)"),
-        ("DRAFT",    C_TEXT_DIM,    C_BG_ALT,  "Draft PR — not ready for review"),
+        (
+            "CONFLICT",
+            C_TEXT_BRIGHT,
+            C_RED,
+            "Merge conflicts with base branch",
+        ),
+        ("CI FAIL", C_TEXT_BRIGHT, C_RED, "CI checks failed"),
+        (
+            "CHANGES",
+            C_TEXT_BRIGHT,
+            C_ORANGE,
+            "Reviewer requested changes",
+        ),
+        (
+            "QUEUED",
+            C_TEXT_BRIGHT,
+            C_MAGENTA,
+            "Sitting in GitHub's merge queue",
+        ),
+        (
+            "READY",
+            C_TEXT_BRIGHT,
+            C_GREEN,
+            "Approved + CI green — merge now",
+        ),
+        (
+            "AUTO",
+            C_TEXT_BRIGHT,
+            C_MAGENTA,
+            "Auto-merge armed — will merge when checks pass",
+        ),
+        ("REVIEW", C_TEXT_BRIGHT, C_YELLOW, "Awaiting review"),
+        ("CI", C_TEXT_BRIGHT, C_YELLOW, "CI still running (pulses)"),
+        (
+            "DRAFT",
+            C_TEXT_DIM,
+            C_BG_ALT,
+            "Draft PR — not ready for review",
+        ),
     ];
     for (label, fg, bg, desc) in tag_rows {
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(format!(" {label:<8} "), Style::default().fg(fg).bg(bg).bold()),
+            Span::styled(
+                format!(" {label:<8} "),
+                Style::default().fg(fg).bg(bg).bold(),
+            ),
             Span::raw("  "),
             Span::styled(desc, Style::default().fg(C_TEXT)),
         ]));
@@ -160,17 +197,29 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Span::styled("Icons", Style::default().fg(C_ACCENT).bold()),
     ]));
     let icon_rows: [(&str, Color, &str); 11] = [
-        ("@",  C_CYAN,     "You authored this PR"),
-        ("R",  C_MAGENTA,  "You're a reviewer"),
-        ("A",  C_GREEN,    "You're an assignee"),
-        ("↳",  C_TEXT_DIM, "Stacked on another PR (waits for parent to merge)"),
-        ("⇡",  C_TEXT_DIM, "Another PR is stacked on top of this one"),
-        ("⇣",  C_TEXT_DIM, "Branch is behind base — Shift-U to update"),
-        ("●",  C_GREEN,    "Claude idle — waiting for your next prompt"),
-        ("⠿",  C_CYAN,     "Claude working (animated braille spinner)"),
-        ("?",  C_RED,      "Claude is asking a question — INPUT NEEDED (blinks)"),
-        ("●",  C_YELLOW,   "tmux session alive but detached — press c to attach"),
-        ("*",  C_ACCENT,   "Unread events on this PR"),
+        ("@", C_CYAN, "You authored this PR"),
+        ("R", C_MAGENTA, "You're a reviewer"),
+        ("A", C_GREEN, "You're an assignee"),
+        (
+            "↳",
+            C_TEXT_DIM,
+            "Stacked on another PR (waits for parent to merge)",
+        ),
+        ("⇡", C_TEXT_DIM, "Another PR is stacked on top of this one"),
+        ("⇣", C_TEXT_DIM, "Branch is behind base — Shift-U to update"),
+        ("●", C_GREEN, "Claude idle — waiting for your next prompt"),
+        ("⠿", C_CYAN, "Claude working (animated braille spinner)"),
+        (
+            "?",
+            C_RED,
+            "Claude is asking a question — INPUT NEEDED (blinks)",
+        ),
+        (
+            "●",
+            C_YELLOW,
+            "tmux session alive but detached — press c to attach",
+        ),
+        ("*", C_ACCENT, "Unread events on this PR"),
     ];
     for (glyph, color, desc) in icon_rows {
         lines.push(Line::from(vec![
@@ -196,7 +245,9 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         .border_style(Style::default().fg(C_ACCENT))
         .style(Style::default().bg(C_BG_ALT));
 
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     frame.render_widget(para, modal_area);
 }
 
@@ -227,10 +278,7 @@ fn render_tab_bar(app: &App, frame: &mut Frame, area: Rect) {
             vec![
                 Span::styled(format!(" {} ", i + 1), Style::default().fg(C_TEXT_DIM)),
                 Span::styled(format!("{label}{dot}"), style),
-                Span::styled(
-                    " |",
-                    Style::default().fg(C_BORDER),
-                ),
+                Span::styled(" |", Style::default().fg(C_BORDER)),
             ]
         })
         .collect();
@@ -295,11 +343,14 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
         .count();
     let mut header_spans = vec![
         Span::styled("  PILOT", Style::default().fg(C_ACCENT).bold()),
-        Span::styled(format!("  {visible_count}", ), Style::default().fg(C_TEXT_DIM)),
+        Span::styled(
+            format!("  {visible_count}",),
+            Style::default().fg(C_TEXT_DIM),
+        ),
     ];
     if total_unread > 0 {
         header_spans.push(Span::styled(
-            format!("  {total_unread} new", ),
+            format!("  {total_unread} new",),
             Style::default().fg(C_RED).bold(),
         ));
     }
@@ -377,7 +428,10 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
         let reason = if !app.state.search_query.is_empty() {
             format!("  No matches for /{}", app.state.search_query)
         } else if app.state.activity_days_filter > 0 {
-            format!("  No PRs active in last {}d", app.state.activity_days_filter)
+            format!(
+                "  No PRs active in last {}d",
+                app.state.activity_days_filter
+            )
         } else if app.state.config.providers.github.filters.is_empty() {
             "  No PRs found.".to_string()
         } else {
@@ -478,9 +532,8 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
 
     // Braille spinner frames for active agent.
     let _braille_frames = [
-        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
-        "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
-        "\u{2807}", "\u{280f}",
+        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+        "\u{2827}", "\u{2807}", "\u{280f}",
     ];
 
     // Pre-compute which sessions are stacked on another open session.
@@ -489,8 +542,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
     let stacked = crate::nav::compute_stacked_sessions(&app.state);
     // Also compute which sessions ARE parents (something stacks on them)
     // so we can mark the base of a stack too.
-    let is_parent: std::collections::HashSet<&String> =
-        stacked.values().collect();
+    let is_parent: std::collections::HashSet<&String> = stacked.values().collect();
 
     // ── Render each nav item ──
     for (nav_idx, item) in items.iter().enumerate() {
@@ -518,7 +570,10 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                 let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
                 let mut spans = vec![
                     Span::styled(
-                        format!("  {}\u{2500}\u{2500}", if is_cursor { "\u{25b8}" } else { "\u{2500}" }),
+                        format!(
+                            "  {}\u{2500}\u{2500}",
+                            if is_cursor { "\u{25b8}" } else { "\u{2500}" }
+                        ),
                         Style::default().fg(C_BORDER).bg(bg),
                     ),
                     Span::styled(
@@ -531,10 +586,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                     ),
                 ];
                 if unread > 0 {
-                    spans.push(Span::styled(
-                        unread_part,
-                        Style::default().fg(C_RED).bg(bg),
-                    ));
+                    spans.push(Span::styled(unread_part, Style::default().fg(C_RED).bg(bg)));
                 } else {
                     spans.push(Span::styled(
                         unread_part,
@@ -547,14 +599,13 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                         Style::default().fg(C_TEXT_DIM).bg(bg),
                     ));
                 }
-                spans.push(Span::styled(
-                    fill,
-                    Style::default().fg(C_BORDER).bg(bg),
-                ));
+                spans.push(Span::styled(fill, Style::default().fg(C_BORDER).bg(bg)));
                 lines.push(Line::from(spans));
             }
             NavItem::Session(key) => {
-                let Some(session) = app.state.sessions.get(key) else { continue };
+                let Some(session) = app.state.sessions.get(key) else {
+                    continue;
+                };
                 let task = &session.primary_task;
                 let unread = session.unread_count();
                 let bg = if is_cursor { C_BG_SELECTED } else { C_BG };
@@ -581,7 +632,10 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                 // "#feat/some-long-name", etc. Without truncation these
                 // overflow the 5-char column and shift every row to the
                 // right, breaking alignment with GH rows.
-                let pr_num_full = task.id.key.rsplit_once('#')
+                let pr_num_full = task
+                    .id
+                    .key
+                    .rsplit_once('#')
                     .map(|(_, n)| format!("#{n}"))
                     .unwrap_or_default();
                 let pr_color = pr_number_color(&pr_num_full);
@@ -619,7 +673,11 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                 // ── Build right side FIRST with fixed total width ──
                 // unread(4) + status(10) + time(6) = 20 chars always
                 const RIGHT_W: usize = 20;
-                let unread_str = if unread > 0 { format!("*{unread}") } else { String::new() };
+                let unread_str = if unread > 0 {
+                    format!("*{unread}")
+                } else {
+                    String::new()
+                };
                 let status_str = if label_text.is_empty() {
                     String::new()
                 } else {
@@ -661,7 +719,9 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                 // Build right-side spans with fixed widths.
                 let unread_span = Span::styled(
                     format!("{:>4}", unread_str),
-                    Style::default().fg(if unread > 0 { C_RED } else { bg }).bg(bg),
+                    Style::default()
+                        .fg(if unread > 0 { C_RED } else { bg })
+                        .bg(bg),
                 );
                 let status_span = Span::styled(
                     format!("{:>10}", status_str),
@@ -676,15 +736,23 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                     // Cursor accent (2 chars)
                     Span::styled(
                         if is_cursor { "\u{258c} " } else { "  " },
-                        if is_cursor { Style::default().fg(C_ACCENT).bg(bg) } else { Style::default().bg(bg) },
+                        if is_cursor {
+                            Style::default().fg(C_ACCENT).bg(bg)
+                        } else {
+                            Style::default().bg(bg)
+                        },
                     ),
                     // PR# (5 chars)
                     Span::styled(format!("{pr_num:<5}"), Style::default().fg(pr_color).bg(bg)),
                     // Role indicator (2 chars)
                     match task.role {
                         TaskRole::Author => Span::styled("@ ", Style::default().fg(C_CYAN).bg(bg)),
-                        TaskRole::Reviewer => Span::styled("R ", Style::default().fg(C_MAGENTA).bg(bg)),
-                        TaskRole::Assignee => Span::styled("A ", Style::default().fg(C_GREEN).bg(bg)),
+                        TaskRole::Reviewer => {
+                            Span::styled("R ", Style::default().fg(C_MAGENTA).bg(bg))
+                        }
+                        TaskRole::Assignee => {
+                            Span::styled("A ", Style::default().fg(C_GREEN).bg(bg))
+                        }
                         TaskRole::Mentioned => Span::styled("  ", Style::default().bg(bg)),
                     },
                     // Session indicator (2 chars — glyph + trailing space).
@@ -716,9 +784,8 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                                     // Braille spinner — tight 10-frame cycle
                                     // at 100ms per tick = 1s full rotation.
                                     const FRAMES: [&str; 10] = [
-                                        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
-                                        "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
-                                        "\u{2807}", "\u{280f}",
+                                        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}",
+                                        "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}",
                                     ];
                                     let f = FRAMES[(tick as usize) % FRAMES.len()];
                                     (f, C_CYAN)
@@ -730,10 +797,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect, now: chrono::DateTim
                         } else {
                             (" ", C_TEXT_DIM)
                         };
-                        Span::styled(
-                            format!("{ch} "),
-                            Style::default().fg(color).bg(bg),
-                        )
+                        Span::styled(format!("{ch} "), Style::default().fg(color).bg(bg))
                     },
                     // Title (padded to fill)
                     Span::styled(padded_title, title_style),
@@ -840,11 +904,8 @@ fn render_right_pane(
         }
         (Some(term), Some(detail)) => {
             let header_h = detail_header_height(&app.state, &detail);
-            let chunks = Layout::vertical([
-                Constraint::Length(header_h),
-                Constraint::Min(8),
-            ])
-            .split(area);
+            let chunks =
+                Layout::vertical([Constraint::Length(header_h), Constraint::Min(8)]).split(area);
             render_detail_header(app, frame, chunks[0], &detail, now);
             render_terminal(app, frame, chunks[1], &term);
         }
@@ -867,11 +928,8 @@ fn render_right_pane(
                 render_comments(app, frame, chunks[1], &detail, now);
                 render_checking_out(app, frame, chunks[2]);
             } else {
-                let chunks = Layout::vertical([
-                    Constraint::Length(header_h),
-                    Constraint::Min(5),
-                ])
-                .split(area);
+                let chunks = Layout::vertical([Constraint::Length(header_h), Constraint::Min(5)])
+                    .split(area);
                 render_detail_header(app, frame, chunks[0], &detail, now);
                 render_checking_out(app, frame, chunks[1]);
             }
@@ -901,9 +959,8 @@ fn render_checking_out(app: &App, frame: &mut Frame, area: Rect) {
 
     // Braille spinner — one full rotation per second at 100ms tick.
     const FRAMES: [&str; 10] = [
-        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
-        "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
-        "\u{2807}", "\u{280f}",
+        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+        "\u{2827}", "\u{2807}", "\u{280f}",
     ];
     let f = FRAMES[(app.state.tick_count as usize) % FRAMES.len()];
     let msg = format!(" {f}  Checking out worktree…");
@@ -982,16 +1039,17 @@ fn render_comments(
     };
     let task = &session.primary_task;
     let is_focused = app.state.input_mode == InputMode::Detail;
-    let border_color = if is_focused { C_BORDER_ACTIVE } else { C_BORDER };
+    let border_color = if is_focused {
+        C_BORDER_ACTIVE
+    } else {
+        C_BORDER
+    };
     let block = Block::default()
         .borders(Borders::LEFT | Borders::TOP)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(C_BG))
         .padding(Padding::new(1, 1, 0, 0))
-        .title(Span::styled(
-            " Comments ",
-            Style::default().fg(C_TEXT_DIM),
-        ));
+        .title(Span::styled(" Comments ", Style::default().fg(C_TEXT_DIM)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1019,10 +1077,9 @@ fn build_header_lines<'a>(
             format!("  idle {idle_days}d"),
             Style::default().fg(C_YELLOW),
         ),
-        Staleness::Abandoned { idle_days, .. } => Span::styled(
-            format!("  idle {idle_days}d"),
-            Style::default().fg(C_RED),
-        ),
+        Staleness::Abandoned { idle_days, .. } => {
+            Span::styled(format!("  idle {idle_days}d"), Style::default().fg(C_RED))
+        }
         Staleness::Fresh => Span::raw(""),
     };
     let ago = time::time_ago(&task.updated_at);
@@ -1046,7 +1103,10 @@ fn build_header_lines<'a>(
                 role_span(&task.role),
             ];
             if task.has_conflicts {
-                spans.push(Span::styled("   CONFLICT", Style::default().fg(C_RED).bold()));
+                spans.push(Span::styled(
+                    "   CONFLICT",
+                    Style::default().fg(C_RED).bold(),
+                ));
             }
             if let Some(ref branch) = task.branch {
                 spans.push(Span::styled(
@@ -1100,7 +1160,10 @@ fn build_header_lines<'a>(
         lines.push(Line::from(vec![
             Span::styled(
                 " MONITOR ",
-                Style::default().fg(Color::Rgb(15, 17, 23)).bg(C_CYAN).bold(),
+                Style::default()
+                    .fg(Color::Rgb(15, 17, 23))
+                    .bg(C_CYAN)
+                    .bold(),
             ),
             Span::styled(format!(" {label}"), Style::default().fg(C_CYAN)),
         ]));
@@ -1157,7 +1220,10 @@ fn build_comment_lines<'a>(
             let mut summary_spans = vec![
                 Span::styled(prefix, Style::default().fg(prefix_color).bg(bg)),
                 Span::styled(&a.author, Style::default().fg(author_color).bold().bg(bg)),
-                Span::styled(format!(" {ago_str} "), Style::default().fg(C_TEXT_DIM).bg(bg)),
+                Span::styled(
+                    format!(" {ago_str} "),
+                    Style::default().fg(C_TEXT_DIM).bg(bg),
+                ),
             ];
             if let Some(path) = &a.path {
                 let loc = match a.line {
@@ -1166,7 +1232,10 @@ fn build_comment_lines<'a>(
                 };
                 summary_spans.push(Span::styled(loc, Style::default().fg(C_ACCENT).bg(bg)));
             }
-            summary_spans.push(Span::styled(body_summary, Style::default().fg(body_color).bg(bg)));
+            summary_spans.push(Span::styled(
+                body_summary,
+                Style::default().fg(body_color).bg(bg),
+            ));
             comment_lines.push(Line::from(summary_spans));
 
             if is_cursor && !a.body.is_empty() {
@@ -1187,9 +1256,10 @@ fn build_comment_lines<'a>(
                             Span::styled(shown, Style::default().fg(color).bg(bg)),
                         ]));
                     }
-                    comment_lines.push(Line::from(vec![
-                        Span::styled("    \u{2502}", Style::default().fg(C_ACCENT).bg(bg)),
-                    ]));
+                    comment_lines.push(Line::from(vec![Span::styled(
+                        "    \u{2502}",
+                        Style::default().fg(C_ACCENT).bg(bg),
+                    )]));
                 }
                 let wrap_width = comment_width.saturating_sub(6);
                 let cleaned = strip_html(&a.body);
@@ -1277,7 +1347,11 @@ fn render_detail(
     };
     let task = &session.primary_task;
     let is_focused = app.state.input_mode == InputMode::Detail;
-    let border_color = if is_focused { C_BORDER_ACTIVE } else { C_BORDER };
+    let border_color = if is_focused {
+        C_BORDER_ACTIVE
+    } else {
+        C_BORDER
+    };
 
     // Left border only to separate from sidebar.
     let block = Block::default()
@@ -1293,8 +1367,8 @@ fn render_detail(
         + if session.monitor.is_some() { 1 } else { 0 };
     let chunks = Layout::vertical([
         Constraint::Length(header_height), // PR header
-        Constraint::Min(3),               // comment thread
-        Constraint::Length(1),            // action bar
+        Constraint::Min(3),                // comment thread
+        Constraint::Length(1),             // action bar
     ])
     .split(inner);
 
@@ -1305,10 +1379,9 @@ fn render_detail(
             format!("  idle {idle_days}d"),
             Style::default().fg(C_YELLOW),
         ),
-        Staleness::Abandoned { idle_days, .. } => Span::styled(
-            format!("  idle {idle_days}d"),
-            Style::default().fg(C_RED),
-        ),
+        Staleness::Abandoned { idle_days, .. } => {
+            Span::styled(format!("  idle {idle_days}d"), Style::default().fg(C_RED))
+        }
         Staleness::Fresh => Span::raw(""),
     };
 
@@ -1337,7 +1410,10 @@ fn render_detail(
                 role_span(&task.role),
             ];
             if task.has_conflicts {
-                spans.push(Span::styled("   CONFLICT", Style::default().fg(C_RED).bold()));
+                spans.push(Span::styled(
+                    "   CONFLICT",
+                    Style::default().fg(C_RED).bold(),
+                ));
             }
             if let Some(ref branch) = task.branch {
                 spans.push(Span::styled(
@@ -1438,11 +1514,18 @@ fn render_detail(
             } else {
                 "    "
             };
-            let prefix_color = if is_checked { C_GREEN } else if is_unread { C_RED } else { C_TEXT_DIM };
+            let prefix_color = if is_checked {
+                C_GREEN
+            } else if is_unread {
+                C_RED
+            } else {
+                C_TEXT_DIM
+            };
 
             // First line of body (summary) — strip HTML/markdown noise.
             let clean_body = strip_html(&a.body);
-            let body_summary: String = clean_body.chars()
+            let body_summary: String = clean_body
+                .chars()
                 .take(comment_width.saturating_sub(25))
                 .collect();
 
@@ -1453,7 +1536,10 @@ fn render_detail(
             let mut summary_spans = vec![
                 Span::styled(prefix, Style::default().fg(prefix_color).bg(bg)),
                 Span::styled(&a.author, Style::default().fg(author_color).bold().bg(bg)),
-                Span::styled(format!(" {ago_str} ", ), Style::default().fg(C_TEXT_DIM).bg(bg)),
+                Span::styled(
+                    format!(" {ago_str} ",),
+                    Style::default().fg(C_TEXT_DIM).bg(bg),
+                ),
             ];
             if let Some(path) = &a.path {
                 let loc = match a.line {
@@ -1462,41 +1548,46 @@ fn render_detail(
                 };
                 summary_spans.push(Span::styled(loc, Style::default().fg(C_ACCENT).bg(bg)));
             }
-            summary_spans.push(Span::styled(body_summary, Style::default().fg(body_color).bg(bg)));
+            summary_spans.push(Span::styled(
+                body_summary,
+                Style::default().fg(body_color).bg(bg),
+            ));
             comment_lines.push(Line::from(summary_spans));
 
             // Expanded: if cursor is on this comment, show full body below.
             if is_cursor && !a.body.is_empty() {
                 // Diff hunk — show code context first.
                 if let Some(hunk) = &a.diff_hunk
-                    && !hunk.is_empty() {
-                        let hunk_width = comment_width.saturating_sub(6);
-                        for raw in hunk.lines().take(10) {
-                            let color = match raw.chars().next() {
-                                Some('+') => C_GREEN,
-                                Some('-') => C_RED,
-                                Some('@') => C_ACCENT,
-                                _ => C_TEXT_DIM,
-                            };
-                            let shown: String = raw.chars().take(hunk_width).collect();
-                            comment_lines.push(Line::from(vec![
-                                Span::styled("    \u{2502} ", Style::default().fg(C_ACCENT).bg(bg)),
-                                Span::styled(shown, Style::default().fg(color).bg(bg)),
-                            ]));
-                        }
+                    && !hunk.is_empty()
+                {
+                    let hunk_width = comment_width.saturating_sub(6);
+                    for raw in hunk.lines().take(10) {
+                        let color = match raw.chars().next() {
+                            Some('+') => C_GREEN,
+                            Some('-') => C_RED,
+                            Some('@') => C_ACCENT,
+                            _ => C_TEXT_DIM,
+                        };
+                        let shown: String = raw.chars().take(hunk_width).collect();
                         comment_lines.push(Line::from(vec![
-                            Span::styled("    \u{2502}", Style::default().fg(C_ACCENT).bg(bg)),
+                            Span::styled("    \u{2502} ", Style::default().fg(C_ACCENT).bg(bg)),
+                            Span::styled(shown, Style::default().fg(color).bg(bg)),
                         ]));
                     }
+                    comment_lines.push(Line::from(vec![Span::styled(
+                        "    \u{2502}",
+                        Style::default().fg(C_ACCENT).bg(bg),
+                    )]));
+                }
                 let wrap_width = comment_width.saturating_sub(6);
                 let cleaned = strip_html(&a.body);
                 let md_lines = render_markdown(&cleaned);
                 let mut count = 0;
                 for md_line in md_lines.into_iter() {
-                    if count >= 15 { break; }
-                    let text: String = md_line.spans.iter()
-                        .map(|s| s.content.as_ref())
-                        .collect();
+                    if count >= 15 {
+                        break;
+                    }
+                    let text: String = md_line.spans.iter().map(|s| s.content.as_ref()).collect();
                     if text.is_empty() {
                         comment_lines.push(Line::from(Span::styled(
                             "    \u{2502}",
@@ -1505,7 +1596,9 @@ fn render_detail(
                         count += 1;
                         continue;
                     }
-                    let style = md_line.spans.first()
+                    let style = md_line
+                        .spans
+                        .first()
                         .map(|s| s.style)
                         .unwrap_or(Style::default().fg(C_TEXT));
                     let mut remaining = text.as_str();
@@ -1513,7 +1606,10 @@ fn render_detail(
                         let chunk = if remaining.len() <= wrap_width {
                             remaining
                         } else {
-                            remaining[..wrap_width].rfind(' ').map(|p| &remaining[..p]).unwrap_or(&remaining[..wrap_width])
+                            remaining[..wrap_width]
+                                .rfind(' ')
+                                .map(|p| &remaining[..p])
+                                .unwrap_or(&remaining[..wrap_width])
                         };
                         comment_lines.push(Line::from(vec![
                             Span::styled("    \u{2502} ", Style::default().fg(C_ACCENT).bg(bg)),
@@ -1530,7 +1626,9 @@ fn render_detail(
 
     // CI checks — ONLY show failing checks. Nobody cares about green or pending.
     {
-        let failed: Vec<_> = task.checks.iter()
+        let failed: Vec<_> = task
+            .checks
+            .iter()
             .filter(|c| matches!(c.status, CiStatus::Failure))
             .collect();
         if !failed.is_empty() {
@@ -1538,22 +1636,19 @@ fn render_detail(
             let passed = total - failed.len();
             comment_lines.insert(0, Line::raw(""));
             for check in failed.iter().rev().take(5) {
-                comment_lines.insert(0, Line::from(vec![
-                    Span::styled("    \u{2717} ", Style::default().fg(C_RED)),
-                    Span::styled(
-                        check.name.clone(),
-                        Style::default().fg(C_RED),
-                    ),
-                ]));
+                comment_lines.insert(
+                    0,
+                    Line::from(vec![
+                        Span::styled("    \u{2717} ", Style::default().fg(C_RED)),
+                        Span::styled(check.name.clone(), Style::default().fg(C_RED)),
+                    ]),
+                );
             }
-            let summary = format!(
-                "  {} failed, {} passed",
-                failed.len(),
-                passed,
+            let summary = format!("  {} failed, {} passed", failed.len(), passed,);
+            comment_lines.insert(
+                0,
+                Line::from(Span::styled(summary, Style::default().fg(C_RED).bold())),
             );
-            comment_lines.insert(0, Line::from(
-                Span::styled(summary, Style::default().fg(C_RED).bold()),
-            ));
         }
     }
 
@@ -1630,17 +1725,18 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
         Some(crate::action::ShellKind::Shell) => "Shell",
         None => "Terminal",
     };
-    let hint = if is_focused { "Ctrl-] exit" } else { "Tab focus" };
+    let hint = if is_focused {
+        "Ctrl-] exit"
+    } else {
+        "Tab focus"
+    };
     let scrolled = app
         .terminals
         .get(key)
         .map(|t| t.is_scrolled())
         .unwrap_or(false);
     let scroll_indicator = if scrolled {
-        Span::styled(
-            " [SCROLLBACK] ",
-            Style::default().fg(C_YELLOW).bold(),
-        )
+        Span::styled(" [SCROLLBACK] ", Style::default().fg(C_YELLOW).bold())
     } else {
         Span::raw("")
     };
@@ -1670,15 +1766,11 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
                 }
                 Some(AgentState::Active) => {
                     const FRAMES: [&str; 10] = [
-                        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
-                        "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
-                        "\u{2807}", "\u{280f}",
+                        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}",
+                        "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}",
                     ];
                     let f = FRAMES[(tick as usize) % FRAMES.len()];
-                    Span::styled(
-                        format!(" {f} working "),
-                        Style::default().fg(C_CYAN).bold(),
-                    )
+                    Span::styled(format!(" {f} working "), Style::default().fg(C_CYAN).bold())
                 }
                 Some(AgentState::Idle) => {
                     Span::styled(" ● idle ", Style::default().fg(C_GREEN).bold())
@@ -1712,9 +1804,10 @@ fn render_terminal(app: &mut App, frame: &mut Frame, area: Rect, key: &str) {
                 cols: new_size.0,
                 pixel_width: 0,
                 pixel_height: 0,
-            }) {
-                tracing::error!("Terminal resize failed: {e}");
-            }
+            })
+        {
+            tracing::error!("Terminal resize failed: {e}");
+        }
     }
 
     if let Some(term) = app.terminals.get_mut(key) {
@@ -1738,7 +1831,8 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
     let s = spinner[(app.state.tick_count as usize / 2) % spinner.len()];
 
     let lines = if !app.state.loaded {
-        let filter = app.state
+        let filter = app
+            .state
             .config
             .providers
             .github
@@ -1754,17 +1848,11 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
         };
         vec![
             Line::raw(""),
-            Line::from(Span::styled(
-                "PILOT",
-                Style::default().fg(C_ACCENT).bold(),
-            )),
+            Line::from(Span::styled("PILOT", Style::default().fg(C_ACCENT).bold())),
             Line::raw(""),
             Line::from(vec![
                 Span::styled(format!("{s} "), Style::default().fg(C_ACCENT)),
-                Span::styled(
-                    "Fetching PRs and issues",
-                    Style::default().fg(C_TEXT),
-                ),
+                Span::styled("Fetching PRs and issues", Style::default().fg(C_TEXT)),
             ]),
             Line::raw(""),
             Line::from(vec![
@@ -1779,15 +1867,9 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
     } else if app.state.sessions.is_empty() {
         vec![
             Line::raw(""),
-            Line::from(Span::styled(
-                "PILOT",
-                Style::default().fg(C_ACCENT).bold(),
-            )),
+            Line::from(Span::styled("PILOT", Style::default().fg(C_ACCENT).bold())),
             Line::raw(""),
-            Line::from(Span::styled(
-                "No PRs found.",
-                Style::default().fg(C_TEXT),
-            )),
+            Line::from(Span::styled("No PRs found.", Style::default().fg(C_TEXT))),
             Line::raw(""),
             Line::from(Span::styled(
                 "Check your ~/.pilot/config.yaml filters.",
@@ -1797,10 +1879,7 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         vec![
             Line::raw(""),
-            Line::from(Span::styled(
-                "PILOT",
-                Style::default().fg(C_ACCENT).bold(),
-            )),
+            Line::from(Span::styled("PILOT", Style::default().fg(C_ACCENT).bold())),
             Line::raw(""),
             Line::from(Span::styled(
                 "Select a PR from the sidebar.",
@@ -1817,10 +1896,7 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("c     ", Style::default().fg(C_ACCENT)),
-                Span::styled(
-                    "open Claude in worktree",
-                    Style::default().fg(C_TEXT_DIM),
-                ),
+                Span::styled("open Claude in worktree", Style::default().fg(C_TEXT_DIM)),
             ]),
             Line::from(vec![
                 Span::styled("/     ", Style::default().fg(C_ACCENT)),
@@ -1828,10 +1904,7 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("?     ", Style::default().fg(C_ACCENT)),
-                Span::styled(
-                    "show all keybindings",
-                    Style::default().fg(C_TEXT_DIM),
-                ),
+                Span::styled("show all keybindings", Style::default().fg(C_TEXT_DIM)),
             ]),
         ]
     };
@@ -1872,7 +1945,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let total_unread: usize = app.state.sessions.values().map(|s| s.unread_count()).sum();
-    let notif = app.state
+    let notif = app
+        .state
         .notifications
         .first()
         .map(|s| truncate_str(s, 40))
@@ -1905,10 +1979,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             )
         },
         if !user_label.is_empty() {
-            Span::styled(
-                format!("{user_label}  "),
-                Style::default().fg(C_TEXT_DIM),
-            )
+            Span::styled(format!("{user_label}  "), Style::default().fg(C_TEXT_DIM))
         } else {
             Span::raw("")
         },
@@ -2050,10 +2121,7 @@ fn render_quick_reply_overlay(frame: &mut Frame, area: Rect, input: &str) {
 
     let lines = vec![
         Line::raw(""),
-        Line::from(Span::styled(
-            "  Comment:",
-            Style::default().fg(C_TEXT_DIM),
-        )),
+        Line::from(Span::styled("  Comment:", Style::default().fg(C_TEXT_DIM))),
         Line::from(Span::styled(
             format!("  {display_text}"),
             if input.is_empty() {
@@ -2129,10 +2197,7 @@ fn render_picker_overlay(frame: &mut Frame, area: Rect, picker: &PickerState) {
                 format!("  {cursor_mark} {checkbox} "),
                 Style::default().fg(fg).bg(bg),
             ),
-            Span::styled(
-                item.login.clone(),
-                Style::default().fg(fg).bold().bg(bg),
-            ),
+            Span::styled(item.login.clone(), Style::default().fg(fg).bold().bg(bg)),
         ]));
     }
 
@@ -2167,7 +2232,10 @@ fn render_picker_overlay(frame: &mut Frame, area: Rect, picker: &PickerState) {
 /// Short time-ago string without "ago" suffix: "2h", "3d", "1mo", "now".
 /// Takes `now` explicitly so render can sample wall time once and every row
 /// uses the same reference point (no per-row `Utc::now()` syscalls).
-fn time_ago_short(dt: &chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+fn time_ago_short(
+    dt: &chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     let diff = now.signed_duration_since(dt);
     let secs = diff.num_seconds();
     if secs < 60 {
@@ -2213,18 +2281,20 @@ fn status_tag_colors(tag: pilot_core::StatusTag, row_bg: Color) -> (&'static str
 /// Hash a PR number string to a distinctive color for visual identification.
 fn pr_number_color(pr_num: &str) -> Color {
     const PALETTE: &[Color] = &[
-        Color::Rgb(139, 148, 158),  // gray-blue
-        Color::Rgb(121, 192, 255),  // light blue
-        Color::Rgb(188, 140, 255),  // purple
-        Color::Rgb(63, 185, 208),   // teal
-        Color::Rgb(210, 153, 34),   // amber
-        Color::Rgb(219, 171, 9),    // gold
-        Color::Rgb(163, 190, 140),  // sage green
-        Color::Rgb(235, 203, 139),  // sand
-        Color::Rgb(180, 142, 173),  // mauve
-        Color::Rgb(143, 188, 187),  // seafoam
+        Color::Rgb(139, 148, 158), // gray-blue
+        Color::Rgb(121, 192, 255), // light blue
+        Color::Rgb(188, 140, 255), // purple
+        Color::Rgb(63, 185, 208),  // teal
+        Color::Rgb(210, 153, 34),  // amber
+        Color::Rgb(219, 171, 9),   // gold
+        Color::Rgb(163, 190, 140), // sage green
+        Color::Rgb(235, 203, 139), // sand
+        Color::Rgb(180, 142, 173), // mauve
+        Color::Rgb(143, 188, 187), // seafoam
     ];
-    let hash: u32 = pr_num.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let hash: u32 = pr_num
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     PALETTE[(hash as usize) % PALETTE.len()]
 }
 
@@ -2245,10 +2315,9 @@ fn render_markdown(input: &str) -> Vec<Line<'static>> {
                         style = style.fg(C_TEXT);
                     }
                     // Make bold text bright.
-                    if style.add_modifier.contains(Modifier::BOLD)
-                        && style.fg == Some(C_TEXT) {
-                            style = style.fg(C_TEXT_BRIGHT);
-                        }
+                    if style.add_modifier.contains(Modifier::BOLD) && style.fg == Some(C_TEXT) {
+                        style = style.fg(C_TEXT_BRIGHT);
+                    }
                     // Style code spans distinctively.
                     if span.style.bg.is_some() {
                         style = style.bg(C_BG_ALT).fg(C_CYAN);
@@ -2265,18 +2334,20 @@ fn render_markdown(input: &str) -> Vec<Line<'static>> {
 /// Hash a label name to a colored background for pill rendering.
 fn label_pill_color(label: &str) -> Color {
     const LABEL_COLORS: &[Color] = &[
-        Color::Rgb(163, 113, 247),  // purple
-        Color::Rgb(56, 132, 255),   // blue
-        Color::Rgb(63, 185, 80),    // green
-        Color::Rgb(210, 153, 34),   // yellow
-        Color::Rgb(248, 81, 73),    // red
-        Color::Rgb(63, 185, 208),   // teal
-        Color::Rgb(219, 171, 9),    // amber
-        Color::Rgb(188, 140, 255),  // light purple
-        Color::Rgb(139, 148, 158),  // gray
-        Color::Rgb(235, 203, 139),  // sand
+        Color::Rgb(163, 113, 247), // purple
+        Color::Rgb(56, 132, 255),  // blue
+        Color::Rgb(63, 185, 80),   // green
+        Color::Rgb(210, 153, 34),  // yellow
+        Color::Rgb(248, 81, 73),   // red
+        Color::Rgb(63, 185, 208),  // teal
+        Color::Rgb(219, 171, 9),   // amber
+        Color::Rgb(188, 140, 255), // light purple
+        Color::Rgb(139, 148, 158), // gray
+        Color::Rgb(235, 203, 139), // sand
     ];
-    let hash: u32 = label.bytes().fold(0u32, |acc, b| acc.wrapping_mul(37).wrapping_add(b as u32));
+    let hash: u32 = label
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(37).wrapping_add(b as u32));
     LABEL_COLORS[(hash as usize) % LABEL_COLORS.len()]
 }
 
@@ -2296,8 +2367,15 @@ fn strip_html(s: &str) -> String {
                 // Skip until closing )
                 let mut depth = 0;
                 for ic in chars.by_ref() {
-                    if ic == '(' { depth += 1; }
-                    if ic == ')' { depth -= 1; if depth <= 0 { break; } }
+                    if ic == '(' {
+                        depth += 1;
+                    }
+                    if ic == ')' {
+                        depth -= 1;
+                        if depth <= 0 {
+                            break;
+                        }
+                    }
                 }
             } else {
                 result.push(c);
@@ -2382,10 +2460,7 @@ fn state_pill(s: &TaskState) -> Span<'static> {
         ),
         TaskState::Closed => Span::styled(
             " CLOSED ",
-            Style::default()
-                .fg(Color::Rgb(15, 17, 23))
-                .bg(C_RED)
-                .bold(),
+            Style::default().fg(Color::Rgb(15, 17, 23)).bg(C_RED).bold(),
         ),
         TaskState::Merged => Span::styled(
             " MERGED ",

@@ -20,10 +20,15 @@ pub struct PickerState {
 
 impl PickerState {
     pub fn filtered_indices(&self) -> Vec<usize> {
-        self.items.iter().enumerate()
+        self.items
+            .iter()
+            .enumerate()
             .filter(|(_, item)| {
                 self.filter.is_empty()
-                    || item.login.to_lowercase().contains(&self.filter.to_lowercase())
+                    || item
+                        .login
+                        .to_lowercase()
+                        .contains(&self.filter.to_lowercase())
             })
             .map(|(i, _)| i)
             .collect()
@@ -31,19 +36,22 @@ impl PickerState {
 }
 
 pub(crate) fn build_picker_items(collaborators: &[String], current: &[String]) -> Vec<PickerItem> {
-    let mut items: Vec<PickerItem> = collaborators.iter().map(|login| {
-        let is_current = current.iter().any(|c| c == login);
-        PickerItem {
-            login: login.clone(),
-            selected: is_current,
-            was_selected: is_current,
-        }
-    }).collect();
+    let mut items: Vec<PickerItem> = collaborators
+        .iter()
+        .map(|login| {
+            let is_current = current.iter().any(|c| c == login);
+            PickerItem {
+                login: login.clone(),
+                selected: is_current,
+                was_selected: is_current,
+            }
+        })
+        .collect();
     // Sort: selected first, then alphabetical.
     items.sort_by(|a, b| {
-        b.selected.cmp(&a.selected)
+        b.selected
+            .cmp(&a.selected)
             .then_with(|| a.login.to_lowercase().cmp(&b.login.to_lowercase()))
     });
     items
 }
-

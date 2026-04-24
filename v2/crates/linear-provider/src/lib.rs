@@ -81,7 +81,10 @@ impl LinearClient {
             .error_for_status()?;
         let text = resp.text().await?;
         serde_json::from_str::<T>(&text).map_err(|e| {
-            LinearError::Graphql(format!("parse: {e}; body starts with {:?}", &text[..text.len().min(200)]))
+            LinearError::Graphql(format!(
+                "parse: {e}; body starts with {:?}",
+                &text[..text.len().min(200)]
+            ))
         })
     }
 
@@ -114,9 +117,9 @@ impl LinearClient {
                     .join("; ");
                 return Err(LinearError::Graphql(joined));
             }
-            let data = resp.data.ok_or_else(|| {
-                LinearError::Graphql("no data in issues response".into())
-            })?;
+            let data = resp
+                .data
+                .ok_or_else(|| LinearError::Graphql("no data in issues response".into()))?;
             for issue in &data.issues.nodes {
                 tasks.push(graphql::issue_to_task(issue, &viewer_id));
             }

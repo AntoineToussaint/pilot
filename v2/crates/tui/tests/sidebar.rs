@@ -10,9 +10,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pilot_core::{
-    CiStatus, ReviewStatus, Session, SessionKey, Task, TaskId, TaskRole, TaskState,
-};
+use pilot_core::{CiStatus, ReviewStatus, Session, SessionKey, Task, TaskId, TaskRole, TaskState};
 use pilot_v2_ipc::{Command, Event, TerminalKind};
 use pilot_v2_tui::components::{Mailbox, Sidebar};
 use pilot_v2_tui::{Component, ComponentId};
@@ -98,13 +96,15 @@ fn snapshot_populates_sessions() {
 fn session_upserted_inserts_and_updates() {
     let mut s = Sidebar::new(ComponentId::new(1));
     let now = Utc::now();
-    s.on_event(&Event::SessionUpserted(make_session("o/r#1", now)));
+    s.on_event(&Event::SessionUpserted(Box::new(make_session(
+        "o/r#1", now,
+    ))));
     assert_eq!(s.visible_count(), 1);
 
     // Upsert with newer timestamp — stays as one entry, moves to top.
     let mut updated = make_session("o/r#1", now + Duration::minutes(5));
     updated.display_name = "renamed".into();
-    s.on_event(&Event::SessionUpserted(updated));
+    s.on_event(&Event::SessionUpserted(Box::new(updated)));
     assert_eq!(s.visible_count(), 1);
     assert_eq!(
         s.selected_session().map(|sess| sess.display_name.as_str()),
@@ -153,10 +153,10 @@ fn cursor_preserved_across_upsert_of_other_session() {
     // An unrelated session gets a new update and would normally
     // displace #2 in the sort order — but the cursor follows the key,
     // not the index.
-    s.on_event(&Event::SessionUpserted(make_session(
+    s.on_event(&Event::SessionUpserted(Box::new(make_session(
         "o/r#3",
         now + Duration::hours(1),
-    )));
+    ))));
     assert_eq!(
         s.selected_session_key().cloned(),
         Some(session_key_ref("github:o/r#2")),
@@ -280,10 +280,8 @@ fn shift_c_emits_spawn_codex_for_selected() {
 #[test]
 fn custom_agent_shortcuts_override_defaults() {
     // User maps `a` → aider via config.
-    let mut s = Sidebar::new(ComponentId::new(1)).with_agent_shortcuts([
-        ('c', "claude".to_string()),
-        ('a', "aider".to_string()),
-    ]);
+    let mut s = Sidebar::new(ComponentId::new(1))
+        .with_agent_shortcuts([('c', "claude".to_string()), ('a', "aider".to_string())]);
     // Seed a session so the spawn has a target.
     let now = chrono::Utc::now();
     let task = pilot_core::Task {
@@ -318,18 +316,20 @@ fn custom_agent_shortcuts_override_defaults() {
         additions: 0,
         deletions: 0,
     };
-    s.on_event(&Event::SessionUpserted(pilot_core::Session::new_at(
+    s.on_event(&Event::SessionUpserted(Box::new(pilot_core::Session::new_at(
         task, now,
-    )));
+    ))));
 
     // `a` now spawns aider.
     let mut cmds = Vec::new();
     s.handle_key(key_code(KeyCode::Char('a')), &mut cmds);
     match cmds.as_slice() {
-        [Command::Spawn {
-            kind: TerminalKind::Agent(agent),
-            ..
-        }] => assert_eq!(agent, "aider"),
+        [
+            Command::Spawn {
+                kind: TerminalKind::Agent(agent),
+                ..
+            },
+        ] => assert_eq!(agent, "aider"),
         _ => panic!("expected Spawn Agent(aider), got {cmds:?}"),
     }
 
@@ -547,10 +547,7 @@ fn k_caps_at_zero() {
 fn unknown_key_bubbles_up() {
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
-    let outcome = s.handle_key(
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-        &mut cmds,
-    );
+    let outcome = s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut cmds);
     assert_eq!(outcome, pilot_v2_tui::Outcome::BubbleUp);
     assert!(cmds.is_empty(), "sidebar did not emit anything");
 }
@@ -570,9 +567,7 @@ fn render_to_string(s: &mut Sidebar, width: u16, height: u16, focused: bool) -> 
     (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
-                .map(|x| {
-                    buffer[(x, y)].symbol().to_string()
-                })
+                .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
@@ -616,7 +611,10 @@ fn render_mailbox_toggles_title() {
     let mut s = populated_sidebar();
     s.handle_key(shift_char('S'), &mut Vec::new());
     let rendered = render_to_string(&mut s, 40, 10, true);
-    assert!(rendered.contains("SNOOZED"), "title updates; got:\n{rendered}");
+    assert!(
+        rendered.contains("SNOOZED"),
+        "title updates; got:\n{rendered}"
+    );
 }
 
 #[test]

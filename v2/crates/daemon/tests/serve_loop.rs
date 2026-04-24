@@ -18,7 +18,10 @@ async fn subscribe_yields_snapshot() {
     client.send(Command::Subscribe).unwrap();
     let evt = client.recv().await.expect("daemon responds");
     match evt {
-        Event::Snapshot { sessions, terminals } => {
+        Event::Snapshot {
+            sessions,
+            terminals,
+        } => {
             // Contract under test: Subscribe ALWAYS replies with a
             // Snapshot before any live events. With no sessions loaded
             // and no terminals spawned, both lists are empty; the

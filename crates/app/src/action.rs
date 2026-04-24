@@ -16,7 +16,10 @@ pub enum Action {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
-    Resize { width: u16, height: u16 },
+    Resize {
+        width: u16,
+        height: u16,
+    },
     Tick,
 
     // -- External events from providers --
@@ -76,7 +79,9 @@ pub enum Action {
     // -- PR actions --
     MergePr,
     /// Merge succeeded — set state to Merged and clean up.
-    MergeCompleted { session_key: SessionKey },
+    MergeCompleted {
+        session_key: SessionKey,
+    },
     /// Open PR in browser.
     OpenInBrowser,
     /// Open the PR's CI "checks" tab in the default browser.
@@ -109,7 +114,9 @@ pub enum Action {
     /// Toggle monitor mode for the selected session.
     ToggleMonitor,
     /// Internal: drive the monitor state machine for a session.
-    MonitorTick { session_key: SessionKey },
+    MonitorTick {
+        session_key: SessionKey,
+    },
     /// Result of a `Command::CheckNeedsRebase`. Reduce decides what to do.
     NeedsRebaseResult {
         session_key: SessionKey,
@@ -162,13 +169,17 @@ pub enum Action {
 
     // -- New session --
     NewSession,
-    NewSessionConfirm { description: String },
+    NewSessionConfirm {
+        description: String,
+    },
     NewSessionCancel,
 
     // -- Quick reply --
     /// Quick reply -- open text input to post a comment directly.
     QuickReply,
-    QuickReplyConfirm { body: String },
+    QuickReplyConfirm {
+        body: String,
+    },
     QuickReplyCancel,
 
     // -- Status --
@@ -176,7 +187,10 @@ pub enum Action {
     StatusMessage(String),
 
     /// Cache the default branch for a repo (fetched asynchronously).
-    CacheDefaultBranch { repo: String, branch: String },
+    CacheDefaultBranch {
+        repo: String,
+        branch: String,
+    },
 
     // -- Commands --
     Refresh,

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use pilot_tui_term::{Terminal, TermSession};
+use pilot_tui_term::{TermSession, Terminal};
 
 use crate::action::ShellKind;
 
@@ -120,7 +120,6 @@ impl TerminalManager {
         }
         exited
     }
-
 }
 
 #[cfg(test)]

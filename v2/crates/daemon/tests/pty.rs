@@ -84,13 +84,8 @@ async fn echo_produces_output_then_exits() {
 async fn write_is_echoed_by_cat() {
     // `cat` with no args echoes stdin → stdout. We write "ping\n" and
     // expect to see it come back in the output stream.
-    let pty = DaemonPty::spawn(
-        &["cat".to_string()],
-        default_size(),
-        None,
-        vec![],
-    )
-    .expect("spawn cat");
+    let pty =
+        DaemonPty::spawn(&["cat".to_string()], default_size(), None, vec![]).expect("spawn cat");
 
     let sub = pty.subscribe().await;
     pty.write(b"ping\n").await.expect("write to PTY");
@@ -112,13 +107,8 @@ async fn write_is_echoed_by_cat() {
 
 #[tokio::test]
 async fn write_after_finish_errors() {
-    let pty = DaemonPty::spawn(
-        &["true".to_string()],
-        default_size(),
-        None,
-        vec![],
-    )
-    .expect("spawn true");
+    let pty =
+        DaemonPty::spawn(&["true".to_string()], default_size(), None, vec![]).expect("spawn true");
 
     let _ = tokio::time::timeout(Duration::from_secs(5), pty.wait_exit()).await;
 

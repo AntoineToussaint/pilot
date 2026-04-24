@@ -169,7 +169,6 @@ impl Session {
         }
     }
 
-
     /// Number of unread activity items.
     pub fn unread_count(&self) -> usize {
         (0..self.activity.len().saturating_sub(self.seen_count))
@@ -315,7 +314,10 @@ mod tests {
 
     fn make_task(title: &str) -> Task {
         Task {
-            id: TaskId { source: "test".into(), key: format!("test/repo#{title}") },
+            id: TaskId {
+                source: "test".into(),
+                key: format!("test/repo#{title}"),
+            },
             title: title.into(),
             body: None,
             state: TaskState::Open,
@@ -414,7 +416,9 @@ mod tests {
         assert!(s.is_monitored());
         assert_eq!(s.monitor_label(), Some("fixing CI"));
 
-        s.monitor = Some(MonitorState::Failed { reason: "too many".into() });
+        s.monitor = Some(MonitorState::Failed {
+            reason: "too many".into(),
+        });
         assert!(!s.is_monitored());
         assert_eq!(s.monitor_label(), Some("failed"));
     }
@@ -424,7 +428,10 @@ mod tests {
         let mut t = make_task("PR");
         t.ci = CiStatus::Failure;
         let s = Session::new_at(t, chrono::Utc::now());
-        assert_eq!(s.action_priority("me", chrono::Utc::now()), ActionPriority::CiFailed);
+        assert_eq!(
+            s.action_priority("me", chrono::Utc::now()),
+            ActionPriority::CiFailed
+        );
     }
 
     #[test]
@@ -432,7 +439,10 @@ mod tests {
         let mut t = make_task("PR");
         t.review = ReviewStatus::Approved;
         let s = Session::new_at(t, chrono::Utc::now());
-        assert_eq!(s.action_priority("me", chrono::Utc::now()), ActionPriority::ApprovedReadyToMerge);
+        assert_eq!(
+            s.action_priority("me", chrono::Utc::now()),
+            ActionPriority::ApprovedReadyToMerge
+        );
     }
 
     #[test]
@@ -440,7 +450,10 @@ mod tests {
         let mut t = make_task("PR");
         t.role = TaskRole::Reviewer;
         let s = Session::new_at(t, chrono::Utc::now());
-        assert_eq!(s.action_priority("me", chrono::Utc::now()), ActionPriority::NeedsYourReview);
+        assert_eq!(
+            s.action_priority("me", chrono::Utc::now()),
+            ActionPriority::NeedsYourReview
+        );
     }
 
     #[test]
@@ -449,23 +462,23 @@ mod tests {
         // inserting a new activity at the front without shifting read_indices
         // would mark the wrong items as read.
         let mut s = Session::new_at(make_task("PR"), chrono::Utc::now());
-        s.push_activity(make_activity("a", "oldest"));  // index 0
-        s.push_activity(make_activity("b", "middle"));  // b=0, a=1
-        s.push_activity(make_activity("c", "newest"));  // c=0, b=1, a=2
+        s.push_activity(make_activity("a", "oldest")); // index 0
+        s.push_activity(make_activity("b", "middle")); // b=0, a=1
+        s.push_activity(make_activity("c", "newest")); // c=0, b=1, a=2
 
         // Mark the middle item (b, currently at index 1) as read.
         s.mark_activity_read(1);
-        assert!(s.is_activity_unread(0));   // c unread
-        assert!(!s.is_activity_unread(1));  // b read
-        assert!(s.is_activity_unread(2));   // a unread
+        assert!(s.is_activity_unread(0)); // c unread
+        assert!(!s.is_activity_unread(1)); // b read
+        assert!(s.is_activity_unread(2)); // a unread
 
         // New activity arrives — everything shifts. b must still be marked read.
         s.push_activity(make_activity("d", "brand new"));
         // Now indices: d=0, c=1, b=2, a=3
-        assert!(s.is_activity_unread(0));   // d unread
-        assert!(s.is_activity_unread(1));   // c unread
-        assert!(!s.is_activity_unread(2));  // b still read (shifted from 1 to 2)
-        assert!(s.is_activity_unread(3));   // a unread
+        assert!(s.is_activity_unread(0)); // d unread
+        assert!(s.is_activity_unread(1)); // c unread
+        assert!(!s.is_activity_unread(2)); // b still read (shifted from 1 to 2)
+        assert!(s.is_activity_unread(3)); // a unread
 
         // And unread_count should be 3 (d, c, a).
         assert_eq!(s.unread_count(), 3);

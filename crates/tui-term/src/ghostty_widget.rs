@@ -114,9 +114,11 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
 
                 // Cursor highlight.
                 if let Some(ref cp) = cursor_pos
-                    && cp.x == x && cp.y == y {
-                        style = style.add_modifier(Modifier::REVERSED);
-                    }
+                    && cp.x == x
+                    && cp.y == y
+                {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
 
                 let buf_x = area.x + x;
                 let buf_y = area.y + y;

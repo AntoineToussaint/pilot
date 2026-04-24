@@ -81,7 +81,6 @@ impl Default for HooksSchedule {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
@@ -89,7 +88,6 @@ pub struct AgentSection {
     #[serde(flatten)]
     pub config: pilot_core::AgentConfig,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -151,7 +149,6 @@ pub struct ProvidersConfig {
     pub github: GithubConfig,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GithubConfig {
@@ -201,7 +198,9 @@ impl Filter {
     pub fn to_search_qualifier(&self) -> Option<String> {
         if let Some(org) = &self.org {
             Some(format!("org:{org}"))
-        } else { self.repo.as_ref().map(|repo| format!("repo:{repo}")) }
+        } else {
+            self.repo.as_ref().map(|repo| format!("repo:{repo}"))
+        }
     }
 
     /// If this is a "watch" filter, return the repo to watch.
@@ -254,7 +253,6 @@ pub struct SlackConfig {
     /// Slack incoming webhook URL for sending messages.
     pub webhook_url: Option<String>,
 }
-
 
 // ─── Serde helper for Duration as seconds ──────────────────────────────────
 

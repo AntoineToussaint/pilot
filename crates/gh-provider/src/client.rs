@@ -98,18 +98,18 @@ impl GhClient {
             // `/tmp/pilot.log` — invaluable when debugging queries GitHub
             // rejects with terse messages like "A query attribute must be
             // specified and must be a string".
-            let raw: serde_json::Value = self
-                .inner
-                .post("/graphql", Some(&body))
-                .await
-                .map_err(|e| {
-                    tracing::error!("GraphQL HTTP error (page {page}): {e}");
-                    tracing::error!(
-                        "GraphQL request body was: {}",
-                        serde_json::to_string_pretty(&body).unwrap_or_default()
-                    );
-                    GhError::Api(e)
-                })?;
+            let raw: serde_json::Value =
+                self.inner
+                    .post("/graphql", Some(&body))
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("GraphQL HTTP error (page {page}): {e}");
+                        tracing::error!(
+                            "GraphQL request body was: {}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
+                        GhError::Api(e)
+                    })?;
 
             let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
                 Ok(r) => r,
@@ -186,7 +186,11 @@ impl GhClient {
             let watch_body = graphql::query_body(&watch_query);
             tracing::debug!("Watch query for {repo}: {watch_query}");
 
-            match self.inner.post::<_, graphql::GqlResponse>("/graphql", Some(&watch_body)).await {
+            match self
+                .inner
+                .post::<_, graphql::GqlResponse>("/graphql", Some(&watch_body))
+                .await
+            {
                 Ok(resp) => {
                     if let Some(data) = resp.data {
                         let existing_keys: std::collections::HashSet<String> =
@@ -200,10 +204,7 @@ impl GhClient {
                     }
                     if let Some(errors) = resp.errors {
                         let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
-                        tracing::warn!(
-                            "Watch query errors for {repo}: {}",
-                            detailed.join("; ")
-                        );
+                        tracing::warn!("Watch query errors for {repo}: {}", detailed.join("; "));
                     }
                 }
                 Err(e) => {
@@ -212,7 +213,11 @@ impl GhClient {
             }
         }
 
-        tracing::info!("GraphQL returned {} PRs (incl. {} watched repos)", tasks.len(), self.watch_repos.len());
+        tracing::info!(
+            "GraphQL returned {} PRs (incl. {} watched repos)",
+            tasks.len(),
+            self.watch_repos.len()
+        );
         Ok(tasks)
     }
 
@@ -316,7 +321,11 @@ impl GhClient {
             .await
             .map_err(GhError::Api)?;
         if let Some(errors) = response.errors {
-            let joined = errors.iter().map(|e| e.full()).collect::<Vec<_>>().join("; ");
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
             tracing::error!("updatePullRequestBranch errors: {joined}");
             return Err(GhError::Graphql(joined));
         }

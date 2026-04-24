@@ -48,8 +48,9 @@ impl InputMode {
             InputMode::PanePrefix => crate::keys::KeyMode::PanePrefix,
             // Overlay modes don't map to keybindings directly,
             // but if asked, return Normal as a safe default.
-            InputMode::TextInput(_) | InputMode::Picker
-            | InputMode::Help => crate::keys::KeyMode::Normal,
+            InputMode::TextInput(_) | InputMode::Picker | InputMode::Help => {
+                crate::keys::KeyMode::Normal
+            }
         }
     }
 

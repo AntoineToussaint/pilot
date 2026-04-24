@@ -147,7 +147,10 @@ pub fn install_hooks(worktree: &Path, session_key: &str) -> std::io::Result<()> 
 
     let path = claude_dir.join("settings.local.json");
     fs::write(&path, serde_json::to_string_pretty(&settings)?)?;
-    tracing::info!("Installed Claude hooks for {session_key} at {}", path.display());
+    tracing::info!(
+        "Installed Claude hooks for {session_key} at {}",
+        path.display()
+    );
     Ok(())
 }
 

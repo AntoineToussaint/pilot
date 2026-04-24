@@ -77,9 +77,9 @@ pub struct Registry {
 impl Registry {
     pub fn default_builtins() -> Self {
         let mut r = Self::default();
-        r.register(Arc::new(builtins::Claude::default()));
-        r.register(Arc::new(builtins::Codex::default()));
-        r.register(Arc::new(builtins::Cursor::default()));
+        r.register(Arc::new(builtins::Claude));
+        r.register(Arc::new(builtins::Codex));
+        r.register(Arc::new(builtins::Cursor));
         r
     }
 

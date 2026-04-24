@@ -109,7 +109,9 @@ pub enum Event {
         sessions: Vec<pilot_core::Session>,
         terminals: Vec<TerminalSnapshot>,
     },
-    SessionUpserted(pilot_core::Session),
+    /// `Session` is ~680 bytes; boxing keeps every `Event` in-flight
+    /// small so the async channel doesn't pay the worst-case size.
+    SessionUpserted(Box<pilot_core::Session>),
     SessionRemoved(SessionKey),
     TerminalSpawned {
         terminal_id: TerminalId,

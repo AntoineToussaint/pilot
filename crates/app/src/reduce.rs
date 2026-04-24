@@ -140,7 +140,10 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             state.filtered_keys = None;
             state.search_active = false;
             state.selected = 0;
-            if matches!(state.input_mode, InputMode::TextInput(TextInputKind::Search)) {
+            if matches!(
+                state.input_mode,
+                InputMode::TextInput(TextInputKind::Search)
+            ) {
                 state.input_mode = InputMode::Normal;
             }
         }
@@ -148,33 +151,37 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         // ── Snooze / unsnooze current session ──
         Action::Snooze => {
             if let Some(key) = selected_key(state)
-                && let Some(session) = state.sessions.get_mut(&key) {
-                    if session.is_snoozed(clock.chrono) {
-                        session.snoozed_until = None;
-                        state.status = format!("Unsnoozed: {}", session.display_name);
-                    } else {
-                        session.snoozed_until =
-                            Some(clock.chrono + chrono::Duration::hours(4));
-                        state.status = format!("Snoozed for 4h: {}", session.display_name);
-                    }
-                    // Persist so the snooze state survives restart.
-                    cmds.push(Command::StoreSaveSession { session_key: key.into() });
+                && let Some(session) = state.sessions.get_mut(&key)
+            {
+                if session.is_snoozed(clock.chrono) {
+                    session.snoozed_until = None;
+                    state.status = format!("Unsnoozed: {}", session.display_name);
+                } else {
+                    session.snoozed_until = Some(clock.chrono + chrono::Duration::hours(4));
+                    state.status = format!("Snoozed for 4h: {}", session.display_name);
                 }
+                // Persist so the snooze state survives restart.
+                cmds.push(Command::StoreSaveSession {
+                    session_key: key.into(),
+                });
+            }
         }
 
         // ── SnoozeForever: "I'm done with this PR" — park it in the
         // Snoozed mailbox for ~1 year. Still reachable from Shift-S.
         Action::SnoozeForever => {
             if let Some(key) = selected_key(state)
-                && let Some(session) = state.sessions.get_mut(&key) {
-                    session.snoozed_until =
-                        Some(clock.chrono + chrono::Duration::days(365));
-                    state.status = format!(
-                        "Archived to Snoozed: {} (Shift-S to find it)",
-                        session.display_name
-                    );
-                    cmds.push(Command::StoreSaveSession { session_key: key.into() });
-                }
+                && let Some(session) = state.sessions.get_mut(&key)
+            {
+                session.snoozed_until = Some(clock.chrono + chrono::Duration::days(365));
+                state.status = format!(
+                    "Archived to Snoozed: {} (Shift-S to find it)",
+                    session.display_name
+                );
+                cmds.push(Command::StoreSaveSession {
+                    session_key: key.into(),
+                });
+            }
         }
 
         // ── Toggle between Inbox and Snoozed mailboxes ──
@@ -201,8 +208,10 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             state.panes.focus_prev();
             skip_empty_detail(state);
         }
-        Action::FocusPaneUp | Action::FocusPaneDown
-        | Action::FocusPaneLeft | Action::FocusPaneRight => {
+        Action::FocusPaneUp
+        | Action::FocusPaneDown
+        | Action::FocusPaneLeft
+        | Action::FocusPaneRight => {
             let dir = match action {
                 Action::FocusPaneUp => Direction::Up,
                 Action::FocusPaneDown => Direction::Down,
@@ -212,7 +221,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             // We don't know the true screen rect here; use a nominal one.
             // focus_direction only needs relative positions, and the shell
             // recomputes the exact layout on the next render.
-            state.panes.focus_direction(dir, ratatui::prelude::Rect::default());
+            state
+                .panes
+                .focus_direction(dir, ratatui::prelude::Rect::default());
         }
         Action::SplitVertical => {
             let content = selected_key(state)
@@ -284,10 +295,11 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         }
         Action::DetailCursorDown => {
             if let Some(key) = selected_key(state)
-                && let Some(session) = state.sessions.get(&key) {
-                    let max = session.activity.len().saturating_sub(1);
-                    state.detail_cursor = (state.detail_cursor + 1).min(max);
-                }
+                && let Some(session) = state.sessions.get(&key)
+            {
+                let max = session.activity.len().saturating_sub(1);
+                state.detail_cursor = (state.detail_cursor + 1).min(max);
+            }
             mark_cursor_comment_read(state);
         }
         Action::ToggleCommentSelect => {
@@ -299,13 +311,14 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         }
         Action::SelectAllComments => {
             if let Some(key) = selected_key(state)
-                && let Some(session) = state.sessions.get(&key) {
-                    if state.selected_comments.len() == session.activity.len() {
-                        state.selected_comments.clear();
-                    } else {
-                        state.selected_comments = (0..session.activity.len()).collect();
-                    }
+                && let Some(session) = state.sessions.get(&key)
+            {
+                if state.selected_comments.len() == session.activity.len() {
+                    state.selected_comments.clear();
+                } else {
+                    state.selected_comments = (0..session.activity.len()).collect();
                 }
+            }
         }
 
         // ── Quit (2-press guard if terminals alive) ──
@@ -317,7 +330,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 );
                 // Persist everything before exit.
                 for key in state.sessions.order().to_vec() {
-                    cmds.push(Command::StoreSaveSession { session_key: key.into() });
+                    cmds.push(Command::StoreSaveSession {
+                        session_key: key.into(),
+                    });
                 }
                 state.should_quit = true;
             } else {
@@ -355,15 +370,16 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         // ── OpenInBrowser ──
         Action::OpenInBrowser => {
             if let Some(key) = selected_key(state)
-                && let Some(session) = state.sessions.get(&key) {
-                    let url = session.primary_task.url.clone();
-                    if url.is_empty() {
-                        state.status = "No URL for this session".into();
-                    } else {
-                        state.status = "Opened in browser".into();
-                        cmds.push(Command::OpenUrl { url });
-                    }
+                && let Some(session) = state.sessions.get(&key)
+            {
+                let url = session.primary_task.url.clone();
+                if url.is_empty() {
+                    state.status = "No URL for this session".into();
+                } else {
+                    state.status = "Opened in browser".into();
+                    cmds.push(Command::OpenUrl { url });
                 }
+            }
         }
 
         // ── FocusDetail: jump focus onto the Detail pane ──
@@ -378,33 +394,35 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         // ── JumpToNextAsking: cycle to next session needing input ──
         Action::JumpToNextAsking => {
-            use crate::nav::NavItem;
             use crate::agent_state::AgentState;
+            use crate::nav::NavItem;
             let items = crate::nav::nav_items_from_state(state);
             let cur = state.selected;
             let n = items.len();
             // Scan forward from the current position, wrapping. Skip the
             // starting index so repeated presses cycle through all asking
             // sessions rather than getting stuck on the current one.
-            let asking: Option<(usize, String)> = (1..=n)
-                .find_map(|off| {
-                    let idx = (cur + off) % n;
-                    match items.get(idx)? {
-                        NavItem::Session(k)
-                            if state.agent_states.get(k) == Some(&AgentState::Asking) =>
-                        {
-                            Some((idx, k.clone()))
-                        }
-                        _ => None,
+            let asking: Option<(usize, String)> = (1..=n).find_map(|off| {
+                let idx = (cur + off) % n;
+                match items.get(idx)? {
+                    NavItem::Session(k)
+                        if state.agent_states.get(k) == Some(&AgentState::Asking) =>
+                    {
+                        Some((idx, k.clone()))
                     }
-                });
+                    _ => None,
+                }
+            });
             if let Some((idx, key)) = asking {
                 state.selected = idx;
                 // Also switch the active tab to that session so Tab
                 // lands the user on its terminal, and emit
                 // FocusTerminalPane so the user can reply immediately.
-                if let Some(tab_idx) =
-                    state.terminal_index.tab_order.iter().position(|k| k == &key)
+                if let Some(tab_idx) = state
+                    .terminal_index
+                    .tab_order
+                    .iter()
+                    .position(|k| k == &key)
                 {
                     state.terminal_index.active_tab = Some(tab_idx);
                     cmds.push(Command::SetActiveTab { idx: tab_idx });
@@ -421,23 +439,26 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         // ── OpenCiChecks: open the PR's /checks tab ──
         Action::OpenCiChecks => {
             if let Some(key) = selected_key(state)
-                && let Some(session) = state.sessions.get(&key) {
-                    let base = &session.primary_task.url;
-                    if base.is_empty() {
-                        state.status = "No URL for this session".into();
-                    } else {
-                        // github.com/o/r/pull/N → github.com/o/r/pull/N/checks
-                        let url = format!("{}/checks", base.trim_end_matches('/'));
-                        state.status = "Opened CI checks".into();
-                        cmds.push(Command::OpenUrl { url });
-                    }
+                && let Some(session) = state.sessions.get(&key)
+            {
+                let base = &session.primary_task.url;
+                if base.is_empty() {
+                    state.status = "No URL for this session".into();
+                } else {
+                    // github.com/o/r/pull/N → github.com/o/r/pull/N/checks
+                    let url = format!("{}/checks", base.trim_end_matches('/'));
+                    state.status = "Opened CI checks".into();
+                    cmds.push(Command::OpenUrl { url });
                 }
+            }
         }
 
         // ── Merge (two-press guard, optimistic) ──
         Action::MergePr => {
             if let Some(key) = selected_key(state) {
-                let Some(session) = state.sessions.get(&key) else { return cmds };
+                let Some(session) = state.sessions.get(&key) else {
+                    return cmds;
+                };
                 let repo = session.primary_task.repo.clone().unwrap_or_default();
                 let pr_number = session
                     .primary_task
@@ -468,9 +489,8 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     });
                 } else {
                     state.merge_pending = Some(key);
-                    state.status = format!(
-                        "Merge? {repo}#{pr_number} (review: {review}). Press M again."
-                    );
+                    state.status =
+                        format!("Merge? {repo}#{pr_number} (review: {review}). Press M again.");
                 }
             }
         }
@@ -484,8 +504,12 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         // ── Approve (only Reviewer or Assignee may approve) ──
         Action::ApprovePr => {
-            let Some(key) = selected_key(state) else { return cmds };
-            let Some(session) = state.sessions.get(&key) else { return cmds };
+            let Some(key) = selected_key(state) else {
+                return cmds;
+            };
+            let Some(session) = state.sessions.get(&key) else {
+                return cmds;
+            };
             let role = session.primary_task.role;
             let current_review = session.primary_task.review;
             let repo = session.primary_task.repo.clone().unwrap_or_default();
@@ -522,8 +546,12 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         // ── UpdateBranch (two-press confirmation) ──
         Action::UpdateBranch => {
-            let Some(key) = selected_key(state) else { return cmds };
-            let Some(session) = state.sessions.get(&key) else { return cmds };
+            let Some(key) = selected_key(state) else {
+                return cmds;
+            };
+            let Some(session) = state.sessions.get(&key) else {
+                return cmds;
+            };
             let task = &session.primary_task;
             let repo = task.repo.clone().unwrap_or_default();
             let pr_number = task
@@ -550,16 +578,19 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 });
             } else {
                 state.update_branch_pending = Some(key);
-                state.status = format!(
-                    "Update branch on {repo}#{pr_number}? Press Shift-U again to confirm."
-                );
+                state.status =
+                    format!("Update branch on {repo}#{pr_number}? Press Shift-U again to confirm.");
             }
         }
 
         // ── SlackNudge ──
         Action::SlackNudge => {
-            let Some(key) = selected_key(state) else { return cmds };
-            let Some(session) = state.sessions.get(&key) else { return cmds };
+            let Some(key) = selected_key(state) else {
+                return cmds;
+            };
+            let Some(session) = state.sessions.get(&key) else {
+                return cmds;
+            };
             let Some(webhook_url) = state.config.slack.webhook_url.clone() else {
                 state.status =
                     "No Slack webhook configured — set slack.webhook_url in ~/.pilot/config.yaml"
@@ -631,14 +662,24 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             // (e.g. sidebar nav already retargeted it), so keystrokes keep
             // going to the sidebar.
             if state.terminal_index.contains_key(&key) {
-                if let Some(idx) = state.terminal_index.tab_order.iter().position(|k| k == &key) {
+                if let Some(idx) = state
+                    .terminal_index
+                    .tab_order
+                    .iter()
+                    .position(|k| k == &key)
+                {
                     state.terminal_index.active_tab = Some(idx);
                     cmds.push(Command::SetActiveTab { idx });
                 }
-                cmds.push(Command::FocusTerminalPane { session_key: key.into() });
+                cmds.push(Command::FocusTerminalPane {
+                    session_key: key.into(),
+                });
                 return cmds;
             }
-            let worktree_path = state.sessions.get(&key).and_then(|s| s.worktree_path.clone());
+            let worktree_path = state
+                .sessions
+                .get(&key)
+                .and_then(|s| s.worktree_path.clone());
             if let Some(path) = worktree_path {
                 cmds.push(Command::SpawnTerminal {
                     session_key: key.into(),
@@ -685,7 +726,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 state.terminal_index.active_tab = Some(next);
                 cmds.push(Command::SetActiveTab { idx: next });
                 if let Some(key) = state.terminal_index.tab_order.get(next).cloned() {
-                    cmds.push(Command::FocusTerminalPane { session_key: key.into() });
+                    cmds.push(Command::FocusTerminalPane {
+                        session_key: key.into(),
+                    });
                 }
                 sync_selected_to_active_tab(state);
             }
@@ -698,7 +741,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 state.terminal_index.active_tab = Some(next);
                 cmds.push(Command::SetActiveTab { idx: next });
                 if let Some(key) = state.terminal_index.tab_order.get(next).cloned() {
-                    cmds.push(Command::FocusTerminalPane { session_key: key.into() });
+                    cmds.push(Command::FocusTerminalPane {
+                        session_key: key.into(),
+                    });
                 }
                 sync_selected_to_active_tab(state);
             }
@@ -709,7 +754,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 state.terminal_index.active_tab = Some(idx);
                 cmds.push(Command::SetActiveTab { idx });
                 if let Some(key) = state.terminal_index.tab_order.get(idx).cloned() {
-                    cmds.push(Command::FocusTerminalPane { session_key: key.into() });
+                    cmds.push(Command::FocusTerminalPane {
+                        session_key: key.into(),
+                    });
                 }
                 sync_selected_to_active_tab(state);
             }
@@ -719,7 +766,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 if let Some(session) = state.sessions.get_mut(&key) {
                     session.state = pilot_core::SessionState::Active;
                 }
-                cmds.push(Command::CloseTerminal { session_key: key.into() });
+                cmds.push(Command::CloseTerminal {
+                    session_key: key.into(),
+                });
             }
         }
         Action::KillSession => {
@@ -768,7 +817,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             state.agent_states.remove(&key);
             cmds.push(Command::KillTmuxSession { tmux_name });
             if state.terminal_index.contains_key(&key) {
-                cmds.push(Command::CloseTerminal { session_key: key.clone().into() });
+                cmds.push(Command::CloseTerminal {
+                    session_key: key.clone().into(),
+                });
             }
 
             if is_local {
@@ -811,10 +862,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             // row next to the successful one.
             let (prefill, replaces) = selected_key(state)
                 .and_then(|k| state.sessions.get(&k).cloned().map(|s| (k, s)))
-                .filter(|(_k, s)| {
-                    s.primary_task.id.source == "local"
-                        && s.worktree_path.is_none()
-                })
+                .filter(|(_k, s)| s.primary_task.id.source == "local" && s.worktree_path.is_none())
                 .map(|(k, s)| {
                     let branch = s.primary_task.branch.clone().unwrap_or_default();
                     let slug = branch
@@ -832,7 +880,10 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         Action::NewSessionCancel => {
             state.new_session_input = None;
             state.new_session_replaces = None;
-            if matches!(state.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
+            if matches!(
+                state.input_mode,
+                InputMode::TextInput(TextInputKind::NewSession)
+            ) {
                 state.input_mode = InputMode::Normal;
             }
             state.status = String::new();
@@ -840,7 +891,10 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
         Action::NewSessionConfirm { description } => {
             state.new_session_input = None;
             let replaces = state.new_session_replaces.take();
-            if matches!(state.input_mode, InputMode::TextInput(TextInputKind::NewSession)) {
+            if matches!(
+                state.input_mode,
+                InputMode::TextInput(TextInputKind::NewSession)
+            ) {
                 state.input_mode = InputMode::Normal;
             }
 
@@ -877,8 +931,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             //   - On nothing: bail.
             let (owner, repo, base_branch) = {
                 let Some(repo_full) = infer_repo_context(state) else {
-                    state.status =
-                        "New session: select a PR or a repo header first".into();
+                    state.status = "New session: select a PR or a repo header first".into();
                     return cmds;
                 };
                 let Some((owner, repo)) = repo_full.split_once('/') else {
@@ -952,9 +1005,8 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 state.notified_asking.remove(&old_key);
                 state.agent_states.remove(&old_key);
             }
-            state.status = format!(
-                "Creating worktree {repo_full}#{branch_name} off {base_branch}…"
-            );
+            state.status =
+                format!("Creating worktree {repo_full}#{branch_name} off {base_branch}…");
 
             // Move the sidebar cursor onto the new session so when the
             // subsequent `OpenSession(Claude)` fires after WorktreeReady,
@@ -976,7 +1028,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 branch: branch_name,
                 base: Some(base_branch),
                 session_key: key.clone().into(),
-                then: Some(Box::new(Action::OpenSession(crate::action::ShellKind::Claude))),
+                then: Some(Box::new(Action::OpenSession(
+                    crate::action::ShellKind::Claude,
+                ))),
             });
         }
 
@@ -986,45 +1040,51 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 let cursor = state.detail_cursor;
                 state.quick_reply_input = Some((key, String::new(), cursor));
                 state.input_mode = InputMode::TextInput(TextInputKind::QuickReply);
-                state.status =
-                    "Quick reply — type message, Enter to post, Esc to cancel".into();
+                state.status = "Quick reply — type message, Enter to post, Esc to cancel".into();
             }
         }
         Action::QuickReplyCancel => {
             state.quick_reply_input = None;
-            if matches!(state.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
+            if matches!(
+                state.input_mode,
+                InputMode::TextInput(TextInputKind::QuickReply)
+            ) {
                 state.input_mode = InputMode::Normal;
             }
             state.status = String::new();
         }
         Action::QuickReplyConfirm { body } => {
-            if matches!(state.input_mode, InputMode::TextInput(TextInputKind::QuickReply)) {
+            if matches!(
+                state.input_mode,
+                InputMode::TextInput(TextInputKind::QuickReply)
+            ) {
                 state.input_mode = InputMode::Normal;
             }
             if let Some((session_key, _, comment_idx)) = state.quick_reply_input.take()
-                && let Some(session) = state.sessions.get(&session_key) {
-                    let repo = session.primary_task.repo.clone().unwrap_or_default();
-                    let pr_number = session
-                        .primary_task
-                        .id
-                        .key
-                        .rsplit_once('#')
-                        .map(|(_, n)| n.to_string())
-                        .unwrap_or_default();
-                    let reply_to = session
-                        .activity
-                        .get(comment_idx)
-                        .and_then(|a| a.node_id.clone());
-                    if !repo.is_empty() && !pr_number.is_empty() && !body.trim().is_empty() {
-                        state.status = "Posting reply…".into();
-                        cmds.push(Command::RunGhComment {
-                            repo,
-                            pr_number,
-                            body,
-                            reply_to_node_id: reply_to,
-                        });
-                    }
+                && let Some(session) = state.sessions.get(&session_key)
+            {
+                let repo = session.primary_task.repo.clone().unwrap_or_default();
+                let pr_number = session
+                    .primary_task
+                    .id
+                    .key
+                    .rsplit_once('#')
+                    .map(|(_, n)| n.to_string())
+                    .unwrap_or_default();
+                let reply_to = session
+                    .activity
+                    .get(comment_idx)
+                    .and_then(|a| a.node_id.clone());
+                if !repo.is_empty() && !pr_number.is_empty() && !body.trim().is_empty() {
+                    state.status = "Posting reply…".into();
+                    cmds.push(Command::RunGhComment {
+                        repo,
+                        pr_number,
+                        body,
+                        reply_to_node_id: reply_to,
+                    });
                 }
+            }
         }
 
         // ── Picker (reviewer/assignee) ──
@@ -1034,8 +1094,12 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             } else {
                 PickerKind::Assignee
             };
-            let Some(key) = selected_key(state) else { return cmds };
-            let Some(session) = state.sessions.get(&key) else { return cmds };
+            let Some(key) = selected_key(state) else {
+                return cmds;
+            };
+            let Some(session) = state.sessions.get(&key) else {
+                return cmds;
+            };
             let task = &session.primary_task;
             let repo = task.repo.as_deref().unwrap_or("").to_string();
             let pr_number = task
@@ -1083,7 +1147,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                 collaborators,
                 ..
             } = *payload;
-            state.collaborators_cache.insert(repo.clone(), collaborators.clone());
+            state
+                .collaborators_cache
+                .insert(repo.clone(), collaborators.clone());
             // Determine current selections from the session.
             let current: Vec<String> = state
                 .sessions
@@ -1214,10 +1280,8 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                                     attempt: after_attempt + 1,
                                 });
                             }
-                            state.status = format!(
-                                "Monitor: retry #{} for {display_name}",
-                                after_attempt + 1
-                            );
+                            state.status =
+                                format!("Monitor: retry #{} for {display_name}", after_attempt + 1);
                             cmds.extend(queue_monitor_claude_fix(state, &session_key, clock));
                         }
                     }
@@ -1230,8 +1294,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                         }
                         state.status = format!("Monitor: CI passed for {display_name}");
                     } else if let Some(s) = state.sessions.get_mut(&session_key) {
-                        s.monitor =
-                            Some(pilot_core::MonitorState::WaitingCi { after_attempt: attempt });
+                        s.monitor = Some(pilot_core::MonitorState::WaitingCi {
+                            after_attempt: attempt,
+                        });
                         state.status = format!("Monitor: waiting for CI on {display_name}");
                     }
                 }
@@ -1312,7 +1377,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
 
         // ── Monitor toggle ──
         Action::ToggleMonitor => {
-            let Some(key) = selected_key(state) else { return cmds };
+            let Some(key) = selected_key(state) else {
+                return cmds;
+            };
             let is_monitored = state.monitored_sessions.contains(&key);
             if is_monitored {
                 state.monitored_sessions.remove(&key);
@@ -1334,7 +1401,9 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     session_key: key.clone().into(),
                     monitored: true,
                 });
-                cmds.push(Command::DispatchAction(Action::MonitorTick { session_key: key.into() }));
+                cmds.push(Command::DispatchAction(Action::MonitorTick {
+                    session_key: key.into(),
+                }));
             }
         }
 
@@ -1395,8 +1464,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                         task.state,
                         pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
                     ) {
-                        let was_viewing =
-                            selected_key(state).as_deref() == Some(key.as_str());
+                        let was_viewing = selected_key(state).as_deref() == Some(key.as_str());
                         cmds.extend(forget_session_in_state(state, &key));
                         if was_viewing {
                             reset_detail(state);
@@ -1442,10 +1510,7 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                         session_key: key.clone().into(),
                     });
                 }
-                EventKind::NewActivity {
-                    task_id,
-                    activity,
-                } => {
+                EventKind::NewActivity { task_id, activity } => {
                     let key = task_id.to_string();
                     let mut pushed = false;
                     if let Some(session) = state.sessions.get_mut(&key) {
@@ -1458,17 +1523,17 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     // Notify if author needs to reply.
                     if state.loaded
                         && let Some(session) = state.sessions.get(&key)
-                            && session.primary_task.needs_reply
-                                && session.primary_task.role == pilot_core::TaskRole::Author
-                            {
-                                cmds.push(Command::Notify {
-                                    title: format!(
-                                        "{} commented on {}",
-                                        activity.author, session.display_name
-                                    ),
-                                    body: "You may need to reply".into(),
-                                });
-                            }
+                        && session.primary_task.needs_reply
+                        && session.primary_task.role == pilot_core::TaskRole::Author
+                    {
+                        cmds.push(Command::Notify {
+                            title: format!(
+                                "{} commented on {}",
+                                activity.author, session.display_name
+                            ),
+                            body: "You may need to reply".into(),
+                        });
+                    }
                 }
                 EventKind::TaskStateChanged { task_id, new, .. } => {
                     let key = task_id.to_string();
@@ -1537,7 +1602,11 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
                     // readable, but include enough of the message to debug
                     // (GraphQL errors are often >100 chars).
                     let shown: String = message.chars().take(160).collect();
-                    let suffix = if message.chars().count() > 160 { "…" } else { "" };
+                    let suffix = if message.chars().count() > 160 {
+                        "…"
+                    } else {
+                        ""
+                    };
                     state.status = format!("Provider error: {shown}{suffix}");
                     // Poison the purge: an error means the fresh result set
                     // is incomplete, so we can't trust "not in first_poll_keys"
@@ -1558,12 +1627,12 @@ pub fn reduce(state: &mut State, action: Action, clock: &Clock) -> Vec<Command> 
             if let Some(prior) = prior_nav_item {
                 let items = crate::nav::nav_items_from_state(state);
                 let new_idx = match &prior {
-                    crate::nav::NavItem::Session(k) => items.iter().position(|i| {
-                        matches!(i, crate::nav::NavItem::Session(x) if x == k)
-                    }),
-                    crate::nav::NavItem::Repo(r) => items.iter().position(|i| {
-                        matches!(i, crate::nav::NavItem::Repo(x) if x == r)
-                    }),
+                    crate::nav::NavItem::Session(k) => items
+                        .iter()
+                        .position(|i| matches!(i, crate::nav::NavItem::Session(x) if x == k)),
+                    crate::nav::NavItem::Repo(r) => items
+                        .iter()
+                        .position(|i| matches!(i, crate::nav::NavItem::Repo(x) if x == r)),
                 };
                 if let Some(idx) = new_idx {
                     state.selected = idx;
@@ -1635,9 +1704,10 @@ fn mark_cursor_comment_read(state: &mut State) {
     if let Some(key) = selected_key(state) {
         let idx = state.detail_cursor;
         if let Some(session) = state.sessions.get_mut(&key)
-            && session.is_activity_unread(idx) {
-                session.mark_activity_read(idx);
-            }
+            && session.is_activity_unread(idx)
+        {
+            session.mark_activity_read(idx);
+        }
     }
 }
 
@@ -1649,12 +1719,7 @@ fn mark_cursor_comment_read(state: &mut State) {
 fn forget_session_in_state(state: &mut State, key: &str) -> Vec<Command> {
     let was_monitored = state.monitored_sessions.remove(key);
     state.sessions.remove(key);
-    if state
-        .viewing_since
-        .as_ref()
-        .map(|(k, _)| k.as_str())
-        == Some(key)
-    {
+    if state.viewing_since.as_ref().map(|(k, _)| k.as_str()) == Some(key) {
         state.viewing_since = None;
     }
     if was_monitored {
@@ -1670,9 +1735,13 @@ fn forget_session_in_state(state: &mut State, key: &str) -> Vec<Command> {
 /// Shift detail_cursor / selected_comments forward by n when new activities
 /// prepend to the currently-viewed session's activity list.
 fn shift_detail_indices_if_viewing(state: &mut State, session_key: &str, n: usize) {
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let viewing = selected_key(state).as_deref() == Some(session_key);
-    if !viewing { return; }
+    if !viewing {
+        return;
+    }
     let new_len = state
         .sessions
         .get(session_key)
@@ -1689,7 +1758,11 @@ fn shift_detail_indices_if_viewing(state: &mut State, session_key: &str, n: usiz
         .iter()
         .filter_map(|i| {
             let shifted = i + n;
-            if shifted < new_len { Some(shifted) } else { None }
+            if shifted < new_len {
+                Some(shifted)
+            } else {
+                None
+            }
         })
         .collect();
 }
@@ -1760,7 +1833,9 @@ fn queue_monitor_claude_fix(state: &mut State, session_key: &str, clock: &Clock)
     }
 
     // Queue the prompt; shell injects it on the next idle detection.
-    state.pending_prompts.insert(session_key.to_string(), prompt);
+    state
+        .pending_prompts
+        .insert(session_key.to_string(), prompt);
     state.last_claude_send = Some(clock.instant);
     cmds
 }
@@ -1768,7 +1843,9 @@ fn queue_monitor_claude_fix(state: &mut State, session_key: &str, clock: &Clock)
 /// After changing the active terminal tab, move the sidebar cursor onto the
 /// session that tab represents.
 fn sync_selected_to_active_tab(state: &mut State) {
-    let Some(tab_key) = state.terminal_index.active_key().cloned() else { return };
+    let Some(tab_key) = state.terminal_index.active_key().cloned() else {
+        return;
+    };
     let items = crate::nav::nav_items_from_state(state);
     if let Some(idx) = items
         .iter()
@@ -1791,9 +1868,7 @@ fn selected_key(state: &State) -> Option<String> {
 pub(crate) fn infer_repo_context(state: &State) -> Option<String> {
     let items = crate::nav::nav_items_from_state(state);
     match items.get(state.selected)? {
-        crate::nav::NavItem::Session(k) => {
-            state.sessions.get(k)?.primary_task.repo.clone()
-        }
+        crate::nav::NavItem::Session(k) => state.sessions.get(k)?.primary_task.repo.clone(),
         crate::nav::NavItem::Repo(r) => Some(r.clone()),
     }
 }
@@ -1930,7 +2005,9 @@ mod tests {
     use super::*;
     use crate::state::State;
 
-    fn now() -> Clock { Clock::for_test() }
+    fn now() -> Clock {
+        Clock::for_test()
+    }
 
     #[test]
     fn status_message_updates_status() {
@@ -2030,7 +2107,10 @@ mod tests {
         let cmds = reduce(&mut s, Action::Quit, &now());
         assert!(s.should_quit);
         // Saves all sessions (empty, so 0 cmds of that kind) - still ok.
-        assert!(cmds.iter().all(|c| matches!(c, Command::StoreSaveSession { .. })));
+        assert!(
+            cmds.iter()
+                .all(|c| matches!(c, Command::StoreSaveSession { .. }))
+        );
     }
 
     #[test]
@@ -2056,24 +2136,45 @@ mod tests {
         use pilot_core::*;
         let mut s = State::new_for_test();
         let mut task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "t".into(), body: None, state: TaskState::Open,
-            role: TaskRole::Author, ci: CiStatus::None, review: ReviewStatus::None,
-            checks: vec![], unread_count: 0,
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
             url: "https://github.com/o/r/pull/1".into(),
-            repo: Some("o/r".into()), branch: Some("b".into()),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
             base_branch: None,
-            updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
-            assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
         task.url = "https://github.com/o/r/pull/1".into();
         let session = pilot_core::Session::new_at(task, chrono::Utc::now());
         s.sessions.insert("github:o/r#1".into(), session);
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::OpenInBrowser, &now());
         assert!(matches!(
@@ -2087,22 +2188,46 @@ mod tests {
         use pilot_core::*;
         let mut s = State::new_for_test();
         let task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "t".into(), body: None, state: TaskState::Open,
-            role: TaskRole::Author,  // Author can't self-approve.
-            ci: CiStatus::None, review: ReviewStatus::None,
-            checks: vec![], unread_count: 0,
-            url: "u".into(), repo: Some("o/r".into()), branch: Some("b".into()),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author, // Author can't self-approve.
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "u".into(),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
             base_branch: None,
-            updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
-            assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
-        s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(task, chrono::Utc::now()),
+        );
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::ApprovePr, &now());
         assert!(cmds.is_empty());
@@ -2114,22 +2239,47 @@ mod tests {
         use pilot_core::*;
         let mut s = State::new_for_test();
         let mut task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "t".into(), body: None, state: TaskState::Open,
-            role: TaskRole::Author, ci: CiStatus::None, review: ReviewStatus::None,
-            checks: vec![], unread_count: 0,
-            url: "u".into(), repo: Some("o/r".into()), branch: Some("b".into()),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "u".into(),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
             base_branch: None,
-            updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
-            assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
         task.role = TaskRole::Reviewer;
-        s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(task, chrono::Utc::now()),
+        );
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::ApprovePr, &now());
         assert!(matches!(cmds.as_slice(), [Command::RunGhApprove { .. }]));
@@ -2144,21 +2294,46 @@ mod tests {
         use pilot_core::*;
         let mut s = State::new_for_test();
         let task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "t".into(), body: None, state: TaskState::Open,
-            role: TaskRole::Author, ci: CiStatus::None, review: ReviewStatus::None,
-            checks: vec![], unread_count: 0, url: "u".into(),
-            repo: Some("o/r".into()), branch: Some("b".into()),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "u".into(),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
             base_branch: None,
-            updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
-            assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
-        s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(task, chrono::Utc::now()),
+        );
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::ToggleMonitor, &now());
         assert!(s.monitored_sessions.contains("github:o/r#1"));
@@ -2169,7 +2344,10 @@ mod tests {
         assert!(!s.monitored_sessions.contains("github:o/r#1"));
         assert!(matches!(
             cmds.as_slice(),
-            [Command::UpdateMonitoredSet { monitored: false, .. }]
+            [Command::UpdateMonitoredSet {
+                monitored: false,
+                ..
+            }]
         ));
     }
 
@@ -2178,22 +2356,46 @@ mod tests {
         use pilot_core::*;
         let mut s = State::new_for_test();
         let task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "t".into(), body: None, state: TaskState::Open,
-            role: TaskRole::Author, ci: CiStatus::Success,
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::Success,
             review: ReviewStatus::Approved,
-            checks: vec![], unread_count: 0, url: "u".into(),
-            repo: Some("o/r".into()), branch: Some("b".into()),
+            checks: vec![],
+            unread_count: 0,
+            url: "u".into(),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
             base_branch: None,
-            updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
-            assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
-        s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(task, chrono::Utc::now()),
+        );
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::MergePr, &now());
         assert!(cmds.is_empty());
@@ -2213,26 +2415,57 @@ mod tests {
         use pilot_core::*;
         let mut s = State::new_for_test();
         let task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "t".into(), body: None, state: TaskState::Open,
-            role: TaskRole::Author, ci: CiStatus::None, review: ReviewStatus::None,
-            checks: vec![], unread_count: 0, url: "u".into(),
-            repo: Some("o/r".into()), branch: Some("b".into()),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "u".into(),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
             base_branch: None,
-            updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
-            assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: true, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: true,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
-        s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(task, chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(task, chrono::Utc::now()),
+        );
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::MarkRead, &now());
         assert!(matches!(cmds.as_slice(), [Command::StoreMarkRead { .. }]));
         assert_eq!(s.status, "Marked as read");
-        assert!(!s.sessions.get("github:o/r#1").unwrap().primary_task.needs_reply);
+        assert!(
+            !s.sessions
+                .get("github:o/r#1")
+                .unwrap()
+                .primary_task
+                .needs_reply
+        );
     }
 
     // ── ExternalEvent ──
@@ -2283,9 +2516,10 @@ mod tests {
         assert!(s.sessions.contains_key("github:o/r#1"));
         assert!(s.loaded);
         assert!(s.first_poll_keys.contains("github:o/r#1"));
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, Command::StoreSaveSession { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::StoreSaveSession { .. }))
+        );
     }
 
     #[test]
@@ -2303,10 +2537,14 @@ mod tests {
 
         let cmds = reduce(&mut s, Action::ExternalEvent(Box::new(event)), &now());
         assert!(!s.sessions.contains_key("github:o/r#1"));
-        assert!(cmds.iter().any(|c| matches!(c, Command::CloseTerminal { .. })));
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, Command::StoreDeleteSession { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::CloseTerminal { .. }))
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::StoreDeleteSession { .. }))
+        );
     }
 
     #[test]
@@ -2330,9 +2568,10 @@ mod tests {
 
         assert!(!s.sessions.contains_key("github:o/r#1"));
         assert!(!s.monitored_sessions.contains("github:o/r#1"));
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, Command::StoreDeleteSession { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::StoreDeleteSession { .. }))
+        );
     }
 
     #[test]
@@ -2389,11 +2628,17 @@ mod tests {
     #[test]
     fn edit_reviewers_uses_cache_when_available() {
         let mut s = State::new_for_test();
-        s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(sample_task(1), chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(sample_task(1), chrono::Utc::now()),
+        );
         s.collaborators_cache
             .insert("o/r".to_string(), vec!["alice".into(), "bob".into()]);
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::EditReviewers, &now());
         // No fetch — cache hit. Picker is opened.
@@ -2405,9 +2650,15 @@ mod tests {
     #[test]
     fn edit_reviewers_fetches_when_not_cached() {
         let mut s = State::new_for_test();
-        s.sessions.insert("github:o/r#1".into(), pilot_core::Session::new_at(sample_task(1), chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(sample_task(1), chrono::Utc::now()),
+        );
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         let cmds = reduce(&mut s, Action::EditReviewers, &now());
         assert!(matches!(
@@ -2420,19 +2671,21 @@ mod tests {
     #[test]
     fn picker_confirm_emits_edit_when_changed() {
         let mut s = State::new_for_test();
-        s.sessions
-            .insert("github:o/r#1".into(), pilot_core::Session::new_at(sample_task(1), chrono::Utc::now()));
+        s.sessions.insert(
+            "github:o/r#1".into(),
+            pilot_core::Session::new_at(sample_task(1), chrono::Utc::now()),
+        );
         s.picker = Some(PickerState {
             kind: PickerKind::Reviewer,
             items: vec![
                 crate::picker::PickerItem {
                     login: "alice".into(),
-                    selected: true,   // newly selected
+                    selected: true, // newly selected
                     was_selected: false,
                 },
                 crate::picker::PickerItem {
                     login: "bob".into(),
-                    selected: false,  // newly removed
+                    selected: false, // newly removed
                     was_selected: true,
                 },
             ],
@@ -2474,10 +2727,7 @@ mod tests {
             [Command::DispatchAction(Action::MonitorTick { .. })]
         ));
         assert_eq!(
-            s.sessions
-                .get("github:o/r#1")
-                .unwrap()
-                .state,
+            s.sessions.get("github:o/r#1").unwrap().state,
             pilot_core::SessionState::Active
         );
     }
@@ -2518,19 +2768,36 @@ mod tests {
         // inherit from. `N` requires context — with an empty inbox it
         // has nothing to branch off.
         let task = pilot_core::Task {
-            id: pilot_core::TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "seed".into(), body: None,
-            state: pilot_core::TaskState::Open, role: pilot_core::TaskRole::Author,
-            ci: pilot_core::CiStatus::None, review: pilot_core::ReviewStatus::None,
-            checks: vec![], unread_count: 0,
+            id: pilot_core::TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "seed".into(),
+            body: None,
+            state: pilot_core::TaskState::Open,
+            role: pilot_core::TaskRole::Author,
+            ci: pilot_core::CiStatus::None,
+            review: pilot_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
             url: "https://github.com/o/r/pull/1".into(),
-            repo: Some("o/r".into()), branch: Some("topic".into()),
-            base_branch: Some("main".into()), updated_at: chrono::Utc::now(),
-            labels: vec![], reviewers: vec![], assignees: vec![],
-            auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            repo: Some("o/r".into()),
+            branch: Some("topic".into()),
+            base_branch: Some("main".into()),
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
         s.sessions.insert(
             "github:o/r#1".into(),
@@ -2553,7 +2820,9 @@ mod tests {
 
         let cmds = reduce(
             &mut s,
-            Action::NewSessionConfirm { description: "feat/foo".into() },
+            Action::NewSessionConfirm {
+                description: "feat/foo".into(),
+            },
             &now(),
         );
         assert!(s.new_session_input.is_none());
@@ -2572,7 +2841,10 @@ mod tests {
             .iter()
             .find(|c| matches!(c, Command::CheckoutWorktree { .. }))
             .expect("CheckoutWorktree queued");
-        if let Command::CheckoutWorktree { base, branch, then, .. } = checkout {
+        if let Command::CheckoutWorktree {
+            base, branch, then, ..
+        } = checkout
+        {
             assert_eq!(base.as_deref(), Some("main"));
             assert_eq!(branch, "feat/foo");
             assert!(matches!(then.as_deref(), Some(Action::OpenSession(_))));
@@ -2586,11 +2858,17 @@ mod tests {
         // create a dead-end session without repo/branch info.
         let cmds = reduce(
             &mut s,
-            Action::NewSessionConfirm { description: "feat/foo".into() },
+            Action::NewSessionConfirm {
+                description: "feat/foo".into(),
+            },
             &now(),
         );
         assert_eq!(s.sessions.len(), 0);
-        assert!(!cmds.iter().any(|c| matches!(c, Command::CheckoutWorktree { .. })));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::CheckoutWorktree { .. }))
+        );
         assert!(s.status.contains("select a PR or a repo header first"));
     }
 
@@ -2688,10 +2966,7 @@ mod tests {
         let mut s = State::new_for_test();
         reduce(&mut s, Action::SearchActivate, &now());
         assert!(s.search_active);
-        assert_eq!(
-            s.input_mode,
-            InputMode::TextInput(TextInputKind::Search)
-        );
+        assert_eq!(s.input_mode, InputMode::TextInput(TextInputKind::Search));
     }
 
     #[test]
@@ -2704,35 +2979,64 @@ mod tests {
 
     #[test]
     fn select_all_comments_toggles() {
-        use pilot_core::{Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+        use pilot_core::{
+            Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
+        };
         let mut s = State::new_for_test();
         // Build a session with 3 activities so SelectAll has something to select.
         let task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
-            title: "t".into(), body: None, state: TaskState::Open,
-            role: TaskRole::Author, ci: CiStatus::None, review: ReviewStatus::None,
-            checks: vec![], unread_count: 0, url: "u".into(),
-            repo: Some("o/r".into()), branch: Some("b".into()),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "u".into(),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
             base_branch: None,
-            updated_at: chrono::Utc::now(), labels: vec![], reviewers: vec![],
-            assignees: vec![], auto_merge_enabled: false, is_in_merge_queue: false,
-            has_conflicts: false, is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         };
         let mut session = pilot_core::Session::new_at(task, chrono::Utc::now());
         for i in 0..3 {
             session.activity.push(Activity {
-                author: format!("u{i}"), body: "x".into(),
+                author: format!("u{i}"),
+                body: "x".into(),
                 created_at: chrono::Utc::now(),
-                kind: ActivityKind::Comment, node_id: None,
-                path: None, line: None, diff_hunk: None, thread_id: None,
+                kind: ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
             });
         }
         s.sessions.insert("github:o/r#1".into(), session);
         // Make it selected in the nav.
         let items = crate::nav::nav_items_from_state(&s);
-        s.selected = items.iter().position(|i| matches!(i, crate::nav::NavItem::Session(_))).unwrap();
+        s.selected = items
+            .iter()
+            .position(|i| matches!(i, crate::nav::NavItem::Session(_)))
+            .unwrap();
 
         assert!(s.selected_comments.is_empty());
         reduce(&mut s, Action::SelectAllComments, &now());

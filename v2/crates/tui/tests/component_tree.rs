@@ -100,7 +100,8 @@ fn mount_child_is_reachable() {
     let (root, _) = Recorder::new(root_id, Outcome::BubbleUp);
     let (child, _) = Recorder::new(child_id, Outcome::BubbleUp);
     let mut tree = ComponentTree::new(Box::new(root));
-    tree.mount_child(root_id, Box::new(child)).expect("mount ok");
+    tree.mount_child(root_id, Box::new(child))
+        .expect("mount ok");
     assert!(tree.contains(child_id));
     assert_eq!(tree.parent_of(child_id), Some(root_id));
     assert_eq!(tree.children_of(root_id), &[child_id]);

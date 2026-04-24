@@ -12,6 +12,11 @@ path = "src/lib.rs"
 name = "pilot"
 path = "src/main.rs"
 
+[dev-dependencies]
+# Golden-snapshot testing. Use `cargo insta review` to accept
+# intentional render changes; otherwise CI catches regressions.
+insta = { version = "1", features = ["yaml"] }
+
 [dependencies]
 pilot-core       = { workspace = true }
 pilot-config     = { workspace = true }

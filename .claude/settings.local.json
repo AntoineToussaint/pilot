@@ -12,7 +12,8 @@
       "Bash(tmux ls *)",
       "Bash(pgrep -lf \"target.*/pilot$\")",
       "Bash(pgrep -lf \"pilot$\")",
-      "Bash(tmux new-session *)"
+      "Bash(tmux new-session *)",
+      "Bash(INSTA_UPDATE=always cargo test --manifest-path /Users/antoine/Development/gh-pilot/v2/Cargo.toml -p pilot-v2-tui --test snapshots)"
     ]
   }
 }

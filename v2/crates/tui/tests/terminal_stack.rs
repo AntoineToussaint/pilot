@@ -25,11 +25,7 @@ fn sk(s: &str) -> SessionKey {
     s.into()
 }
 
-fn spawned(
-    id: u64,
-    session: &str,
-    kind: TerminalKind,
-) -> Event {
+fn spawned(id: u64, session: &str, kind: TerminalKind) -> Event {
     Event::TerminalSpawned {
         terminal_id: TerminalId(id),
         session_key: sk(session),
@@ -232,10 +228,7 @@ fn char_key_emits_write_to_active_terminal() {
     assert_eq!(outcome, Outcome::Consumed);
     assert_eq!(cmds.len(), 1);
     match &cmds[0] {
-        Command::Write {
-            terminal_id,
-            bytes,
-        } => {
+        Command::Write { terminal_id, bytes } => {
             assert_eq!(*terminal_id, TerminalId(42));
             assert_eq!(bytes, b"a");
         }
@@ -352,15 +345,9 @@ fn strip_ansi_removes_csi() {
 #[test]
 fn strip_ansi_removes_osc() {
     // OSC terminated by BEL.
-    assert_eq!(
-        strip_ansi(b"before\x1b]0;title\x07after"),
-        b"beforeafter"
-    );
+    assert_eq!(strip_ansi(b"before\x1b]0;title\x07after"), b"beforeafter");
     // OSC terminated by ST (ESC \).
-    assert_eq!(
-        strip_ansi(b"x\x1b]0;title\x1b\\y"),
-        b"xy"
-    );
+    assert_eq!(strip_ansi(b"x\x1b]0;title\x1b\\y"), b"xy");
 }
 
 #[test]
@@ -389,7 +376,8 @@ fn strip_ansi_handles_stray_esc_at_end() {
 fn render_to_string(t: &mut TerminalStack, w: u16, h: u16, focused: bool) -> String {
     let backend = TestBackend::new(w, h);
     let mut term = Terminal::new(backend).unwrap();
-    term.draw(|f| t.render(Rect::new(0, 0, w, h), f, focused)).unwrap();
+    term.draw(|f| t.render(Rect::new(0, 0, w, h), f, focused))
+        .unwrap();
     let buf = term.backend().buffer();
     (0..buf.area.height)
         .map(|y| {

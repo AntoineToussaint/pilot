@@ -68,11 +68,7 @@ pub(crate) fn detect_asking(recent_output: &[u8], patterns: &[String]) -> bool {
     // "esc to cancel" / "tab to amend" appear ON the dialog, and
     // only then — they're reliable markers the dialog is open right
     // now (not a leftover from earlier output).
-    const CLAUDE_ASKING_MARKERS: &[&str] = &[
-        "esc to cancel",
-        "tab to amend",
-        "enter to confirm",
-    ];
+    const CLAUDE_ASKING_MARKERS: &[&str] = &["esc to cancel", "tab to amend", "enter to confirm"];
     for marker in CLAUDE_ASKING_MARKERS {
         if lower_all.contains(marker) {
             return true;
@@ -266,7 +262,12 @@ mod tests {
     fn test_asking_on_yn_pattern() {
         let old = Instant::now() - Duration::from_secs(5);
         let patterns = vec!["(y/n)".into(), "allow ".into()];
-        let state = detect_state(old, b"Allow Bash(git push)? (y/n)", AgentState::Active, &patterns);
+        let state = detect_state(
+            old,
+            b"Allow Bash(git push)? (y/n)",
+            AgentState::Active,
+            &patterns,
+        );
         assert_eq!(state, AgentState::Asking);
     }
 
@@ -277,7 +278,12 @@ mod tests {
         // configured patterns + specific Claude UI markers.
         let old = Instant::now() - Duration::from_secs(5);
         let patterns: Vec<String> = vec![];
-        let state = detect_state(old, b"Do you want to continue?", AgentState::Active, &patterns);
+        let state = detect_state(
+            old,
+            b"Do you want to continue?",
+            AgentState::Active,
+            &patterns,
+        );
         assert_eq!(state, AgentState::Idle);
     }
 

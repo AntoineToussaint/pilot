@@ -50,7 +50,10 @@ impl WorktreeManager {
     }
 
     fn bare_clone_path(&self, owner: &str, repo: &str) -> PathBuf {
-        self.base_dir.join("repos").join(owner).join(format!("{repo}.git"))
+        self.base_dir
+            .join("repos")
+            .join(owner)
+            .join(format!("{repo}.git"))
     }
 
     fn worktree_path(&self, owner: &str, repo: &str, branch: &str) -> PathBuf {
@@ -197,20 +200,16 @@ impl WorktreeManager {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let start_point = if ref_exists(
-            &bare_path,
-            &format!("refs/remotes/origin/{base_branch}"),
-        )
-        .await
-        {
-            format!("refs/remotes/origin/{base_branch}")
-        } else if ref_exists(&bare_path, &format!("refs/heads/{base_branch}")).await {
-            format!("refs/heads/{base_branch}")
-        } else {
-            return Err(GitError::Command(format!(
-                "base branch '{base_branch}' not found locally or on origin"
-            )));
-        };
+        let start_point =
+            if ref_exists(&bare_path, &format!("refs/remotes/origin/{base_branch}")).await {
+                format!("refs/remotes/origin/{base_branch}")
+            } else if ref_exists(&bare_path, &format!("refs/heads/{base_branch}")).await {
+                format!("refs/heads/{base_branch}")
+            } else {
+                return Err(GitError::Command(format!(
+                    "base branch '{base_branch}' not found locally or on origin"
+                )));
+            };
 
         run_git_in(
             &bare_path,
@@ -249,7 +248,11 @@ impl WorktreeManager {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 result.push(Worktree {
                     path: entry.path(),
-                    branch: name.rsplit_once('-').map(|(_, b)| b).unwrap_or(&name).into(),
+                    branch: name
+                        .rsplit_once('-')
+                        .map(|(_, b)| b)
+                        .unwrap_or(&name)
+                        .into(),
                     name,
                 });
             }
@@ -306,7 +309,11 @@ async fn run_git(args: &[&str]) -> Result<String, GitError> {
 async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     let started = std::time::Instant::now();
     tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
-    let output = Command::new("git").current_dir(cwd).args(args).output().await?;
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .await?;
     let elapsed = started.elapsed();
     if output.status.success() {
         tracing::info!(

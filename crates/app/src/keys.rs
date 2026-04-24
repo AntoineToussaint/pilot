@@ -25,10 +25,11 @@ pub fn map_key(key: KeyEvent, mode: KeyMode) -> Action {
         // In terminal mode: double Ctrl-C within 1s = force quit.
         let mut last = LAST_CTRL_C.lock().unwrap();
         if let Some(prev) = *last
-            && prev.elapsed().as_millis() < 1000 {
-                *last = None;
-                return Action::Quit;
-            }
+            && prev.elapsed().as_millis() < 1000
+        {
+            *last = None;
+            return Action::Quit;
+        }
         *last = Some(std::time::Instant::now());
         // Single Ctrl-C goes to PTY (handled by Action::None below).
     }
@@ -45,9 +46,10 @@ pub fn map_key(key: KeyEvent, mode: KeyMode) -> Action {
 
     // Number keys 1-9: switch tabs (Normal and Detail).
     if let KeyCode::Char(c @ '1'..='9') = key.code
-        && key.modifiers.is_empty() {
-            return Action::GoToTab((c as usize) - ('0' as usize));
-        }
+        && key.modifiers.is_empty()
+    {
+        return Action::GoToTab((c as usize) - ('0' as usize));
+    }
 
     // Look up in the keymap. First match for the current mode wins.
     for (_category, bindings) in BINDINGS {
@@ -82,10 +84,10 @@ fn matches_key(event: KeyEvent, code: KeyCode, modifiers: KeyModifiers) -> bool 
     if modifiers == KeyModifiers::NONE {
         // But for chars with shift (like 'M'), we need exact match.
         if let KeyCode::Char(c) = code
-            && c.is_uppercase() {
-                return event.modifiers.contains(KeyModifiers::SHIFT)
-                    || event.code == KeyCode::Char(c);
-            }
+            && c.is_uppercase()
+        {
+            return event.modifiers.contains(KeyModifiers::SHIFT) || event.code == KeyCode::Char(c);
+        }
         true
     } else {
         event.modifiers.contains(modifiers)
@@ -116,9 +118,10 @@ fn map_terminal(key: KeyEvent) -> Action {
         return Action::FocusPaneNext;
     }
     if let KeyCode::Char(c @ '1'..='9') = key.code
-        && key.modifiers.contains(KeyModifiers::ALT) {
-            return Action::GoToTab((c as usize) - ('0' as usize));
-        }
+        && key.modifiers.contains(KeyModifiers::ALT)
+    {
+        return Action::GoToTab((c as usize) - ('0' as usize));
+    }
     Action::None
 }
 
@@ -157,9 +160,7 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         // submitting". Requires the Kitty keyboard protocol to be enabled
         // upstream so crossterm actually reports the Shift modifier on
         // Enter; otherwise the terminal collapses it to plain Enter.
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            Some(vec![0x1b, b'\r'])
-        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => Some(vec![0x1b, b'\r']),
         KeyCode::Enter => Some(vec![b'\r']),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Esc => Some(vec![0x1b]),

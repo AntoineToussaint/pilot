@@ -15,10 +15,7 @@ fn anthropic_known_families_have_rates() {
         "claude-haiku-4-5-20251001",
     ] {
         let rate = pricing::rate_per_mtok(ApiProvider::Anthropic, model);
-        assert!(
-            rate.is_some(),
-            "{model} should have a known rate"
-        );
+        assert!(rate.is_some(), "{model} should have a known rate");
     }
 }
 

@@ -28,8 +28,7 @@ impl SqliteStore {
     }
 
     pub fn in_memory() -> Result<Self, StoreError> {
-        let conn =
-            Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
+        let conn = Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -59,9 +58,7 @@ impl SqliteStore {
         .map_err(|e| StoreError::Backend(e.to_string()))?;
 
         // Add session_json column if upgrading from older schema.
-        let _ = conn.execute_batch(
-            "ALTER TABLE sessions ADD COLUMN session_json TEXT;",
-        );
+        let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN session_json TEXT;");
 
         Ok(())
     }

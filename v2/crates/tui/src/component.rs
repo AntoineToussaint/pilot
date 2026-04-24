@@ -31,8 +31,8 @@
 
 use crossterm::event::KeyEvent;
 use pilot_v2_ipc::{Command, Event};
-use ratatui::prelude::Rect;
 use ratatui::Frame;
+use ratatui::prelude::Rect;
 use std::any::Any;
 
 /// Blanket supertrait that gives every `Component` free `Any` downcast

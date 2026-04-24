@@ -55,10 +55,7 @@ pub enum Command {
     },
     /// Ask an existing TermSession to scroll its viewport (libghostty
     /// scrollback). Lines positive → up, negative → down, zero → reset.
-    ScrollTerminal {
-        session_key: SessionKey,
-        delta: i32,
-    },
+    ScrollTerminal { session_key: SessionKey, delta: i32 },
 
     // ── Store persistence ──
     /// Save a session's full JSON into SQLite.
@@ -78,10 +75,7 @@ pub enum Command {
         session_key: SessionKey,
     },
     /// `gh pr review <num> --approve --repo <repo>`.
-    RunGhApprove {
-        repo: String,
-        pr_number: String,
-    },
+    RunGhApprove { repo: String, pr_number: String },
     /// `gh api -X PUT /repos/<repo>/pulls/<num>/update-branch` — merges the
     /// PR's base branch into head (same as the github.com "Update branch"
     /// button).
@@ -167,7 +161,10 @@ pub enum Command {
 
     // ── External services ──
     /// POST a JSON body to a URL (used for Slack webhooks).
-    HttpPostJson { url: String, body: serde_json::Value },
+    HttpPostJson {
+        url: String,
+        body: serde_json::Value,
+    },
     /// Open a URL in the OS default browser.
     OpenUrl { url: String },
     /// Fire a desktop notification.
@@ -187,5 +184,4 @@ pub enum Command {
     /// Set a status message (tiny convenience — reduce usually writes status
     /// directly into State, but async Commands use this to report results).
     SetStatus(String),
-
 }

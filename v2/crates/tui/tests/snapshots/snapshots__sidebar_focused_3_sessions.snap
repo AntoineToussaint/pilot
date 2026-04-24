@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: rendered
+---
+┌ INBOX (3) ───────────────────────────┐
+│▸ task: o/r#1                         │
+│  task: o/r#2                         │
+│  task: o/r#3                         │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

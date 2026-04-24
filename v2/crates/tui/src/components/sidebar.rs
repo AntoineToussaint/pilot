@@ -103,7 +103,8 @@ impl Sidebar {
     }
 
     pub fn selected_session(&self) -> Option<&Session> {
-        self.selected_session_key().and_then(|k| self.sessions.get(k))
+        self.selected_session_key()
+            .and_then(|k| self.sessions.get(k))
     }
 
     pub fn mailbox(&self) -> Mailbox {
@@ -174,8 +175,8 @@ impl Component for Sidebar {
 
     fn handle_key(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> Outcome {
         // Any key other than Shift-X disarms the kill confirmation.
-        let is_shift_x = key.code == KeyCode::Char('X')
-            && key.modifiers.contains(KeyModifiers::SHIFT);
+        let is_shift_x =
+            key.code == KeyCode::Char('X') && key.modifiers.contains(KeyModifiers::SHIFT);
         if self.kill_pending.is_some() && !is_shift_x {
             self.kill_pending = None;
         }
@@ -333,7 +334,7 @@ impl Component for Sidebar {
             }
             Event::SessionUpserted(session) => {
                 let key: SessionKey = (&session.task_id).into();
-                self.sessions.insert(key, session.clone());
+                self.sessions.insert(key, (**session).clone());
                 self.recompute_visible();
             }
             Event::SessionRemoved(key) => {

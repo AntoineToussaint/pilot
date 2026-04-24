@@ -28,10 +28,7 @@ pub enum EventKind {
     },
 
     /// New activity on a task (comment, review, etc.).
-    NewActivity {
-        task_id: TaskId,
-        activity: Activity,
-    },
+    NewActivity { task_id: TaskId, activity: Activity },
 
     /// CI status changed.
     CiStatusChanged {
@@ -51,9 +48,7 @@ pub enum EventKind {
     TaskRemoved(TaskId),
 
     /// Provider encountered an error (transient).
-    ProviderError {
-        message: String,
-    },
+    ProviderError { message: String },
 }
 
 impl Event {
@@ -73,7 +68,12 @@ impl Event {
                 format!("{task_id} → {new:?}")
             }
             EventKind::NewActivity { task_id, activity } => {
-                format!("{}: {} from {}", task_id, activity_label(&activity.kind), activity.author)
+                format!(
+                    "{}: {} from {}",
+                    task_id,
+                    activity_label(&activity.kind),
+                    activity.author
+                )
             }
             EventKind::CiStatusChanged { task_id, new, .. } => {
                 format!("{task_id} CI → {new:?}")

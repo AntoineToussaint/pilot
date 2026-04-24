@@ -275,7 +275,7 @@ impl Component for RightPane {
         };
         if current.task_id == session.task_id {
             let last = session.activity.len().saturating_sub(1);
-            self.session = Some(session.clone());
+            self.session = Some((**session).clone());
             self.comment_cursor = self.comment_cursor.min(last);
             if self.comment_scroll > last {
                 self.comment_scroll = last;

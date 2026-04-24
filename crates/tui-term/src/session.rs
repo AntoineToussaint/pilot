@@ -60,9 +60,9 @@ impl TermSession {
             .openpty(size)
             .map_err(|e| TermError::PtyOpen(e.into()))?;
 
-        let program = cmd.first().ok_or_else(|| {
-            TermError::Spawn("empty command".to_string().into())
-        })?;
+        let program = cmd
+            .first()
+            .ok_or_else(|| TermError::Spawn("empty command".to_string().into()))?;
         let mut command = CommandBuilder::new(program);
         for arg in &cmd[1..] {
             command.arg(arg);
@@ -235,20 +235,31 @@ impl TermSession {
 
     /// Scroll the viewport up by N lines (into the scrollback history).
     pub fn scroll_up(&mut self, lines: usize) {
-        if lines == 0 { return; }
+        if lines == 0 {
+            return;
+        }
         self.terminal
-            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(-(lines as isize)));
+            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
+                -(lines as isize),
+            ));
         self.scrolled_back = true;
     }
 
     /// Scroll the viewport down by N lines (back toward the live area).
     pub fn scroll_down(&mut self, lines: usize) {
-        if lines == 0 { return; }
+        if lines == 0 {
+            return;
+        }
         self.terminal
-            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines as isize));
+            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
+                lines as isize,
+            ));
         // If we scrolled all the way back to the bottom, clear the flag.
         if let Ok(rows) = self.terminal.scrollback_rows()
-            && rows == 0 { self.scrolled_back = false; }
+            && rows == 0
+        {
+            self.scrolled_back = false;
+        }
     }
 
     /// Jump back to the live (bottom) area.

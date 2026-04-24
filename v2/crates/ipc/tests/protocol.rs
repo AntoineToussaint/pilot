@@ -6,9 +6,7 @@
 //! one of these assertions blows up. Far better than finding out when
 //! a v0.2 client can't talk to a v0.3 daemon.
 
-use pilot_v2_ipc::{
-    AgentState, Command, Event, TerminalId, TerminalKind, TerminalSnapshot,
-};
+use pilot_v2_ipc::{AgentState, Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
 use tokio::io::duplex;
 
 fn sample_session() -> pilot_core::Session {
@@ -120,7 +118,7 @@ fn all_events() -> Vec<Event> {
                 last_seq: 42,
             }],
         },
-        Event::SessionUpserted(sample_session()),
+        Event::SessionUpserted(Box::new(sample_session())),
         Event::SessionRemoved(key.clone()),
         Event::TerminalSpawned {
             terminal_id: TerminalId(2),
@@ -239,7 +237,10 @@ async fn socket_clean_eof_is_none() {
     let (a, mut b) = duplex(64);
     drop(a);
     let result: Result<Option<Command>, _> = read_frame(&mut b).await;
-    assert!(matches!(result, Ok(None)), "expected Ok(None), got {result:?}");
+    assert!(
+        matches!(result, Ok(None)),
+        "expected Ok(None), got {result:?}"
+    );
 }
 
 /// Zero-byte message (empty bytes payload) round-trips. Guard against

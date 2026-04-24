@@ -206,10 +206,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         checks: vec![],
         unread_count: 0,
         url: issue.url.clone(),
-        repo: issue
-            .team
-            .as_ref()
-            .map(|t| format!("linear/{}", t.key)),
+        repo: issue.team.as_ref().map(|t| format!("linear/{}", t.key)),
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,

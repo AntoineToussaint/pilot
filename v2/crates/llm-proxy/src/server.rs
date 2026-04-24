@@ -197,9 +197,7 @@ async fn handle_request(
     // Forward.
     let (status, response_bytes, request_bytes, upstream_err) =
         match forward(ctx.as_ref(), req).await {
-            Ok((status, body_bytes, req_bytes)) => {
-                (status.as_u16(), body_bytes, req_bytes, None)
-            }
+            Ok((status, body_bytes, req_bytes)) => (status.as_u16(), body_bytes, req_bytes, None),
             Err(e) => (
                 StatusCode::BAD_GATEWAY.as_u16(),
                 Bytes::from_static(b"pilot-daemon: upstream error\n"),
@@ -251,11 +249,11 @@ async fn handle_request(
         "content-type",
         detect_content_type(&response_bytes, &path_and_query),
     );
-    let resp = builder
-        .body(Full::new(response_bytes))
-        .unwrap_or_else(|_| {
-            Response::new(Full::new(Bytes::from_static(b"pilot-daemon: encode error\n")))
-        });
+    let resp = builder.body(Full::new(response_bytes)).unwrap_or_else(|_| {
+        Response::new(Full::new(Bytes::from_static(
+            b"pilot-daemon: encode error\n",
+        )))
+    });
     Ok(resp)
 }
 
@@ -319,8 +317,13 @@ async fn forward(
         let lname = name.as_str().to_ascii_lowercase();
         if matches!(
             lname.as_str(),
-            "host" | "connection" | "content-length" | "transfer-encoding"
-                | "proxy-authorization" | "upgrade" | "te"
+            "host"
+                | "connection"
+                | "content-length"
+                | "transfer-encoding"
+                | "proxy-authorization"
+                | "upgrade"
+                | "te"
         ) {
             continue;
         }
@@ -348,4 +351,3 @@ enum ForwardError {
     #[error("read upstream body: {0}")]
     ReadUpstream(reqwest::Error),
 }
-

@@ -14,7 +14,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use pilot_v2_daemon::agent_spawn::{
-    spawn_with_proxy, AgentSpawnConfig, ProxyProvider, ProxyTarget,
+    AgentSpawnConfig, ProxyProvider, ProxyTarget, spawn_with_proxy,
 };
 use portable_pty::PtySize;
 use std::collections::HashMap;
@@ -173,7 +173,11 @@ async fn openai_provider_injects_openai_base_url() {
 async fn no_proxy_means_no_proxy_env_vars() {
     let config = AgentSpawnConfig {
         session_key: "o/r#3".into(),
-        argv: vec!["sh".into(), "-c".into(), "echo -n '|'$ANTHROPIC_BASE_URL'|'".into()],
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "echo -n '|'$ANTHROPIC_BASE_URL'|'".into(),
+        ],
         cwd: None,
         size: default_size(),
         extra_env: HashMap::new(),
@@ -187,7 +191,10 @@ async fn no_proxy_means_no_proxy_env_vars() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let replay = String::from_utf8_lossy(&spawn.pty.subscribe().await.replay).to_string();
     // The env var wasn't set, so the expansion is empty: "||".
-    assert!(replay.contains("||"), "expected empty expansion; got: {replay}");
+    assert!(
+        replay.contains("||"),
+        "expected empty expansion; got: {replay}"
+    );
 }
 
 // ── End-to-end: child makes HTTP request through proxy ─────────────────

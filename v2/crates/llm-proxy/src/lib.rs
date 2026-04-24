@@ -119,11 +119,7 @@ impl Default for ProxyConfig {
         Self {
             listen: "127.0.0.1:0".parse().expect("static addr parses"),
             record_bodies: true,
-            redact_headers: vec![
-                "authorization".into(),
-                "x-api-key".into(),
-                "cookie".into(),
-            ],
+            redact_headers: vec!["authorization".into(), "x-api-key".into(), "cookie".into()],
             redact_json_paths: vec![],
         }
     }

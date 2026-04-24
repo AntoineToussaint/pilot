@@ -1,0 +1,9 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: rendered
+---
+┌ INBOX (0) ───────────────────────────┐
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

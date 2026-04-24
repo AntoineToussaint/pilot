@@ -5,10 +5,9 @@
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pilot_core::{
-    Activity, ActivityKind, CiStatus, ReviewStatus, Session, Task, TaskId, TaskRole,
-    TaskState,
+    Activity, ActivityKind, CiStatus, ReviewStatus, Session, Task, TaskId, TaskRole, TaskState,
 };
-use pilot_v2_ipc::{Command, Event};
+use pilot_v2_ipc::Event;
 use pilot_v2_tui::components::RightPane;
 use pilot_v2_tui::{Component, ComponentId};
 use ratatui::Terminal;
@@ -119,11 +118,7 @@ fn set_session_to_different_resets_cursor() {
 
     // Different session — cursor resets.
     rp.set_session(Some(session_with_n_activities("o/r#2", 5)));
-    assert_eq!(
-        rp.comment_cursor(),
-        0,
-        "cursor resets when session changes"
-    );
+    assert_eq!(rp.comment_cursor(), 0, "cursor resets when session changes");
 }
 
 #[test]
@@ -265,7 +260,7 @@ fn session_upserted_for_current_updates_state() {
 
     // Upsert with one MORE activity. Cursor stays put.
     session.push_activity(activity("bob", "new one", ActivityKind::Comment));
-    rp.on_event(&Event::SessionUpserted(session));
+    rp.on_event(&Event::SessionUpserted(Box::new(session)));
     assert_eq!(rp.comment_cursor(), 2);
     assert_eq!(rp.selected_session().unwrap().activity.len(), 4);
 }
@@ -283,7 +278,7 @@ fn session_upserted_shrinks_clamps_cursor() {
 
     // New snapshot has fewer activities (e.g. server de-duped).
     let smaller = session_with_n_activities("o/r#1", 2);
-    rp.on_event(&Event::SessionUpserted(smaller));
+    rp.on_event(&Event::SessionUpserted(Box::new(smaller)));
     assert_eq!(rp.comment_cursor(), 1, "clamped to last available");
 }
 
@@ -292,9 +287,9 @@ fn session_upserted_for_different_session_is_ignored() {
     let mut rp = RightPane::new(ComponentId::new(1));
     rp.set_session(Some(session_with_n_activities("o/r#1", 3)));
     // Upsert arrives for a DIFFERENT session — must not replace ours.
-    rp.on_event(&Event::SessionUpserted(session_with_n_activities(
+    rp.on_event(&Event::SessionUpserted(Box::new(session_with_n_activities(
         "o/r#99", 10,
-    )));
+    ))));
     assert_eq!(
         rp.selected_session().unwrap().task_id.key,
         "o/r#1",
@@ -310,16 +305,16 @@ fn unrelated_events_do_not_perturb_state() {
         title: "hi".into(),
         body: "there".into(),
     });
-    rp.on_event(&Event::Refresh_stub());
+    rp.on_event(&Event::refresh_stub());
     assert_eq!(rp.comment_cursor(), 0);
     assert!(rp.selected_session().is_some());
 }
 
 trait EventStub {
-    fn Refresh_stub() -> Event;
+    fn refresh_stub() -> Event;
 }
 impl EventStub for Event {
-    fn Refresh_stub() -> Event {
+    fn refresh_stub() -> Event {
         Event::ProviderError {
             source: "x".into(),
             message: "y".into(),
@@ -365,14 +360,8 @@ fn render_shows_header_fields() {
     let rendered = render_to_string(&mut rp, 60, 20, true);
     assert!(rendered.contains("OPEN"), "state tag; got:\n{rendered}");
     assert!(rendered.contains("PR o/r#1"), "title; got:\n{rendered}");
-    assert!(
-        rendered.contains("feature/x"),
-        "branch; got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Reviewer"),
-        "role; got:\n{rendered}"
-    );
+    assert!(rendered.contains("feature/x"), "branch; got:\n{rendered}");
+    assert!(rendered.contains("Reviewer"), "role; got:\n{rendered}");
     assert!(
         rendered.contains("alice"),
         "reviewers list; got:\n{rendered}"

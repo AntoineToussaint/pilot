@@ -85,29 +85,30 @@ impl SessionManager {
         if let Ok(records) = store.list_sessions() {
             for record in records {
                 if let Some(json) = &record.session_json
-                    && let Ok(mut session) = serde_json::from_str::<Session>(json) {
-                        // Skip merged/closed — they're done.
-                        if matches!(
-                            session.primary_task.state,
-                            pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
-                        ) {
-                            let _ = store.delete_session(&session.task_id);
-                            continue;
-                        }
-                        // If a session was persisted mid-checkout, the git
-                        // process that was supposed to land it in Active is
-                        // long gone. Don't boot into a spinner that nothing
-                        // can resolve — reset to Active and let the user
-                        // retry with `c` or delete it with `Shift-X`.
-                        if matches!(session.state, pilot_core::SessionState::CheckingOut) {
-                            tracing::info!(
-                                "Resetting stuck CheckingOut session on load: {}",
-                                session.task_id
-                            );
-                            session.state = pilot_core::SessionState::Active;
-                        }
-                        self.insert(record.task_id.clone(), session);
+                    && let Ok(mut session) = serde_json::from_str::<Session>(json)
+                {
+                    // Skip merged/closed — they're done.
+                    if matches!(
+                        session.primary_task.state,
+                        pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
+                    ) {
+                        let _ = store.delete_session(&session.task_id);
+                        continue;
                     }
+                    // If a session was persisted mid-checkout, the git
+                    // process that was supposed to land it in Active is
+                    // long gone. Don't boot into a spinner that nothing
+                    // can resolve — reset to Active and let the user
+                    // retry with `c` or delete it with `Shift-X`.
+                    if matches!(session.state, pilot_core::SessionState::CheckingOut) {
+                        tracing::info!(
+                            "Resetting stuck CheckingOut session on load: {}",
+                            session.task_id
+                        );
+                        session.state = pilot_core::SessionState::Active;
+                    }
+                    self.insert(record.task_id.clone(), session);
+                }
             }
         }
     }
@@ -140,34 +141,54 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_core::{
-        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
-    };
+    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     fn task(title: &str, updated: chrono::DateTime<chrono::Utc>) -> Task {
         Task {
-            id: TaskId { source: "test".into(), key: title.into() },
-            title: title.into(), body: None,
-            state: TaskState::Open, role: TaskRole::Author,
-            ci: CiStatus::None, review: ReviewStatus::None,
-            checks: vec![], unread_count: 0,
+            id: TaskId {
+                source: "test".into(),
+                key: title.into(),
+            },
+            title: title.into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
             url: format!("https://github.com/o/r/pull/{title}"),
-            repo: Some("o/r".into()), branch: Some("f".into()),
+            repo: Some("o/r".into()),
+            branch: Some("f".into()),
             base_branch: None,
             updated_at: updated,
-            labels: vec![], reviewers: vec![], assignees: vec![],
-            auto_merge_enabled: false, is_in_merge_queue: false, has_conflicts: false,
-            is_behind_base: false, node_id: None,
-            needs_reply: false, last_commenter: None,
-            recent_activity: vec![], additions: 0, deletions: 0,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
         }
     }
 
     #[test]
     fn insert_dedups_order() {
         let mut m = SessionManager::new();
-        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
-        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert(
+            "a".into(),
+            Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()),
+        );
+        m.insert(
+            "a".into(),
+            Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()),
+        );
         assert_eq!(m.len(), 1);
         assert_eq!(m.order(), &["a"]);
     }
@@ -175,8 +196,14 @@ mod tests {
     #[test]
     fn remove_is_atomic() {
         let mut m = SessionManager::new();
-        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
-        m.insert("b".into(), Session::new_at(task("b", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert(
+            "a".into(),
+            Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()),
+        );
+        m.insert(
+            "b".into(),
+            Session::new_at(task("b", chrono::Utc::now()), chrono::Utc::now()),
+        );
         m.remove("a");
         assert!(!m.contains_key("a"));
         assert_eq!(m.order(), &["b"]);
@@ -185,7 +212,10 @@ mod tests {
     #[test]
     fn remove_missing_is_noop() {
         let mut m = SessionManager::new();
-        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert(
+            "a".into(),
+            Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()),
+        );
         m.remove("does-not-exist");
         assert!(m.contains_key("a"));
     }
@@ -195,8 +225,14 @@ mod tests {
         let mut m = SessionManager::new();
         let older = chrono::Utc::now() - chrono::Duration::hours(2);
         let newer = chrono::Utc::now();
-        m.insert("old".into(), Session::new_at(task("old", older), chrono::Utc::now()));
-        m.insert("new".into(), Session::new_at(task("new", newer), chrono::Utc::now()));
+        m.insert(
+            "old".into(),
+            Session::new_at(task("old", older), chrono::Utc::now()),
+        );
+        m.insert(
+            "new".into(),
+            Session::new_at(task("new", newer), chrono::Utc::now()),
+        );
         m.sort_by_updated();
         assert_eq!(m.order(), &["new", "old"]);
     }
@@ -205,11 +241,23 @@ mod tests {
     fn order_stays_in_sync_after_mixed_ops() {
         // Regression guard — `order` and `sessions` must never diverge.
         let mut m = SessionManager::new();
-        m.insert("a".into(), Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()));
-        m.insert("b".into(), Session::new_at(task("b", chrono::Utc::now()), chrono::Utc::now()));
-        m.insert("c".into(), Session::new_at(task("c", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert(
+            "a".into(),
+            Session::new_at(task("a", chrono::Utc::now()), chrono::Utc::now()),
+        );
+        m.insert(
+            "b".into(),
+            Session::new_at(task("b", chrono::Utc::now()), chrono::Utc::now()),
+        );
+        m.insert(
+            "c".into(),
+            Session::new_at(task("c", chrono::Utc::now()), chrono::Utc::now()),
+        );
         m.remove("b");
-        m.insert("b".into(), Session::new_at(task("b2", chrono::Utc::now()), chrono::Utc::now()));
+        m.insert(
+            "b".into(),
+            Session::new_at(task("b2", chrono::Utc::now()), chrono::Utc::now()),
+        );
         // Every ordered key must be gettable; every gettable key must be ordered.
         for k in m.order() {
             assert!(m.get(k).is_some(), "order key {k} has no session");

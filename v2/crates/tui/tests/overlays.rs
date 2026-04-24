@@ -32,8 +32,14 @@ fn ctrl(c: char) -> KeyEvent {
 fn help_any_key_dismisses() {
     let mut h = Help::default_help(ComponentId::new(1));
     assert_eq!(h.handle_key(ch('x'), &mut Vec::new()), Outcome::Dismiss);
-    assert_eq!(h.handle_key(code(KeyCode::Esc), &mut Vec::new()), Outcome::Dismiss);
-    assert_eq!(h.handle_key(code(KeyCode::Enter), &mut Vec::new()), Outcome::Dismiss);
+    assert_eq!(
+        h.handle_key(code(KeyCode::Esc), &mut Vec::new()),
+        Outcome::Dismiss
+    );
+    assert_eq!(
+        h.handle_key(code(KeyCode::Enter), &mut Vec::new()),
+        Outcome::Dismiss
+    );
 }
 
 #[test]
@@ -47,10 +53,7 @@ fn help_renders_content() {
     .unwrap();
     let buf = term.backend().buffer();
     let rendered: String = (0..buf.area.height)
-        .flat_map(|y| {
-            (0..buf.area.width)
-                .map(move |x| buf[(x, y)].symbol().to_string())
-        })
+        .flat_map(|y| (0..buf.area.width).map(move |x| buf[(x, y)].symbol().to_string()))
         .collect();
     assert!(rendered.contains("one"));
     assert!(rendered.contains("two"));
@@ -96,10 +99,7 @@ fn newworktree_esc_cancels_and_dismisses() {
 fn newworktree_ctrl_c_also_cancels() {
     let mut n = NewWorktree::new(ComponentId::new(1), "");
     n.handle_key(ch('a'), &mut Vec::new());
-    assert_eq!(
-        n.handle_key(ctrl('c'), &mut Vec::new()),
-        Outcome::Dismiss
-    );
+    assert_eq!(n.handle_key(ctrl('c'), &mut Vec::new()), Outcome::Dismiss);
     assert_eq!(n.result(), &NewWorktreeResult::Canceled);
 }
 
@@ -229,11 +229,8 @@ fn dismiss_outcome_unmounts_and_returns_focus_to_parent() {
     let root_id = ComponentId::new(1);
     let overlay_id = ComponentId::new(2);
     let mut tree = ComponentTree::new(Box::new(Blank { id: root_id }));
-    tree.mount_child(
-        root_id,
-        Box::new(Help::new(overlay_id, vec!["hi".into()])),
-    )
-    .unwrap();
+    tree.mount_child(root_id, Box::new(Help::new(overlay_id, vec!["hi".into()])))
+        .unwrap();
     tree.set_focus(overlay_id);
     assert!(tree.contains(overlay_id));
     assert_eq!(tree.focused(), overlay_id);
@@ -261,11 +258,8 @@ fn overlay_steals_focus_from_sibling_while_mounted() {
     tree.set_focus(sibling_id);
 
     // Overlay mounts under root (not sibling — overlays are app-level).
-    tree.mount_child(
-        root_id,
-        Box::new(NewWorktree::new(overlay_id, "prompt")),
-    )
-    .unwrap();
+    tree.mount_child(root_id, Box::new(NewWorktree::new(overlay_id, "prompt")))
+        .unwrap();
     tree.set_focus(overlay_id);
 
     // Type some chars — they go to the overlay.
@@ -290,11 +284,8 @@ fn typed_get_returns_none_for_wrong_type() {
     let root_id = ComponentId::new(1);
     let overlay_id = ComponentId::new(2);
     let mut tree = ComponentTree::new(Box::new(Blank { id: root_id }));
-    tree.mount_child(
-        root_id,
-        Box::new(Help::new(overlay_id, vec!["hi".into()])),
-    )
-    .unwrap();
+    tree.mount_child(root_id, Box::new(Help::new(overlay_id, vec!["hi".into()])))
+        .unwrap();
 
     // Asking for the wrong concrete type returns None, not a crash.
     let wrong: Option<&NewWorktree> = tree.get::<NewWorktree>(overlay_id);
@@ -319,11 +310,8 @@ fn apptroot_style_flow_read_branch_name_on_dismiss() {
     let root_id = ComponentId::new(1);
     let overlay_id = ComponentId::new(2);
     let mut tree = ComponentTree::new(Box::new(Blank { id: root_id }));
-    tree.mount_child(
-        root_id,
-        Box::new(NewWorktree::new(overlay_id, "")),
-    )
-    .unwrap();
+    tree.mount_child(root_id, Box::new(NewWorktree::new(overlay_id, "")))
+        .unwrap();
     tree.set_focus(overlay_id);
 
     for c in "feat/nice".chars() {

@@ -52,10 +52,14 @@ pub fn is_session_visible(session: &Session, ctx: &VisibilityCtx) -> bool {
         }
     }
     if let Some(cutoff) = ctx.activity_cutoff
-        && session.primary_task.updated_at < cutoff {
-            return false;
-        }
-    if matches!(session.primary_task.state, TaskState::Merged | TaskState::Closed) {
+        && session.primary_task.updated_at < cutoff
+    {
+        return false;
+    }
+    if matches!(
+        session.primary_task.state,
+        TaskState::Merged | TaskState::Closed
+    ) {
         return false;
     }
     if ctx.hide_approved_by_me
@@ -67,7 +71,10 @@ pub fn is_session_visible(session: &Session, ctx: &VisibilityCtx) -> bool {
     let priority = session.action_priority(ctx.username, ctx.now);
     if session.primary_task.role == TaskRole::Mentioned
         && session.unread_count() == 0
-        && matches!(priority, ActionPriority::WaitingOnOthers | ActionPriority::Stale)
+        && matches!(
+            priority,
+            ActionPriority::WaitingOnOthers | ActionPriority::Stale
+        )
     {
         return false;
     }
@@ -117,7 +124,11 @@ pub fn session_matches_query(session: &Session, query: &str) -> bool {
         } else {
             let t = token.to_lowercase();
             let in_title = task.title.to_lowercase().contains(&t);
-            let in_body = task.body.as_ref().map(|b| b.to_lowercase().contains(&t)).unwrap_or(false);
+            let in_body = task
+                .body
+                .as_ref()
+                .map(|b| b.to_lowercase().contains(&t))
+                .unwrap_or(false);
             let in_activity = session.activity.iter().any(|a| {
                 a.author.to_lowercase().contains(&t) || a.body.to_lowercase().contains(&t)
             });
@@ -201,9 +212,15 @@ fn build_repo_groups_inner(
     let keys = state.filtered_keys.as_ref().unwrap_or(&order);
     let mut seen_keys = std::collections::HashSet::new();
     for key in keys {
-        if !seen_keys.insert(key.clone()) { continue; }
-        let Some(session) = state.sessions.get(key) else { continue };
-        if !is_session_visible(session, ctx) { continue }
+        if !seen_keys.insert(key.clone()) {
+            continue;
+        }
+        let Some(session) = state.sessions.get(key) else {
+            continue;
+        };
+        if !is_session_visible(session, ctx) {
+            continue;
+        }
         let repo = session.repo.clone();
         if let Some(&idx) = repo_map.get(&repo) {
             repos[idx].1.push(key.clone());
@@ -265,7 +282,10 @@ pub(crate) fn resort_sessions(app: &mut App) {
     // Restore selection in nav_items (not session_order — they differ!).
     if let Some(ref key) = prev_key {
         let items = nav_items(app);
-        if let Some(idx) = items.iter().position(|i| matches!(i, NavItem::Session(k) if k == key)) {
+        if let Some(idx) = items
+            .iter()
+            .position(|i| matches!(i, NavItem::Session(k) if k == key))
+        {
             app.state.selected = idx;
         }
     }
@@ -286,7 +306,11 @@ pub(crate) fn clamp_selected(app: &mut App) {
 }
 
 /// Handle a click on the sidebar tree. Row is relative to the inbox pane inner area.
-pub(crate) fn handle_sidebar_click(app: &mut App, row: usize, action_tx: &mpsc::UnboundedSender<Action>) {
+pub(crate) fn handle_sidebar_click(
+    app: &mut App,
+    row: usize,
+    action_tx: &mpsc::UnboundedSender<Action>,
+) {
     // Build the same tree structure the UI renders, mapping rows to actions.
     let mut current_row = 1usize; // skip border
     let repos = build_repo_groups(app);
@@ -307,7 +331,10 @@ pub(crate) fn handle_sidebar_click(app: &mut App, row: usize, action_tx: &mpsc::
             if current_row == row {
                 // Clicked on session — select it using nav index.
                 let nav = nav_items(app);
-                if let Some(idx) = nav.iter().position(|i| matches!(i, NavItem::Session(k) if k == key)) {
+                if let Some(idx) = nav
+                    .iter()
+                    .position(|i| matches!(i, NavItem::Session(k) if k == key))
+                {
                     app.state.selected = idx;
                     crate::app::reset_detail_state(app);
                 }
@@ -316,21 +343,24 @@ pub(crate) fn handle_sidebar_click(app: &mut App, row: usize, action_tx: &mpsc::
             current_row += 1;
 
             if !app.state.collapsed_sessions.contains(key)
-                && let Some(session) = app.state.sessions.get(key) {
-                    // Count visible activity lines (up to 3).
-                    let msg_count = session.activity.len().min(3);
-                    for _i in 0..msg_count {
-                        if current_row == row {
-                            // Clicked on a message — select the session and toggle messages.
-                            if let Some(idx) = app.state.sessions.order().iter().position(|k2| k2 == key) {
-                                app.state.selected = idx;
-                                crate::app::reset_detail_state(app);
-                            }
-                            return;
+                && let Some(session) = app.state.sessions.get(key)
+            {
+                // Count visible activity lines (up to 3).
+                let msg_count = session.activity.len().min(3);
+                for _i in 0..msg_count {
+                    if current_row == row {
+                        // Clicked on a message — select the session and toggle messages.
+                        if let Some(idx) =
+                            app.state.sessions.order().iter().position(|k2| k2 == key)
+                        {
+                            app.state.selected = idx;
+                            crate::app::reset_detail_state(app);
                         }
-                        current_row += 1;
+                        return;
                     }
+                    current_row += 1;
                 }
+            }
         }
     }
 }
@@ -345,7 +375,10 @@ mod tests {
 
     fn base_task() -> Task {
         Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
             title: "Implement feature".into(),
             body: Some("Body text with keyword foo".into()),
             state: TaskState::Open,
@@ -441,20 +474,26 @@ mod tests {
 
     fn make_activity(author: &str, body: &str) -> Activity {
         Activity {
-            author: author.into(), body: body.into(),
-            created_at: Utc::now(), kind: ActivityKind::Comment,
-            node_id: None, path: None, line: None, diff_hunk: None, thread_id: None,
+            author: author.into(),
+            body: body.into(),
+            created_at: Utc::now(),
+            kind: ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
         }
     }
 
     #[test]
     fn query_free_text_matches_title_body_activity() {
         let mut s = Session::new_at(base_task(), chrono::Utc::now());
-        assert!(session_matches_query(&s, "feature"));   // title
-        assert!(session_matches_query(&s, "foo"));       // body
+        assert!(session_matches_query(&s, "feature")); // title
+        assert!(session_matches_query(&s, "foo")); // body
         s.activity.push(make_activity("alice", "hello"));
-        assert!(session_matches_query(&s, "alice"));     // activity author
-        assert!(session_matches_query(&s, "hello"));     // activity body
+        assert!(session_matches_query(&s, "alice")); // activity author
+        assert!(session_matches_query(&s, "hello")); // activity body
         assert!(!session_matches_query(&s, "nonexistent"));
     }
 

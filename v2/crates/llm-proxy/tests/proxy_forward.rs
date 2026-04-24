@@ -9,9 +9,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use pilot_v2_llm_proxy::{
-    ApiProvider, ProxyConfig, ProxyServer, SESSION_TAG_HEADER,
-};
+use pilot_v2_llm_proxy::{ApiProvider, ProxyConfig, ProxyServer, SESSION_TAG_HEADER};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,8 +196,9 @@ async fn proxy_emits_record_on_upstream_failure() {
     let dead_port = sink.local_addr().unwrap().port();
     drop(sink);
 
-    let (proxy, mut records) =
-        ProxyServer::start(cfg, format!("http://127.0.0.1:{dead_port}")).await.unwrap();
+    let (proxy, mut records) = ProxyServer::start(cfg, format!("http://127.0.0.1:{dead_port}"))
+        .await
+        .unwrap();
     let proxy_url = format!("http://{}", proxy.addr());
 
     let resp = request(&proxy_url, "/v1/messages", Some("s-dead"))

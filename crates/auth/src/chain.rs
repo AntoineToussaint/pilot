@@ -61,7 +61,10 @@ impl CredentialChain {
     /// Try each provider in order. Returns the first successful credential.
     pub async fn resolve(&self, scope: &str) -> Result<Credential, CredentialError> {
         for provider in &self.providers {
-            trace!(provider = provider.name(), scope, "trying credential provider");
+            trace!(
+                provider = provider.name(),
+                scope, "trying credential provider"
+            );
             match provider.resolve_boxed(scope).await {
                 Ok(cred) => {
                     debug!(

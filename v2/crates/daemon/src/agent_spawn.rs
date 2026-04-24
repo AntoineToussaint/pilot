@@ -97,17 +97,14 @@ pub enum AgentSpawnError {
 ///   `Event::ProxyRecord` through the IPC server channel.
 /// - Shutting down the returned `ProxyServer` when the PTY exits
 ///   (otherwise the proxy keeps its port bound forever).
-pub async fn spawn_with_proxy(
-    mut config: AgentSpawnConfig,
-) -> Result<AgentSpawn, AgentSpawnError> {
+pub async fn spawn_with_proxy(mut config: AgentSpawnConfig) -> Result<AgentSpawn, AgentSpawnError> {
     let (proxy, records) = match &config.proxy {
         Some(target) => {
             let proxy_config = ProxyConfig {
                 listen: "127.0.0.1:0".parse().expect("static addr"),
                 ..ProxyConfig::default()
             };
-            let (server, rx) =
-                ProxyServer::start(proxy_config, target.upstream.clone()).await?;
+            let (server, rx) = ProxyServer::start(proxy_config, target.upstream.clone()).await?;
             let url = format!("http://{}", server.addr());
             tracing::info!(
                 "proxy started for {} on {url} → {}",
@@ -124,12 +121,7 @@ pub async fn spawn_with_proxy(
     };
 
     let env: Vec<(String, String)> = config.extra_env.into_iter().collect();
-    let pty = DaemonPty::spawn(
-        &config.argv,
-        config.size,
-        config.cwd.as_ref(),
-        env,
-    )?;
+    let pty = DaemonPty::spawn(&config.argv, config.size, config.cwd.as_ref(), env)?;
 
     Ok(AgentSpawn {
         pty,

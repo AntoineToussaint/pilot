@@ -63,18 +63,22 @@ impl GhPoller {
                 warn!("GitHub poll failed: {e}");
                 self.producer.send(Event::new(
                     "github",
-                    EventKind::ProviderError { message: e.to_string() },
+                    EventKind::ProviderError {
+                        message: e.to_string(),
+                    },
                 ));
                 return;
             }
         };
 
-        let current: HashMap<String, Task> = tasks
-            .into_iter()
-            .map(|t| (t.id.to_string(), t))
-            .collect();
+        let current: HashMap<String, Task> =
+            tasks.into_iter().map(|t| (t.id.to_string(), t)).collect();
 
-        info!("Poll complete: {} PRs (first_poll={})", current.len(), self.first_poll);
+        info!(
+            "Poll complete: {} PRs (first_poll={})",
+            current.len(),
+            self.first_poll
+        );
 
         for (key, task) in &current {
             if self.first_poll {
@@ -87,41 +91,62 @@ impl GhPoller {
                 let mut changed = false;
 
                 if prev_task.state != task.state {
-                    self.producer.send(Event::new("github", EventKind::TaskStateChanged {
-                        task_id: task.id.clone(), old: prev_task.state, new: task.state,
-                    }));
+                    self.producer.send(Event::new(
+                        "github",
+                        EventKind::TaskStateChanged {
+                            task_id: task.id.clone(),
+                            old: prev_task.state,
+                            new: task.state,
+                        },
+                    ));
                     changed = true;
                 }
 
                 if prev_task.ci != task.ci {
-                    self.producer.send(Event::new("github", EventKind::CiStatusChanged {
-                        task_id: task.id.clone(), old: prev_task.ci, new: task.ci,
-                    }));
+                    self.producer.send(Event::new(
+                        "github",
+                        EventKind::CiStatusChanged {
+                            task_id: task.id.clone(),
+                            old: prev_task.ci,
+                            new: task.ci,
+                        },
+                    ));
                     changed = true;
                 }
 
                 if prev_task.review != task.review {
-                    self.producer.send(Event::new("github", EventKind::ReviewStatusChanged {
-                        task_id: task.id.clone(), old: prev_task.review, new: task.review,
-                    }));
+                    self.producer.send(Event::new(
+                        "github",
+                        EventKind::ReviewStatusChanged {
+                            task_id: task.id.clone(),
+                            old: prev_task.review,
+                            new: task.review,
+                        },
+                    ));
                     changed = true;
                 }
 
                 if prev_task.title != task.title {
-                    self.producer.send(Event::new("github", EventKind::NewActivity {
-                        task_id: task.id.clone(),
-                        activity: pilot_core::Activity {
-                            author: "github".into(),
-                            body: format!("Title: \"{}\" → \"{}\"", prev_task.title, task.title),
-                            created_at: chrono::Utc::now(),
-                            kind: pilot_core::ActivityKind::StatusChange,
-                            node_id: None,
-                            path: None,
-                            line: None,
-                            diff_hunk: None,
-                            thread_id: None,
+                    self.producer.send(Event::new(
+                        "github",
+                        EventKind::NewActivity {
+                            task_id: task.id.clone(),
+                            activity: pilot_core::Activity {
+                                author: "github".into(),
+                                body: format!(
+                                    "Title: \"{}\" → \"{}\"",
+                                    prev_task.title, task.title
+                                ),
+                                created_at: chrono::Utc::now(),
+                                kind: pilot_core::ActivityKind::StatusChange,
+                                node_id: None,
+                                path: None,
+                                line: None,
+                                diff_hunk: None,
+                                thread_id: None,
+                            },
                         },
-                    }));
+                    ));
                     changed = true;
                 }
 
@@ -129,9 +154,13 @@ impl GhPoller {
                 let new_count = task.recent_activity.len();
                 if new_count > prev_count {
                     for activity in task.recent_activity.iter().take(new_count - prev_count) {
-                        self.producer.send(Event::new("github", EventKind::NewActivity {
-                            task_id: task.id.clone(), activity: activity.clone(),
-                        }));
+                        self.producer.send(Event::new(
+                            "github",
+                            EventKind::NewActivity {
+                                task_id: task.id.clone(),
+                                activity: activity.clone(),
+                            },
+                        ));
                     }
                     changed = true;
                 }
@@ -149,9 +178,13 @@ impl GhPoller {
                 self.producer
                     .send(Event::new("github", EventKind::TaskUpdated(task.clone())));
                 for activity in &task.recent_activity {
-                    self.producer.send(Event::new("github", EventKind::NewActivity {
-                        task_id: task.id.clone(), activity: activity.clone(),
-                    }));
+                    self.producer.send(Event::new(
+                        "github",
+                        EventKind::NewActivity {
+                            task_id: task.id.clone(),
+                            activity: activity.clone(),
+                        },
+                    ));
                 }
             }
         }
@@ -159,11 +192,13 @@ impl GhPoller {
         // Detect removed tasks.
         for key in self.prev.keys() {
             if !current.contains_key(key)
-                && let Some(prev_task) = self.prev.get(key) {
-                    self.producer.send(Event::new(
-                        "github", EventKind::TaskRemoved(prev_task.id.clone()),
-                    ));
-                }
+                && let Some(prev_task) = self.prev.get(key)
+            {
+                self.producer.send(Event::new(
+                    "github",
+                    EventKind::TaskRemoved(prev_task.id.clone()),
+                ));
+            }
         }
 
         self.prev = current;

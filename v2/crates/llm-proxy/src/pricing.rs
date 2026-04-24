@@ -56,6 +56,7 @@ pub fn estimate_cost(
     output_tokens: u64,
 ) -> Option<f64> {
     let (input_rate, output_rate) = rate_per_mtok(provider, model)?;
-    let cost = (input_tokens as f64 * input_rate + output_tokens as f64 * output_rate) / 1_000_000.0;
+    let cost =
+        (input_tokens as f64 * input_rate + output_tokens as f64 * output_rate) / 1_000_000.0;
     Some(cost)
 }
