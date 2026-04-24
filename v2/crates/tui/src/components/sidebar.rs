@@ -57,10 +57,17 @@ pub struct Sidebar {
     /// If set, `Shift-X` has been pressed once on this session. A
     /// second press executes the kill. Any other key clears.
     kill_pending: Option<SessionKey>,
+    /// Per-key agent id map. Defaults to `c => "claude", C => "codex"`.
+    /// AppRoot can override via `with_agent_shortcuts` for users with
+    /// Aider / Cursor / custom CLIs configured.
+    agent_shortcuts: HashMap<char, String>,
 }
 
 impl Sidebar {
     pub fn new(id: ComponentId) -> Self {
+        let mut agent_shortcuts = HashMap::new();
+        agent_shortcuts.insert('c', "claude".to_string());
+        agent_shortcuts.insert('C', "codex".to_string());
         Self {
             id,
             sessions: HashMap::new(),
@@ -68,7 +75,25 @@ impl Sidebar {
             cursor: 0,
             mailbox: Mailbox::Inbox,
             kill_pending: None,
+            agent_shortcuts,
         }
+    }
+
+    /// Override the default c→claude / C→codex mapping. Keys are
+    /// single characters; case matters (`c` and `C` are distinct).
+    /// AppRoot wires this from the user's config at startup.
+    pub fn with_agent_shortcuts(
+        mut self,
+        shortcuts: impl IntoIterator<Item = (char, String)>,
+    ) -> Self {
+        self.agent_shortcuts = shortcuts.into_iter().collect();
+        self
+    }
+
+    /// Which agents are currently keymapped. For overlays / help
+    /// rendering that want to show the user what's available.
+    pub fn agent_shortcuts(&self) -> &HashMap<char, String> {
+        &self.agent_shortcuts
     }
 
     // ── Observability helpers (for tests + for AppRoot / RightPane) ────
@@ -169,11 +194,21 @@ impl Component for Sidebar {
             }
 
             // ── Spawn / open ──────────────────────────────────────────
-            (KeyCode::Char('c'), KeyModifiers::NONE) => {
+            // Any Char key listed in `agent_shortcuts` spawns that
+            // agent for the selected session. Defaults: `c` → Claude,
+            // `C` → Codex. AppRoot can remap at startup via
+            // `with_agent_shortcuts`. Keys NOT in the map bubble up,
+            // so overlays / other components get a fair shot.
+            (KeyCode::Char(c), m)
+                if self.agent_shortcuts.contains_key(&c)
+                    && !m.contains(KeyModifiers::CONTROL)
+                    && !m.contains(KeyModifiers::ALT) =>
+            {
                 if let Some(session_key) = self.selected_session_key().cloned() {
+                    let agent_id = self.agent_shortcuts.get(&c).cloned().unwrap_or_default();
                     cmds.push(Command::Spawn {
                         session_key,
-                        kind: TerminalKind::Agent("claude".into()),
+                        kind: TerminalKind::Agent(agent_id),
                         cwd: None,
                     });
                 }

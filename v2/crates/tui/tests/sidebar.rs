@@ -259,6 +259,92 @@ fn c_emits_spawn_claude_for_selected() {
 }
 
 #[test]
+fn shift_c_emits_spawn_codex_for_selected() {
+    let mut s = populated_sidebar();
+    let mut cmds = Vec::new();
+    s.handle_key(shift_char('C'), &mut cmds);
+    assert_eq!(cmds.len(), 1);
+    match &cmds[0] {
+        Command::Spawn {
+            session_key,
+            kind: TerminalKind::Agent(agent),
+            ..
+        } => {
+            assert_eq!(session_key.as_str(), "github:o/r#1");
+            assert_eq!(agent, "codex", "Shift-C maps to Codex by default");
+        }
+        other => panic!("expected Spawn Agent(codex), got {other:?}"),
+    }
+}
+
+#[test]
+fn custom_agent_shortcuts_override_defaults() {
+    // User maps `a` → aider via config.
+    let mut s = Sidebar::new(ComponentId::new(1)).with_agent_shortcuts([
+        ('c', "claude".to_string()),
+        ('a', "aider".to_string()),
+    ]);
+    // Seed a session so the spawn has a target.
+    let now = chrono::Utc::now();
+    let task = pilot_core::Task {
+        id: pilot_core::TaskId {
+            source: "github".into(),
+            key: "o/r#1".into(),
+        },
+        title: "t".into(),
+        body: None,
+        state: pilot_core::TaskState::Open,
+        role: pilot_core::TaskRole::Author,
+        ci: pilot_core::CiStatus::None,
+        review: pilot_core::ReviewStatus::None,
+        checks: vec![],
+        unread_count: 0,
+        url: "https://github.com/o/r/pull/1".into(),
+        repo: Some("o/r".into()),
+        branch: Some("f".into()),
+        base_branch: None,
+        updated_at: now,
+        labels: vec![],
+        reviewers: vec![],
+        assignees: vec![],
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        has_conflicts: false,
+        is_behind_base: false,
+        node_id: None,
+        needs_reply: false,
+        last_commenter: None,
+        recent_activity: vec![],
+        additions: 0,
+        deletions: 0,
+    };
+    s.on_event(&Event::SessionUpserted(pilot_core::Session::new_at(
+        task, now,
+    )));
+
+    // `a` now spawns aider.
+    let mut cmds = Vec::new();
+    s.handle_key(key_code(KeyCode::Char('a')), &mut cmds);
+    match cmds.as_slice() {
+        [Command::Spawn {
+            kind: TerminalKind::Agent(agent),
+            ..
+        }] => assert_eq!(agent, "aider"),
+        _ => panic!("expected Spawn Agent(aider), got {cmds:?}"),
+    }
+
+    // Shift-C is no longer mapped in the custom set — bubbles up.
+    let mut cmds = Vec::new();
+    let outcome = s.handle_key(shift_char('C'), &mut cmds);
+    assert_eq!(
+        outcome,
+        pilot_v2_tui::Outcome::BubbleUp,
+        "unmapped key bubbles, doesn't spawn a random default"
+    );
+    assert!(cmds.is_empty());
+}
+
+#[test]
 fn c_on_empty_sidebar_emits_nothing() {
     let mut s = Sidebar::new(ComponentId::new(1));
     let mut cmds = Vec::new();
