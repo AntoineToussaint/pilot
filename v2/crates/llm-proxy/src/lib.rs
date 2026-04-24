@@ -31,6 +31,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub mod pricing;
+pub mod server;
+
+pub use server::{ProxyError, ProxyServer, SESSION_TAG_HEADER};
 
 /// Which upstream API this record corresponds to. Extensible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,16 +129,4 @@ impl Default for ProxyConfig {
     }
 }
 
-/// Public handle to the proxy. The hyper server implementation (task
-/// #68) replaces the body of `new` + adds `listen`, `records_rx`,
-/// `shutdown`. The type is defined here today so callers in the
-/// daemon can hold `Option<ProxyServer>` without conditional compilation.
-pub struct ProxyServer {
-    _config: ProxyConfig,
-}
-
-impl ProxyServer {
-    pub fn new(config: ProxyConfig) -> Self {
-        Self { _config: config }
-    }
-}
+// `ProxyServer` lives in `server.rs` — re-exported above.
