@@ -1,0 +1,19 @@
+[package]
+name = "pilot-v2-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pilot-core          = { workspace = true }
+pilot-v2-llm-proxy  = { workspace = true }
+serde               = { workspace = true }
+bincode             = { workspace = true }
+thiserror           = { workspace = true }
+tokio               = { workspace = true }
+chrono              = { workspace = true }
+tracing             = { workspace = true }
+
+[dev-dependencies]
+tokio      = { workspace = true, features = ["full", "test-util"] }
+proptest   = "1"

@@ -1,0 +1,10 @@
+[package]
+name = "pilot-events"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pilot-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

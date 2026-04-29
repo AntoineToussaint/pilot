@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/snapshots.rs
+assertion_line: 108
+expression: rendered
+---
+┌ INBOX (1) ───────────────────────────┐
+│owner/repo                            │
+│  ▸ task: o/r#1                       │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

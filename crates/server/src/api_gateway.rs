@@ -1,0 +1,407 @@
+//! Minimal JSON gateway for Pilot v2.
+//!
+//! This module is intentionally isolated from `lib.rs` wiring. It uses
+//! Hyper 1 for HTTP and exposes newline-delimited JSON frames so API
+//! clients can drive the same server-owned IPC model as the TUI.
+
+use crate::{Server, ServerConfig};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full, channel::Channel, combinators::UnsyncBoxBody};
+use hyper::body::{Body as HttpBody, Incoming};
+use hyper::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use pilot_store::StoreError;
+use pilot_v2_ipc::{Command, Connection, Event};
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::fmt::Display;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+
+pub type Body = UnsyncBoxBody<Bytes, Infallible>;
+
+#[derive(Debug, Clone)]
+pub struct GatewayOptions {
+    pub bind_addr: SocketAddr,
+    pub bearer_token: Option<String>,
+}
+
+impl Default for GatewayOptions {
+    fn default() -> Self {
+        Self {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            bearer_token: None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GatewayError {
+    #[error("http server error: {0}")]
+    Hyper(#[from] hyper::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("store error: {0}")]
+    Store(String),
+}
+
+impl From<StoreError> for GatewayError {
+    fn from(value: StoreError) -> Self {
+        Self::Store(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub ok: bool,
+    pub service: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacesResponse {
+    pub workspaces: Vec<pilot_core::Workspace>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum JsonClientFrame {
+    Command(Command),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum JsonServerFrame {
+    Event(Event),
+}
+
+pub struct LocalIpcBridge {
+    pub command_tx: mpsc::UnboundedSender<Command>,
+    pub event_rx: mpsc::UnboundedReceiver<Event>,
+}
+
+pub fn check_bearer_token(
+    authorization: Option<&HeaderValue>,
+    expected_token: Option<&str>,
+) -> bool {
+    let Some(expected_token) = expected_token else {
+        return true;
+    };
+    let Some(value) = authorization.and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    token == expected_token
+}
+
+pub fn health_response() -> HealthResponse {
+    HealthResponse {
+        ok: true,
+        service: "pilot-v2-api-gateway".into(),
+    }
+}
+
+pub fn workspaces_response(config: &ServerConfig) -> Result<WorkspacesResponse, GatewayError> {
+    let records = config.store.list_workspaces()?;
+    let workspaces = records
+        .into_iter()
+        .filter_map(|record| {
+            let json = record.workspace_json?;
+            match serde_json::from_str::<pilot_core::Workspace>(&json) {
+                Ok(workspace) => Some(workspace),
+                Err(error) => {
+                    tracing::warn!("api gateway: skipping workspace {}: {error}", record.key);
+                    None
+                }
+            }
+        })
+        .collect();
+    Ok(WorkspacesResponse { workspaces })
+}
+
+/// Create a local IPC bridge backed by the existing `Server::serve`
+/// connection model. API handlers feed decoded `JsonClientFrame`
+/// commands into `command_tx` and serialize `event_rx` values as
+/// `JsonServerFrame::Event`.
+pub fn spawn_local_bridge(config: ServerConfig) -> LocalIpcBridge {
+    let (client_to_server_tx, client_to_server_rx) = mpsc::unbounded_channel();
+    let (server_to_client_tx, server_to_client_rx) = mpsc::unbounded_channel();
+    let conn = Connection::from_channels(server_to_client_tx, client_to_server_rx);
+    tokio::spawn(async move {
+        if let Err(error) = Server::new(config).serve(conn).await {
+            tracing::warn!("api gateway ipc bridge closed: {error}");
+        }
+    });
+    LocalIpcBridge {
+        command_tx: client_to_server_tx,
+        event_rx: server_to_client_rx,
+    }
+}
+
+pub async fn serve(config: ServerConfig, options: GatewayOptions) -> Result<(), GatewayError> {
+    let listener = TcpListener::bind(options.bind_addr).await?;
+    serve_listener(config, options, listener).await
+}
+
+pub async fn serve_listener(
+    config: ServerConfig,
+    options: GatewayOptions,
+    listener: TcpListener,
+) -> Result<(), GatewayError> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let config = config.clone();
+        let options = options.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_connection(config, options, stream).await {
+                tracing::warn!("api gateway connection failed: {error}");
+            }
+        });
+    }
+}
+
+async fn serve_connection(
+    config: ServerConfig,
+    options: GatewayOptions,
+    stream: TcpStream,
+) -> Result<(), GatewayError> {
+    let io = TokioIo::new(stream);
+    hyper::server::conn::http1::Builder::new()
+        .serve_connection(
+            io,
+            service_fn(move |request| {
+                let config = config.clone();
+                let options = options.clone();
+                async move { Ok::<_, Infallible>(handle_request(config, options, request).await) }
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn handle_request<B>(
+    config: ServerConfig,
+    options: GatewayOptions,
+    request: Request<B>,
+) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    if !check_bearer_token(
+        request.headers().get(AUTHORIZATION),
+        options.bearer_token.as_deref(),
+    ) {
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            &serde_json::json!({ "error": "unauthorized" }),
+        );
+    }
+
+    match (request.method(), request.uri().path()) {
+        (&Method::GET, "/v1/health") => json_response(StatusCode::OK, &health_response()),
+        (&Method::GET, "/v1/workspaces") => match workspaces_response(&config) {
+            Ok(payload) => json_response(StatusCode::OK, &payload),
+            Err(error) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({ "error": error.to_string() }),
+            ),
+        },
+        (&Method::GET, "/v1/events") => stream_events_response(config),
+        (&Method::POST, "/v1/commands") => command_response(config, request.into_body()).await,
+        (&Method::POST, "/v1/stream") => stream_command_response(config, request.into_body()),
+        _ => json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "not found" }),
+        ),
+    }
+}
+
+async fn command_response<B>(config: ServerConfig, body: B) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": format!("read request body: {error}") }),
+            );
+        }
+    };
+    let command = match decode_command_frame(&bytes) {
+        Ok(command) => command,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": format!("decode command frame: {error}") }),
+            );
+        }
+    };
+    let bridge = spawn_local_bridge(config);
+    match bridge.command_tx.send(command) {
+        Ok(()) => json_response(StatusCode::OK, &CommandResponse { ok: true }),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({ "error": format!("send command: {error}") }),
+        ),
+    }
+}
+
+fn stream_events_response(config: ServerConfig) -> Response<Body> {
+    let bridge = spawn_local_bridge(config);
+    let keepalive_tx = bridge.command_tx.clone();
+    let _ = bridge.command_tx.send(Command::Subscribe);
+    ndjson_event_response(bridge.event_rx, Some(keepalive_tx))
+}
+
+fn stream_command_response<B>(config: ServerConfig, body: B) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let bridge = spawn_local_bridge(config);
+    let command_tx = bridge.command_tx.clone();
+    tokio::spawn(async move {
+        pump_ndjson_commands(body, command_tx).await;
+    });
+    ndjson_event_response(bridge.event_rx, Some(bridge.command_tx))
+}
+
+fn ndjson_event_response(
+    mut event_rx: mpsc::UnboundedReceiver<Event>,
+    keepalive_tx: Option<mpsc::UnboundedSender<Command>>,
+) -> Response<Body> {
+    let (mut tx, body) = Channel::<Bytes, Infallible>::new(32);
+    tokio::spawn(async move {
+        let _keepalive_tx = keepalive_tx;
+        while let Some(event) = event_rx.recv().await {
+            let frame = JsonServerFrame::Event(event);
+            let mut bytes = match serde_json::to_vec(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!("api gateway: serialize event frame: {error}");
+                    continue;
+                }
+            };
+            bytes.push(b'\n');
+            if tx.send_data(Bytes::from(bytes)).await.is_err() {
+                break;
+            }
+        }
+    });
+    response_with_body(StatusCode::OK, "application/x-ndjson", body.boxed_unsync())
+}
+
+async fn pump_ndjson_commands<B>(mut body: B, command_tx: mpsc::UnboundedSender<Command>)
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let mut buffer = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!("api gateway: read stream command frame: {error}");
+                return;
+            }
+        };
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        buffer.extend_from_slice(&data);
+        while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=pos).collect();
+            send_command_line(&line, &command_tx);
+        }
+    }
+    if !buffer.iter().all(u8::is_ascii_whitespace) {
+        send_command_line(&buffer, &command_tx);
+    }
+}
+
+fn send_command_line(line: &[u8], command_tx: &mpsc::UnboundedSender<Command>) {
+    let trimmed = trim_ascii(line);
+    if trimmed.is_empty() {
+        return;
+    }
+    match decode_command_frame(trimmed) {
+        Ok(command) => {
+            if command_tx.send(command).is_err() {
+                tracing::warn!("api gateway: command stream closed");
+            }
+        }
+        Err(error) => tracing::warn!("api gateway: decode command stream line: {error}"),
+    }
+}
+
+fn decode_command_frame(bytes: &[u8]) -> serde_json::Result<Command> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    if let Ok(frame) = serde_json::from_value::<JsonClientFrame>(value.clone()) {
+        match frame {
+            JsonClientFrame::Command(command) => return Ok(command),
+        }
+    }
+    serde_json::from_value::<Command>(value)
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
+}
+
+fn json_response<T: Serialize + ?Sized>(status: StatusCode, payload: &T) -> Response<Body> {
+    match serde_json::to_vec(payload) {
+        Ok(bytes) => response_with_body(
+            status,
+            "application/json",
+            Full::new(Bytes::from(bytes)).boxed_unsync(),
+        ),
+        Err(error) => response_with_body(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "application/json",
+            Full::new(Bytes::from(format!(
+                "{{\"error\":\"json serialization failed: {error}\"}}"
+            )))
+            .boxed_unsync(),
+        ),
+    }
+}
+
+fn response_with_body(
+    status: StatusCode,
+    content_type: &'static str,
+    body: Body,
+) -> Response<Body> {
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
+#[allow(dead_code)]
+fn _assert_http_body(_: Incoming) {}

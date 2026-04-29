@@ -1,0 +1,16 @@
+[package]
+name = "pilot-gh"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pilot-auth = { workspace = true }
+pilot-core = { workspace = true }
+pilot-events = { workspace = true }
+octocrab = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }

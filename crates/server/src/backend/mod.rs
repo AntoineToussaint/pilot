@@ -1,0 +1,134 @@
+//! Pluggable session backend.
+//!
+//! The pilot SERVER is a stateless dispatcher — it owns workspace
+//! metadata in SQLite, runs polling, and routes command/event
+//! traffic to and from connected clients. It does **not** own the
+//! agent processes themselves. That job belongs to a session
+//! backend implementing [`SessionBackend`].
+//!
+//! ## Backends
+//!
+//! - [`RawPtyBackend`] — opens a PTY directly. Sessions die when the
+//!   server quits. Default in `--test` and as the universal
+//!   fallback when nothing fancier is available.
+//! - `TmuxBackend` (next commit) — `tmux -L pilot` server runs the
+//!   agent. Survives pilot-server restarts; user can attach from
+//!   any other terminal via `tmux attach -L pilot -t <key>`.
+//!
+//! ## Backend session keys
+//!
+//! Each backend assigns a stable string key per session (e.g. tmux
+//! uses the session name `pilot-claude-…`). The dispatcher allocates
+//! a numeric `TerminalId` for the wire, and keeps a
+//! `(TerminalId ↔ backend_key)` map in `ServerConfig.terminals`. On
+//! restart the server reads `backend.list()` to re-bind to existing
+//! sessions and re-allocates fresh `TerminalId`s for them.
+
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use tokio::sync::mpsc;
+
+pub mod raw_pty;
+pub mod tmux;
+pub use raw_pty::RawPtyBackend;
+pub use tmux::TmuxBackend;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BackendError {
+    #[error("spawn: {0}")]
+    Spawn(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("backend: {0}")]
+    Other(String),
+}
+
+/// One chunk of output flowing from a session.
+#[derive(Debug, Clone)]
+pub struct OutputChunk {
+    /// Monotonic per-session sequence number. Lets clients detect
+    /// gaps when re-attaching after a lag.
+    pub seq: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// A live subscription to a session's output. Receives chunks until
+/// the channel closes (session exited).
+pub struct Subscription {
+    /// Replay of recent output captured from the backend's scrollback,
+    /// so a fresh subscriber can reconstruct the screen without
+    /// waiting for new output. Empty if the backend doesn't support
+    /// replay (e.g. simple tmux without `capture-pane`).
+    pub replay: Vec<u8>,
+    /// `seq` value at the moment of subscription; chunks arriving on
+    /// `live` start at `seq > last_seq`.
+    pub last_seq: u64,
+    /// Live chunks. Closes when the session exits or the backend
+    /// stops streaming.
+    pub live: mpsc::UnboundedReceiver<OutputChunk>,
+}
+
+/// Stateless future-returning trait. We use `Pin<Box<dyn Future>>`
+/// over `async-trait` to match the polling::TaskSource style already
+/// in the crate and to keep this trait `dyn`-compatible without
+/// extra crates.
+pub trait SessionBackend: Send + Sync + 'static {
+    /// Short stable id for telemetry and config. "raw-pty", "tmux".
+    fn id(&self) -> &'static str;
+
+    /// Spawn a fresh session. Returns the backend's stable key for
+    /// this session — opaque to callers. The server pairs it with a
+    /// `TerminalId` for wire use.
+    fn spawn<'a>(
+        &'a self,
+        argv: &'a [String],
+        cwd: Option<&'a Path>,
+        env: &'a [(String, String)],
+    ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>>;
+
+    /// Write bytes to the session's stdin.
+    fn write<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>>;
+
+    /// Resize the session's terminal grid.
+    fn resize<'a>(
+        &'a self,
+        key: &'a str,
+        cols: u16,
+        rows: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>>;
+
+    /// Terminate the session. Returns Ok even if the session was
+    /// already gone — kill is idempotent.
+    fn kill<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>>;
+
+    /// Sessions the backend currently knows about. Used at server
+    /// startup to rediscover surviving sessions (tmux scenario);
+    /// returns empty for ephemeral backends like raw-pty.
+    fn list<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>>;
+
+    /// Open an output stream + replay for `key`.
+    fn subscribe<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Subscription, BackendError>> + Send + 'a>>;
+
+    /// Wait for the session to exit. Returns the exit code if known.
+    /// Implementations should be safe to call repeatedly; subsequent
+    /// calls return the cached code.
+    fn wait_exit<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<i32>> + Send + 'a>>;
+}

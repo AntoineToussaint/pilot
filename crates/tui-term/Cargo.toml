@@ -1,0 +1,12 @@
+[package]
+name = "pilot-tui-term"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ratatui = { workspace = true }
+portable-pty = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Clone https://github.com/ghostty-org/libghostty-rs as a sibling directory.
+libghostty-vt = { path = "../../../libghostty-rs/crates/libghostty-vt" }

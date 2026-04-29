@@ -1,0 +1,38 @@
+[package]
+name = "pilot-v2-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pilot-core       = { workspace = true }
+pilot-auth       = { workspace = true }
+pilot-events     = { workspace = true }
+pilot-store      = { workspace = true }
+pilot-config     = { workspace = true }
+pilot-gh         = { workspace = true }
+pilot-git-ops    = { workspace = true }
+pilot-tui-term   = { workspace = true }
+pilot-v2-ipc       = { workspace = true }
+pilot-v2-agents    = { workspace = true }
+pilot-v2-llm-proxy = { workspace = true }
+pilot-linear       = { path = "../linear-provider" }
+
+tokio            = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+anyhow           = { workspace = true }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono           = { workspace = true }
+portable-pty     = "0.8"
+libc             = "0.2"
+bytes            = "1"
+hyper            = { version = "1", features = ["server", "http1"] }
+hyper-util       = { version = "0.1", features = ["server", "tokio"] }
+http-body-util   = { version = "0.1", features = ["channel"] }
+
+[dev-dependencies]
+tokio          = { workspace = true, features = ["full", "test-util"] }
+tempfile       = "3"

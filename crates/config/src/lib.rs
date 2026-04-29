@@ -1,0 +1,346 @@
+//! # pilot-config
+//!
+//! YAML-based configuration for pilot. Loads from `~/.pilot/config.yaml`
+//! with sensible defaults if the file is missing.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to read config: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse config: {0}")]
+    Parse(#[from] serde_yaml::Error),
+}
+
+/// Top-level configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct Config {
+    pub providers: ProvidersConfig,
+    pub display: DisplayConfig,
+    pub slack: SlackConfig,
+    pub agent: AgentSection,
+    pub shell: ShellSection,
+    pub hooks: HooksConfig,
+    pub worktree: WorktreeConfig,
+    pub terminal: TerminalSection,
+}
+
+/// Worktree-layout configuration — mount points, mostly. The daemon
+/// calls `WorktreeManager::apply_mounts` after every checkout with
+/// the list assembled from this section so users see consistent
+/// layouts across every session.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WorktreeConfig {
+    /// Paths to symlink into / above each worktree. See
+    /// `pilot_git_ops::Mount` for semantics.
+    pub mounts: Vec<MountSpec>,
+}
+
+/// Serializable form of `pilot_git_ops::Mount`. Kept separate so
+/// config doesn't depend on git-ops; the daemon converts on the way
+/// in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountSpec {
+    /// Absolute host path (or `~/...`; expanded on load).
+    pub source: PathBuf,
+    /// Path relative to either the worktree root or one level up.
+    pub link_at: PathBuf,
+    /// `"inside"` (default) or `"above"`.
+    #[serde(default)]
+    pub placement: PlacementSpec,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PlacementSpec {
+    #[default]
+    Inside,
+    Above,
+}
+
+/// Periodic scripts pilot runs to keep the user's environment tidy —
+/// cargo sweep, worktree GC, whatever. Users drop shell scripts into
+/// `hooks.dir/<bucket>/` and pilot runs each bucket on its cadence.
+/// Pilot never knows or cares what the scripts do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    pub enabled: bool,
+    /// Directory with `daily/`, `hourly/`, `on_idle/` subfolders.
+    pub dir: PathBuf,
+    /// Per-bucket schedule. Bucket is the subfolder name under `dir`.
+    pub schedule: HooksSchedule,
+    /// Max runtime for a single script. Killed with SIGTERM on overrun.
+    #[serde(with = "humantime_serde")]
+    pub script_timeout: Duration,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        Self {
+            enabled: true,
+            dir: PathBuf::from(home).join(".pilot").join("hooks"),
+            schedule: HooksSchedule::default(),
+            script_timeout: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksSchedule {
+    #[serde(with = "humantime_serde")]
+    pub daily: Duration,
+    #[serde(with = "humantime_serde")]
+    pub hourly: Duration,
+    /// Runs when the inbox has been quiet (no key / no new activity) for
+    /// this long. Good for "don't run cargo-sweep while the user is
+    /// actively coding" kinds of tasks.
+    #[serde(with = "humantime_serde")]
+    pub on_idle: Duration,
+}
+
+impl Default for HooksSchedule {
+    fn default() -> Self {
+        Self {
+            daily: Duration::from_secs(24 * 3600),
+            hourly: Duration::from_secs(3600),
+            on_idle: Duration::from_secs(15 * 60),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct AgentSection {
+    #[serde(flatten)]
+    pub config: pilot_core::AgentConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellSection {
+    pub command: String,
+}
+
+impl Default for ShellSection {
+    fn default() -> Self {
+        Self {
+            command: "bash".into(),
+        }
+    }
+}
+
+/// How the user gets out of an embedded terminal when they want to go
+/// back to the inbox. The default is `]]]` — three closing brackets
+/// typed in quick succession. Configurable because:
+///   - some users want a different char (`}`, `*`, etc.) that doesn't
+///     collide with their normal typing,
+///   - some shells / agents print `]` heavily (BBcode, escape
+///     sequences shown literally) and want a longer run,
+///   - hardware keyboards differ, accessibility differs.
+///
+/// The first `(count - 1)` chars are buffered and only flushed to the
+/// agent on a non-matching key, so an actual `]]]` in code never ends
+/// up in the agent's input mid-typed if the user was escaping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalSection {
+    /// Char that, when repeated `escape_count` times within
+    /// `escape_window_ms`, exits the terminal back to the sidebar.
+    pub escape_char: char,
+    /// How many of `escape_char` in a row trigger the escape.
+    /// Must be ≥ 2; `1` would steal the key entirely.
+    pub escape_count: u8,
+    /// Time window between consecutive `escape_char` presses for them
+    /// to count toward the same run. After this window the run
+    /// resets and the buffered chars flush to the agent.
+    pub escape_window_ms: u64,
+}
+
+impl Default for TerminalSection {
+    fn default() -> Self {
+        Self {
+            escape_char: ']',
+            escape_count: 3,
+            escape_window_ms: 600,
+        }
+    }
+}
+
+impl Config {
+    /// Load from `~/.pilot/config.yaml`, falling back to defaults.
+    pub fn load() -> Result<Self, ConfigError> {
+        let path = Self::default_path();
+        if path.exists() {
+            Self::load_from(&path)
+        } else {
+            tracing::info!("No config file at {}, using defaults", path.display());
+            Ok(Self::default())
+        }
+    }
+
+    /// Load from a specific path.
+    pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
+        let contents = std::fs::read_to_string(path)?;
+        let config: Config = serde_yaml::from_str(&contents)?;
+        tracing::info!("Loaded config from {}", path.display());
+        Ok(config)
+    }
+
+    /// Write a default config file (for first-run).
+    pub fn write_default(path: &Path) -> Result<(), ConfigError> {
+        let config = Self::default();
+        let yaml = serde_yaml::to_string(&config)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, yaml)?;
+        Ok(())
+    }
+
+    pub fn default_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        PathBuf::from(home).join(".pilot").join("config.yaml")
+    }
+}
+
+// ─── Provider configs ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct ProvidersConfig {
+    pub github: GithubConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// Poll interval in seconds.
+    #[serde(with = "duration_secs")]
+    pub poll_interval: Duration,
+    /// Org/repo filters. Only PRs matching these appear in the inbox.
+    /// Empty = show everything.
+    pub filters: Vec<Filter>,
+    /// Whether to fetch comment authors for needs-reply detection.
+    pub detect_needs_reply: bool,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(30),
+            filters: vec![],
+            detect_needs_reply: true,
+        }
+    }
+}
+
+/// A filter for narrowing which tasks to show.
+///
+/// YAML format:
+/// ```yaml
+/// filters:
+///   - org: tensorzero
+///   - repo: owner/name
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Filter {
+    /// Filter to a GitHub organization (only PRs involving you).
+    #[serde(default)]
+    pub org: Option<String>,
+    /// Filter to a specific repo (only PRs involving you).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Watch ALL open PRs in this repo (regardless of involvement).
+    #[serde(default)]
+    pub watch: Option<String>,
+}
+
+impl Filter {
+    /// Convert to a GitHub search query qualifier for the "involves" query.
+    pub fn to_search_qualifier(&self) -> Option<String> {
+        if let Some(org) = &self.org {
+            Some(format!("org:{org}"))
+        } else {
+            self.repo.as_ref().map(|repo| format!("repo:{repo}"))
+        }
+    }
+
+    /// If this is a "watch" filter, return the repo to watch.
+    pub fn watch_repo(&self) -> Option<&str> {
+        self.watch.as_deref()
+    }
+}
+
+// ─── Display config ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisplayConfig {
+    pub sort_by: SortMode,
+    pub show_archived: bool,
+    /// Only show sessions with activity within this many days.
+    /// 0 = show all. Default: 7.
+    pub activity_days: u32,
+    /// Hide PRs you've already approved (you've done your part).
+    pub hide_approved_by_me: bool,
+    /// Treat assignees as reviewers (some teams use assignees for review tracking).
+    pub assignee_is_reviewer: bool,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            sort_by: SortMode::Priority,
+            show_archived: false,
+            activity_days: 7,
+            hide_approved_by_me: true,
+            assignee_is_reviewer: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortMode {
+    Priority,
+    Updated,
+}
+
+// ─── Slack config ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct SlackConfig {
+    /// Slack incoming webhook URL for sending messages.
+    pub webhook_url: Option<String>,
+}
+
+// ─── Serde helper for Duration as seconds ──────────────────────────────────
+
+mod duration_secs {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("{}s", d.as_secs()))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        let s = String::deserialize(d)?;
+        let s = s.trim_end_matches('s');
+        let secs: u64 = s.parse().map_err(serde::de::Error::custom)?;
+        Ok(Duration::from_secs(secs))
+    }
+}

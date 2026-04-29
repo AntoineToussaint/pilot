@@ -1,0 +1,437 @@
+//! `SessionBackend` impl backed by `tmux`.
+//!
+//! Why tmux? Sessions outlive the pilot server. If pilot crashes or is
+//! restarted, the user's Claude conversation, build output, and shell
+//! history all survive — `backend.list()` rediscovers them and the
+//! server reattaches a fresh I/O conduit. The user can also
+//! `tmux -L pilot attach -t <key>` from any other terminal to see and
+//! drive the same session — useful for debugging or for picking up
+//! work from a different machine over SSH.
+//!
+//! ## Wire model
+//!
+//! Each session is a tmux session in its own right under the
+//! private socket `tmux -L pilot`. The pilot server keeps **one
+//! attached portable-pty client per session** as the I/O conduit:
+//! bytes the client renders → broadcast to subscribers; bytes from
+//! `write()` → fed to the client's stdin, which tmux relays to the
+//! agent process inside.
+//!
+//! This is intentionally a "headless tmux client" — a custom config
+//! file disables tmux's prefix key, status bar, and key bindings so
+//! the bytes flowing through are the agent's own output, not framed
+//! by tmux UI. The agent inside doesn't know it's in tmux; pilot's
+//! libghostty-vt parser doesn't know either; the only role tmux plays
+//! is to keep the inner PTY alive when no pilot client is attached.
+//!
+//! ## Restart recovery
+//!
+//! `list()` shells out to `tmux list-sessions` so the server can
+//! enumerate sessions that survived a restart. To rebind one, the
+//! caller invokes `subscribe(key)` which spawns a fresh tmux-attach
+//! client — output streams as if it had just been spawned, and any
+//! pending write goes to the existing inner process.
+
+use crate::backend::{BackendError, OutputChunk, SessionBackend, Subscription};
+use crate::pty::DaemonPty;
+use portable_pty::PtySize;
+use std::collections::HashMap;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::Mutex;
+
+/// Socket name for the pilot-owned tmux server. Isolating to a private
+/// socket means we never touch the user's interactive tmux sessions
+/// running on the default socket.
+pub const TMUX_SOCKET: &str = "pilot";
+
+/// tmux client config: prefix off (so Ctrl-B reaches the agent), no
+/// key bindings (so nothing intercepts), no status bar (so output
+/// isn't framed). Set as a string and dropped to a temp file at
+/// `TmuxBackend::new` time so we don't depend on the user's `~/.tmux.conf`.
+const TMUX_TRANSPARENT_CONF: &str = "\
+set -g prefix None
+set -g status off
+set -g mouse off
+set -g default-terminal \"xterm-256color\"
+set -g escape-time 0
+unbind-key -a
+";
+
+const DEFAULT_COLS: u16 = 120;
+const DEFAULT_ROWS: u16 = 32;
+
+/// Per-session state. The DaemonPty is the tmux-attach client that
+/// streams I/O between pilot and the underlying tmux session.
+struct Slot {
+    /// The portable-pty wrapping `tmux attach -t <key>`.
+    /// Killed when `kill()` is called; if the session itself ends,
+    /// tmux exits the client which trips DaemonPty's EOF.
+    client: Arc<DaemonPty>,
+}
+
+pub struct TmuxBackend {
+    /// `tmux -L <socket>` socket name. Per-process so multiple pilot
+    /// processes don't share session state by accident.
+    socket: String,
+    /// Path to the transparent-tmux config dropped on first call.
+    /// Persists for the process lifetime; cleaned up on Drop.
+    config_path: PathBuf,
+    sessions: Mutex<HashMap<String, Slot>>,
+    next_key: AtomicU64,
+}
+
+impl TmuxBackend {
+    /// Probe for tmux on PATH and write the transparent config. Returns
+    /// `None` when tmux isn't usable on this machine — callers fall
+    /// back to `RawPtyBackend`.
+    pub fn detect() -> Option<Self> {
+        let out = Command::new("tmux").arg("-V").output().ok()?;
+        if !out.status.success() {
+            tracing::debug!("tmux -V failed; tmux backend unavailable");
+            return None;
+        }
+        let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tracing::info!("tmux backend available: {version}");
+        Self::with_socket(TMUX_SOCKET).ok()
+    }
+
+    /// Build a backend pinned to a specific tmux socket name. Useful
+    /// for tests so concurrent runs don't share state.
+    pub fn with_socket(socket: &str) -> std::io::Result<Self> {
+        let dir = std::env::temp_dir().join("pilot-tmux");
+        std::fs::create_dir_all(&dir)?;
+        let config_path = dir.join(format!("{socket}.conf"));
+        std::fs::write(&config_path, TMUX_TRANSPARENT_CONF)?;
+        Ok(Self {
+            socket: socket.into(),
+            config_path,
+            sessions: Mutex::new(HashMap::new()),
+            next_key: AtomicU64::new(1),
+        })
+    }
+
+    fn alloc_key(&self) -> String {
+        let n = self.next_key.fetch_add(1, Ordering::Relaxed);
+        format!("pilot-{n}")
+    }
+
+    /// Run `tmux -L <socket> -f <config> ...args`. Captures stdout +
+    /// stderr; returns a BackendError on non-zero exit.
+    fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
+        let out = Command::new("tmux")
+            .arg("-L")
+            .arg(&self.socket)
+            .arg("-f")
+            .arg(&self.config_path)
+            .args(args)
+            .output()
+            .map_err(|e| BackendError::Other(format!("tmux invoke: {e}")))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(BackendError::Other(format!(
+                "tmux {}: {}",
+                args.join(" "),
+                stderr.trim()
+            )));
+        }
+        Ok(out)
+    }
+
+    /// Build the portable-pty argv for an attaching tmux client. We
+    /// pass `-f` so the client uses the transparent config too — this
+    /// is what disables status/prefix/bindings on the rendering side.
+    fn attach_argv(&self, key: &str) -> Vec<String> {
+        vec![
+            "tmux".into(),
+            "-L".into(),
+            self.socket.clone(),
+            "-f".into(),
+            self.config_path.to_string_lossy().into_owned(),
+            "attach".into(),
+            "-t".into(),
+            key.into(),
+        ]
+    }
+
+    /// Spawn the tmux-attach DaemonPty for `key`. The attach client
+    /// is the I/O conduit; its lifetime is unrelated to the tmux
+    /// session's — `wait_exit` polls tmux directly for that.
+    fn open_client(&self, key: &str, size: PtySize) -> Result<Slot, BackendError> {
+        let argv = self.attach_argv(key);
+        let pty = DaemonPty::spawn(&argv, size, None, Vec::new())
+            .map_err(|e| BackendError::Spawn(format!("tmux attach: {e}")))?;
+        Ok(Slot {
+            client: Arc::new(pty),
+        })
+    }
+}
+
+impl Drop for TmuxBackend {
+    fn drop(&mut self) {
+        // Best-effort: kill ALL sessions on this private socket so we
+        // don't leave orphaned tmux servers behind. If the user wanted
+        // persistence across pilot-server restart they'd be using a
+        // different socket / external tmux. For the in-process
+        // backend lifetime this is the right behavior.
+        let _ = Command::new("tmux")
+            .arg("-L")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .output();
+        let _ = std::fs::remove_file(&self.config_path);
+    }
+}
+
+impl SessionBackend for TmuxBackend {
+    fn id(&self) -> &'static str {
+        "tmux"
+    }
+
+    fn spawn<'a>(
+        &'a self,
+        argv: &'a [String],
+        cwd: Option<&'a Path>,
+        env: &'a [(String, String)],
+    ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            if argv.is_empty() {
+                return Err(BackendError::Spawn("empty argv".into()));
+            }
+            let key = self.alloc_key();
+
+            // Build `tmux new-session -d -s <key> -x <cols> -y <rows> [-c <cwd>] -- <argv...>`.
+            // Detached session — we attach our own client below.
+            let cols = DEFAULT_COLS.to_string();
+            let rows = DEFAULT_ROWS.to_string();
+            let mut cmd_args: Vec<String> = vec![
+                "new-session".into(),
+                "-d".into(),
+                "-s".into(),
+                key.clone(),
+                "-x".into(),
+                cols,
+                "-y".into(),
+                rows,
+            ];
+            if let Some(dir) = cwd {
+                cmd_args.push("-c".into());
+                cmd_args.push(dir.to_string_lossy().into_owned());
+            }
+            for (k, v) in env {
+                cmd_args.push("-e".into());
+                cmd_args.push(format!("{k}={v}"));
+            }
+            // `--` separator so argv elements starting with `-` are
+            // treated as command tokens, not tmux flags.
+            cmd_args.push("--".into());
+            cmd_args.extend(argv.iter().cloned());
+
+            let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+            self.tmux(&arg_refs)?;
+
+            // Now open the attaching client. If this fails the tmux
+            // session is orphaned; tear it down so we don't leak.
+            let size = PtySize {
+                cols: DEFAULT_COLS,
+                rows: DEFAULT_ROWS,
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+            let slot = match self.open_client(&key, size) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = self.tmux(&["kill-session", "-t", &key]);
+                    return Err(e);
+                }
+            };
+            self.sessions.lock().await.insert(key.clone(), slot);
+            Ok(key)
+        })
+    }
+
+    fn write<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|s| s.client.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            pty.write(bytes)
+                .await
+                .map_err(|e| BackendError::Other(e.to_string()))
+        })
+    }
+
+    fn resize<'a>(
+        &'a self,
+        key: &'a str,
+        cols: u16,
+        rows: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Resizing the attached client makes tmux resize the pane
+            // automatically. We also nudge the tmux session itself in
+            // case other clients are attached at different sizes.
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|s| s.client.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            pty.resize(PtySize {
+                cols,
+                rows,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+            // Best-effort window resize. Failing this is fine — the
+            // PTY-level resize already triggered tmux internally.
+            let _ = self.tmux(&["refresh-client", "-t", key, "-C", &format!("{cols},{rows}")]);
+            Ok(())
+        })
+    }
+
+    fn kill<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Drop our slot first so subsequent ops are NotFound.
+            let slot = self.sessions.lock().await.remove(key);
+            if let Some(slot) = slot {
+                slot.client.kill();
+            }
+            // Kill the tmux session. Idempotent: if the session is
+            // already gone tmux exits non-zero — we ignore that. Real
+            // failures (tmux not on PATH) will already have surfaced
+            // at spawn time.
+            let _ = self.tmux(&["kill-session", "-t", key]);
+            Ok(())
+        })
+    }
+
+    fn list<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Two sources of truth: the in-memory map (sessions we
+            // spawned) and `tmux list-sessions` (what tmux currently
+            // sees, including any survivors of a prior pilot run).
+            // We return the union so restart recovery works even
+            // before the server has rebound clients to those keys.
+            let mut keys: Vec<String> = self.sessions.lock().await.keys().cloned().collect();
+            // `tmux list-sessions -F '#{session_name}'` — prints one
+            // name per line. Empty stdout / no-server errors mean
+            // "no sessions"; we treat them as Ok([]).
+            let out = Command::new("tmux")
+                .arg("-L")
+                .arg(&self.socket)
+                .arg("-f")
+                .arg(&self.config_path)
+                .args(["list-sessions", "-F", "#{session_name}"])
+                .output()
+                .map_err(|e| BackendError::Other(format!("tmux list: {e}")))?;
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let name = line.trim().to_string();
+                    if !name.is_empty() && !keys.contains(&name) {
+                        keys.push(name);
+                    }
+                }
+            }
+            keys.sort();
+            keys.dedup();
+            Ok(keys)
+        })
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Subscription, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // If we already have a client open, share its broadcast.
+            // If this is a session that survived restart and we
+            // haven't bound a client yet, open one lazily.
+            let pty = {
+                let mut map = self.sessions.lock().await;
+                if let Some(slot) = map.get(key) {
+                    slot.client.clone()
+                } else {
+                    let size = PtySize {
+                        cols: DEFAULT_COLS,
+                        rows: DEFAULT_ROWS,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    };
+                    let slot = self.open_client(key, size)?;
+                    let pty = slot.client.clone();
+                    map.insert(key.into(), slot);
+                    pty
+                }
+            };
+
+            let mut sub = pty.subscribe().await;
+            let replay = std::mem::take(&mut sub.replay);
+            let last_seq = sub.last_seq;
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<OutputChunk>();
+
+            let pty_pump = pty.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        chunk = sub.live.recv() => match chunk {
+                            Ok(c) => {
+                                if tx.send(OutputChunk {
+                                    seq: c.seq,
+                                    bytes: c.bytes.to_vec(),
+                                }).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        },
+                        _ = pty_pump.wait_finished() => break,
+                    }
+                }
+            });
+
+            Ok(Subscription {
+                replay,
+                last_seq,
+                live: rx,
+            })
+        })
+    }
+
+    fn wait_exit<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<i32>> + Send + 'a>> {
+        Box::pin(async move {
+            // The attach client exits when its tmux session ends —
+            // either because the inner process exited, or because
+            // someone called `kill_session`. DaemonPty caches the
+            // exit code, so this is safe to call repeatedly.
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key).map(|s| s.client.clone())?
+            };
+            pty.wait_exit().await
+        })
+    }
+}

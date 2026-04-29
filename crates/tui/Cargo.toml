@@ -1,0 +1,44 @@
+[package]
+name = "pilot-v2-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pilot_v2_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pilot"
+path = "src/main.rs"
+
+[dev-dependencies]
+# Golden-snapshot testing. Use `cargo insta review` to accept
+# intentional render changes; otherwise CI catches regressions.
+insta = { version = "1", features = ["yaml"] }
+tempfile = "3"
+
+[dependencies]
+pilot-core       = { workspace = true }
+pilot-auth       = { workspace = true }
+pilot-config     = { workspace = true }
+pilot-store      = { workspace = true }
+pilot-gh         = { workspace = true }
+pilot-tui-term   = { workspace = true }
+libghostty-vt    = { path = "../../../libghostty-rs/crates/libghostty-vt" }
+pilot-v2-ipc     = { workspace = true }
+pilot-v2-agents  = { workspace = true }
+pilot-v2-server  = { path = "../server" }
+
+tokio            = { workspace = true }
+anyhow           = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossterm        = { workspace = true }
+ratatui          = { workspace = true }
+chrono           = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+futures-util     = "0.3"
+tempfile         = "3"
