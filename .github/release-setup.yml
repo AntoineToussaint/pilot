@@ -1,0 +1,30 @@
+# Snippet inlined into every job of the cargo-dist-generated release
+# workflow. Installs the prerequisites pilot's build needs that
+# Rust's toolchain doesn't provide:
+#
+# - Zig 0.15.2: libghostty-vt's `build.rs` invokes `zig build` to
+#   compile the embedded ghostty source. Pinned to 0.15.2 because
+#   newer Zig (0.16+) broke the upstream `requireZig` check that
+#   libghostty's build.zig enforces.
+# - SQLite headers: `rusqlite { features = ["bundled"] }` ships its
+#   own SQLite source, but the `cc` crate still needs a working C
+#   toolchain. macOS has CLT; Linux runners install build-essential.
+#
+# Once libghostty-rs is published with relaxed Zig pinning, the Zig
+# install step is the only platform-specific bit here.
+
+- name: Install Zig 0.15.2
+  uses: mlugg/setup-zig@v2
+  with:
+    version: "0.15.2"
+
+- name: Install C toolchain (Linux)
+  if: runner.os == 'Linux'
+  run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+
+- name: Install C toolchain (macOS)
+  if: runner.os == 'macOS'
+  run: |
+    # Xcode CLT ships a working clang + sqlite headers. CI runners
+    # already have it; this is belt-and-suspenders for forks.
+    xcode-select --install 2>/dev/null || true

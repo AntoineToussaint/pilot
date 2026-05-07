@@ -140,8 +140,8 @@ impl Default for ShellSection {
 }
 
 /// How the user gets out of an embedded terminal when they want to go
-/// back to the inbox. The default is `]]]` — three closing brackets
-/// typed in quick succession. Configurable because:
+/// back to the inbox. The default is `]]` — two closing brackets typed
+/// in quick succession. Configurable because:
 ///   - some users want a different char (`}`, `*`, etc.) that doesn't
 ///     collide with their normal typing,
 ///   - some shells / agents print `]` heavily (BBcode, escape
@@ -149,7 +149,7 @@ impl Default for ShellSection {
 ///   - hardware keyboards differ, accessibility differs.
 ///
 /// The first `(count - 1)` chars are buffered and only flushed to the
-/// agent on a non-matching key, so an actual `]]]` in code never ends
+/// agent on a non-matching key, so an actual `]]` in code never ends
 /// up in the agent's input mid-typed if the user was escaping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -170,7 +170,7 @@ impl Default for TerminalSection {
     fn default() -> Self {
         Self {
             escape_char: ']',
-            escape_count: 3,
+            escape_count: 2,
             escape_window_ms: 600,
         }
     }

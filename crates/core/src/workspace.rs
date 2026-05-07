@@ -1,4 +1,4 @@
-//! `Workspace` and `Session` — v2's hierarchy.
+//! `Workspace` and `Session` — pilot's hierarchy.
 //!
 //! ## The hierarchy (canonical)
 //!
@@ -23,23 +23,11 @@
 //!   a workspace. Without a session there's no folder, so there's
 //!   nothing for a terminal to root in.
 //!
-//! ## Why two levels (Workspace vs Session)
-//!
-//! v1 conflated them: every task was one Session with one terminal.
-//! That blocked use cases like running Claude AND Codex on the same
-//! PR in parallel, or having a long-running shell next to an agent.
-//! v2 separates "the unit of work" (Workspace) from "the running
-//! thing" (Session) so the model maps cleanly onto reality.
-//!
-//! Both persist across pilot restarts: the daemon keeps the worktree
-//! and the PTYs alive, the store remembers everything else.
-//!
-//! ## Coexistence with v1's `Session`
-//!
-//! v1's `pilot_core::Session` (in `session.rs`) stays exactly as it
-//! is — v1 still imports it. The v2 daemon's migration shim converts
-//! a v1 Session into a v2 Workspace at upgrade time via
-//! `Workspace::from_v1_session`.
+//! Separating "the unit of work" (Workspace) from "the running thing"
+//! (Session) lets a single workspace host parallel agents and shells —
+//! e.g. Claude AND Codex on the same PR, or a long-running shell next
+//! to an agent. Both persist across pilot restarts: the daemon keeps
+//! the worktree and the PTYs alive, the store remembers everything else.
 
 use crate::task::{Activity, Task, TaskId};
 use chrono::{DateTime, Utc};
@@ -92,30 +80,10 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkspaceState {
-    /// No worktree on disk yet — workspace is just metadata.
-    Pending,
-    /// Worktree being created (clone, branch checkout).
-    CheckingOut,
-    /// Active workspace with a worktree the user can run sessions in.
-    Active,
-    /// User snoozed it.
-    Snoozed,
-    /// User archived (or PR merged + auto-archive).
-    Archived,
-}
-
 /// One workspace = one unit of work (PR + linked issues), holding
 /// **zero or more sessions**. A session is one folder worktree on
 /// disk; without sessions the workspace is purely a tracking row
 /// with no on-disk presence.
-///
-/// Compatibility: `worktree_path` (the v2-pre-session field) is kept
-/// only for deserializing older persisted records. Live code reads
-/// `sessions[0].worktree_path` instead. `Workspace::from_v1_session`
-/// migrates the legacy field into a freshly-allocated session at
-/// upgrade time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub key: WorkspaceKey,
@@ -125,11 +93,6 @@ pub struct Workspace {
     /// Branch this workspace tracks. Required — even a "from scratch"
     /// workspace lives on a branch.
     pub branch: String,
-    /// Legacy single-worktree pointer. New code writes
-    /// [`Self::sessions`] instead; this field is read-only and
-    /// migrated forward on `Workspace::from_v1_session`.
-    #[serde(default)]
-    pub worktree_path: Option<PathBuf>,
     /// Live runtime sessions. **Each session = one folder worktree.**
     /// Zero sessions = no on-disk presence. Multiple sessions = the
     /// user opened separate worktrees for the same branch (review +
@@ -147,7 +110,6 @@ pub struct Workspace {
     pub read_indices: HashSet<usize>,
     #[serde(default)]
     pub snoozed_until: Option<DateTime<Utc>>,
-    pub state: WorkspaceState,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -161,7 +123,6 @@ impl Workspace {
             name: key.as_str().to_string(),
             key,
             branch,
-            worktree_path: None,
             sessions: Vec::new(),
             pr: None,
             gh_issues: Vec::new(),
@@ -170,7 +131,6 @@ impl Workspace {
             seen_count: 0,
             read_indices: HashSet::new(),
             snoozed_until: None,
-            state: WorkspaceState::Pending,
             created_at: now,
             last_viewed_at: None,
         }
@@ -308,8 +268,6 @@ impl Workspace {
     }
 
     /// Whether the activity at `index` is currently unread.
-    /// Mirrors v1 `Session::is_activity_unread` so the right pane can
-    /// surface unread markers next to each row.
     pub fn is_activity_unread(&self, index: usize) -> bool {
         index < self.activity.len().saturating_sub(self.seen_count)
             && !self.read_indices.contains(&index)
@@ -322,6 +280,31 @@ impl Workspace {
         self.read_indices.clear();
     }
 
+    /// Mark exactly one activity as read. Used by the auto-mark-on-
+    /// hover feature — landing the cursor on an unread row arms a
+    /// short timer; on expiry the App calls this. Idempotent: marking
+    /// an already-read index is a no-op.
+    pub fn mark_activity_read(&mut self, index: usize) {
+        if index < self.activity.len() {
+            self.read_indices.insert(index);
+        }
+    }
+
+    /// Reverse of `mark_activity_read`. Bound to the `z` undo key —
+    /// pulls the index back into the unread set without disturbing
+    /// other read state. No-op if the index wasn't in the set.
+    pub fn unmark_activity_read(&mut self, index: usize) {
+        self.read_indices.remove(&index);
+        // Also reduce seen_count if this index was inside the auto-
+        // seen tail (`activity.len() - seen_count`). Without this, an
+        // undo immediately after a snapshot-driven seen bump would
+        // not restore the unread state.
+        let auto_seen_threshold = self.activity.len().saturating_sub(self.seen_count);
+        if index >= auto_seen_threshold {
+            self.seen_count = self.activity.len().saturating_sub(index + 1);
+        }
+    }
+
     pub fn is_snoozed(&self, now: DateTime<Utc>) -> bool {
         match self.snoozed_until {
             Some(until) => until > now,
@@ -329,60 +312,40 @@ impl Workspace {
         }
     }
 
-    /// Convert a v1 `Session` into a v2 `Workspace`. Used by the
-    /// migration shim on first v2 launch.
-    pub fn from_v1_session(s: crate::session::Session) -> Self {
-        let key = WorkspaceKey::new(workspace_key_for(&s.primary_task));
-        let branch = s
-            .primary_task
-            .branch
-            .clone()
-            .unwrap_or_else(|| key.as_str().to_string());
-        let mut ws = Self {
-            name: s.display_name,
-            key: key.clone(),
-            branch,
-            // Old field stays for backwards-compat reads. Live code
-            // looks at `sessions` instead.
-            worktree_path: s.worktree_path.clone(),
-            sessions: Vec::new(),
-            pr: None,
-            gh_issues: Vec::new(),
-            linear_issues: Vec::new(),
-            activity: s.activity.clone(),
-            seen_count: s.seen_count,
-            read_indices: s.read_indices,
-            snoozed_until: s.snoozed_until,
-            state: match s.state {
-                crate::session::SessionState::Watching => WorkspaceState::Pending,
-                crate::session::SessionState::CheckingOut => WorkspaceState::CheckingOut,
-                crate::session::SessionState::Active | crate::session::SessionState::Working => {
-                    WorkspaceState::Active
-                }
-                crate::session::SessionState::Archived => WorkspaceState::Archived,
-            },
-            created_at: s.created_at,
-            last_viewed_at: s.last_viewed_at,
-        };
-        // Distribute primary_task + linked_items into the right slots.
-        ws.attach_task(s.primary_task);
-        for t in s.linked_items {
-            ws.attach_task(t);
+    /// On-disk identifier for this workspace's worktrees. Human-
+    /// readable so a shell prompt sitting in the worktree is
+    /// instantly recognisable.
+    ///
+    /// Resolution order:
+    /// - PR attached → `PR-{number}-{slug-of-title}` (capped at 8
+    ///   words so it stays scannable).
+    /// - No PR but a custom workspace name → slug of `name`.
+    /// - Both empty → fall back to a stable `workspace_{key-suffix}`
+    ///   placeholder so the path is always non-empty.
+    pub fn worktree_slug(&self) -> String {
+        if let Some(pr) = self.pr.as_ref()
+            && let Some((_, num_str)) = pr.id.key.rsplit_once('#')
+            && let Ok(num) = num_str.parse::<u64>()
+        {
+            return crate::slug::pr_slug(num, &pr.title);
         }
-        ws.sort_activity();
-        // Migrate the v1 worktree_path into a freshly-allocated
-        // session so v2 code that reads `workspace.sessions[..]`
-        // sees the user's existing folder. v1 only ever held one
-        // worktree per session, so a single Session covers it.
-        if let Some(path) = s.worktree_path {
-            ws.sessions.push(Session::new(
-                key,
-                SessionKind::Shell,
-                path,
-                ws.created_at,
-            ));
+        let name_slug = crate::slug::slugify(&self.name);
+        if !name_slug.is_empty() {
+            return name_slug;
         }
-        ws
+        // Fall-back: avoid empty paths even on a fully-anonymous
+        // workspace. The key's tail keeps it unique across siblings.
+        let suffix = self
+            .key
+            .as_str()
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        format!("workspace-{suffix}")
     }
 }
 
@@ -464,6 +427,251 @@ pub enum SessionRunState {
     Stopped,
 }
 
+/// How runners are arranged inside a session's surface area.
+///
+/// Default `Tabs` is what shipped first: one runner full-pane with a
+/// tab strip on top, switch with the next-tab key. `Splits` is the
+/// tile-manager variant: a tree of horizontal/vertical splits with
+/// runners at the leaves, mirroring tmux panes.
+///
+/// The `Splits` variant is wired through persistence + IPC but the
+/// renderer + key bindings still default to `Tabs`. Migration path:
+/// the App reads `Session.layout`, picks Tabs rendering until the
+/// tile renderer is wired, at which point the same data model works
+/// without a schema change.
+// External tagging (the serde default) is what bincode supports —
+// internally-tagged enums fail `bincode::deserialize` because the
+// format isn't self-describing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionLayout {
+    Tabs {
+        /// Index into `Session.runners`. Clamped on save.
+        active: usize,
+    },
+    Splits {
+        tree: TileTree,
+        /// Path through `tree` to the focused leaf (0 = first child
+        /// at each level, 1 = second). Empty when the tree is just
+        /// a leaf.
+        focused: Vec<u8>,
+    },
+}
+
+impl Default for SessionLayout {
+    fn default() -> Self {
+        Self::Tabs { active: 0 }
+    }
+}
+
+/// One node in the per-session tile tree. Leaves point to a runner
+/// by terminal id (numeric, daemon-allocated). Splits hold a 0-100
+/// `ratio` for the first child's share of the available space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TileTree {
+    Leaf {
+        terminal_id: u64,
+    },
+    HSplit {
+        left: Box<TileTree>,
+        right: Box<TileTree>,
+        ratio: u8,
+    },
+    VSplit {
+        top: Box<TileTree>,
+        bottom: Box<TileTree>,
+        ratio: u8,
+    },
+}
+
+/// Direction for spatial navigation between tiles. Maps onto vim
+/// `Ctrl-w h/j/k/l`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl TileTree {
+    /// Every leaf's terminal id, in pre-order. Stable ordering — the
+    /// renderer relies on this for the focused-tile highlight.
+    pub fn leaves(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        self.collect_leaves(&mut out);
+        out
+    }
+
+    fn collect_leaves(&self, out: &mut Vec<u64>) {
+        match self {
+            TileTree::Leaf { terminal_id } => out.push(*terminal_id),
+            TileTree::HSplit { left, right, .. } => {
+                left.collect_leaves(out);
+                right.collect_leaves(out);
+            }
+            TileTree::VSplit { top, bottom, .. } => {
+                top.collect_leaves(out);
+                bottom.collect_leaves(out);
+            }
+        }
+    }
+
+    /// Path through the tree to the leaf carrying `terminal_id`.
+    /// Returns the steps as 0/1 (left-or-top vs. right-or-bottom).
+    pub fn path_to(&self, terminal_id: u64) -> Option<Vec<u8>> {
+        let mut path = Vec::new();
+        if self.find_path(terminal_id, &mut path) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    fn find_path(&self, terminal_id: u64, path: &mut Vec<u8>) -> bool {
+        match self {
+            TileTree::Leaf { terminal_id: id } => *id == terminal_id,
+            TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
+                path.push(0);
+                if left.find_path(terminal_id, path) {
+                    return true;
+                }
+                path.pop();
+                path.push(1);
+                if right.find_path(terminal_id, path) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+        }
+    }
+
+    /// Replace the leaf at `path` with `new` and return the previous
+    /// subtree there. Used by split operations: take the focused
+    /// leaf, wrap it in a Split with a new sibling.
+    pub fn replace_at(&mut self, path: &[u8], new: TileTree) -> Option<TileTree> {
+        if path.is_empty() {
+            return Some(std::mem::replace(self, new));
+        }
+        let head = path[0];
+        let rest = &path[1..];
+        let next = match self {
+            TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
+                if head == 0 { left.as_mut() } else { right.as_mut() }
+            }
+            TileTree::Leaf { .. } => return None,
+        };
+        next.replace_at(rest, new)
+    }
+
+    /// Remove the leaf at `path`, collapsing its parent split into
+    /// the surviving sibling. Returns Ok with the new path of focus
+    /// (the sibling's path) on success. Errors when the path points
+    /// at the root (can't collapse the only tile) or doesn't exist.
+    pub fn remove_at(&mut self, path: &[u8]) -> Result<Vec<u8>, ()> {
+        if path.is_empty() {
+            // Caller is trying to delete the only tile. Refuse — the
+            // session needs at least one runner visible.
+            return Err(());
+        }
+        if path.len() == 1 {
+            // Collapse the parent (which is `self`) into the sibling.
+            let head = path[0];
+            let new_root = match self {
+                TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
+                    if head == 0 {
+                        std::mem::replace(right.as_mut(), TileTree::Leaf { terminal_id: 0 })
+                    } else {
+                        std::mem::replace(left.as_mut(), TileTree::Leaf { terminal_id: 0 })
+                    }
+                }
+                TileTree::Leaf { .. } => return Err(()),
+            };
+            *self = new_root;
+            // After collapse, focus lands at the new root (no path).
+            return Ok(Vec::new());
+        }
+        let head = path[0];
+        let rest = &path[1..];
+        let next = match self {
+            TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
+                if head == 0 { left.as_mut() } else { right.as_mut() }
+            }
+            TileTree::Leaf { .. } => return Err(()),
+        };
+        let mut sub_path = next.remove_at(rest)?;
+        // Prefix the parent step so the returned focus path is full.
+        sub_path.insert(0, head);
+        Ok(sub_path)
+    }
+
+    /// Spatial neighbor of the leaf at `path` in the given direction.
+    /// Returns the path to that neighbor leaf, or None if nothing
+    /// lies in that direction (e.g. moving Left from the leftmost
+    /// tile). Walks up to find an ancestor split that goes against
+    /// the requested axis, then descends.
+    pub fn neighbor(&self, path: &[u8], dir: TileDirection) -> Option<Vec<u8>> {
+        // Walk up from the leaf until we find a split whose axis
+        // matches `dir` AND we came from the "wrong" side (so we can
+        // jump to the other side).
+        let want_horizontal = matches!(dir, TileDirection::Left | TileDirection::Right);
+        let want_first = matches!(dir, TileDirection::Left | TileDirection::Up);
+        for i in (0..path.len()).rev() {
+            let prefix = &path[..i];
+            let step = path[i];
+            let node = self.subtree_at(prefix)?;
+            let split_is_horizontal = matches!(node, TileTree::HSplit { .. });
+            if split_is_horizontal != want_horizontal {
+                continue;
+            }
+            // We're inside a split whose axis matches the request.
+            // Did we come from the "near" side (so `dir` would jump
+            // us across), or from the "far" side (no neighbor here,
+            // keep walking)?
+            let came_from_near = (step == 1) == want_first;
+            if !came_from_near {
+                continue;
+            }
+            let mut new_path = prefix.to_vec();
+            new_path.push(if want_first { 0 } else { 1 });
+            // Descend into the chosen side's deepest leaf along the
+            // SAME axis (so the cursor lands on a visible leaf).
+            return Some(self.descend_to_leaf(&mut new_path));
+        }
+        None
+    }
+
+    fn subtree_at(&self, path: &[u8]) -> Option<&TileTree> {
+        let mut node = self;
+        for &step in path {
+            node = match node {
+                TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
+                    if step == 0 { left.as_ref() } else { right.as_ref() }
+                }
+                TileTree::Leaf { .. } => return None,
+            };
+        }
+        Some(node)
+    }
+
+    /// From the subtree at `path`, walk down to its first leaf along
+    /// the natural pre-order traversal. Mutates `path` in place,
+    /// extending it. Returns the extended path.
+    fn descend_to_leaf(&self, path: &mut Vec<u8>) -> Vec<u8> {
+        let mut node = self.subtree_at(path);
+        while let Some(n) = node {
+            match n {
+                TileTree::Leaf { .. } => break,
+                TileTree::HSplit { .. } | TileTree::VSplit { .. } => {
+                    path.push(0);
+                    node = self.subtree_at(path);
+                }
+            }
+        }
+        path.clone()
+    }
+}
+
 /// One running thing inside a workspace.
 ///
 /// **A session IS a folder worktree.** It must point at a directory
@@ -489,6 +697,10 @@ pub struct Session {
     /// for compare/log sessions whose state model is different.
     #[serde(default)]
     pub last_output_at: Option<DateTime<Utc>>,
+    /// Tile/tab arrangement for this session. Defaults to Tabs.
+    /// Persisted so the user's layout survives restart.
+    #[serde(default)]
+    pub layout: SessionLayout,
 }
 
 impl Session {
@@ -508,6 +720,7 @@ impl Session {
             worktree_path,
             created_at: now,
             last_output_at: None,
+            layout: SessionLayout::default(),
         }
     }
 }
@@ -518,6 +731,103 @@ fn default_name_for(kind: &SessionKind) -> String {
         SessionKind::Shell => "shell".into(),
         SessionKind::Compare { .. } => "compare".into(),
         SessionKind::LogTail { path } => format!("log: {path}"),
+    }
+}
+
+#[cfg(test)]
+mod tile_tree_tests {
+    use super::*;
+
+    fn leaf(id: u64) -> TileTree {
+        TileTree::Leaf { terminal_id: id }
+    }
+    fn hsplit(left: TileTree, right: TileTree) -> TileTree {
+        TileTree::HSplit {
+            left: Box::new(left),
+            right: Box::new(right),
+            ratio: 50,
+        }
+    }
+    fn vsplit(top: TileTree, bottom: TileTree) -> TileTree {
+        TileTree::VSplit {
+            top: Box::new(top),
+            bottom: Box::new(bottom),
+            ratio: 50,
+        }
+    }
+
+    #[test]
+    fn leaves_traverses_in_preorder() {
+        // Tree: H(L=1, V(T=2, B=3))
+        let t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        assert_eq!(t.leaves(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn path_to_finds_each_leaf() {
+        let t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        assert_eq!(t.path_to(1), Some(vec![0]));
+        assert_eq!(t.path_to(2), Some(vec![1, 0]));
+        assert_eq!(t.path_to(3), Some(vec![1, 1]));
+        assert_eq!(t.path_to(99), None);
+    }
+
+    #[test]
+    fn replace_at_swaps_leaf_for_split() {
+        let mut t = leaf(1);
+        // Wrap leaf 1 in HSplit(1, 2).
+        let prev = t.replace_at(&[], hsplit(leaf(1), leaf(2))).unwrap();
+        assert_eq!(prev, leaf(1));
+        assert_eq!(t.leaves(), vec![1, 2]);
+    }
+
+    #[test]
+    fn remove_at_collapses_parent_split() {
+        let mut t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        // Remove leaf 2 — VSplit collapses to leaf 3.
+        let new_focus = t.remove_at(&[1, 0]).unwrap();
+        assert_eq!(t.leaves(), vec![1, 3]);
+        assert_eq!(new_focus, vec![1]);
+    }
+
+    #[test]
+    fn remove_at_root_path_errors() {
+        let mut t = leaf(1);
+        assert!(t.remove_at(&[]).is_err(), "can't remove the only tile");
+    }
+
+    #[test]
+    fn neighbor_right_jumps_to_sibling() {
+        // H(1, 2): from 1, Right → 2.
+        let t = hsplit(leaf(1), leaf(2));
+        let path1 = t.path_to(1).unwrap();
+        let n = t.neighbor(&path1, TileDirection::Right);
+        assert_eq!(n, Some(vec![1]));
+    }
+
+    #[test]
+    fn neighbor_left_at_leftmost_returns_none() {
+        let t = hsplit(leaf(1), leaf(2));
+        let path1 = t.path_to(1).unwrap();
+        assert_eq!(t.neighbor(&path1, TileDirection::Left), None);
+    }
+
+    #[test]
+    fn neighbor_up_in_vsplit() {
+        // V(1, 2): from 2, Up → 1.
+        let t = vsplit(leaf(1), leaf(2));
+        let path2 = t.path_to(2).unwrap();
+        assert_eq!(t.neighbor(&path2, TileDirection::Up), Some(vec![0]));
+    }
+
+    #[test]
+    fn neighbor_walks_up_through_unrelated_split() {
+        // H(1, V(2, 3)): from 1, Right should land on the deepest
+        // first-leaf of the right subtree (= 2).
+        let t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        let path1 = t.path_to(1).unwrap();
+        let n = t.neighbor(&path1, TileDirection::Right);
+        assert_eq!(n, Some(vec![1, 0]));
     }
 }
 
@@ -691,18 +1001,6 @@ mod tests {
         assert!(!key.contains('/'));
         // Same task → same key.
         assert_eq!(workspace_key_for(&task), key);
-    }
-
-    #[test]
-    fn from_v1_session_preserves_read_state_and_attaches_primary_task() {
-        let task = pr("o/r#1");
-        let mut s = crate::session::Session::new_at(task, now());
-        s.seen_count = 7;
-        s.last_viewed_at = Some(now());
-        let ws = Workspace::from_v1_session(s);
-        assert!(ws.pr.is_some());
-        assert_eq!(ws.seen_count, 7);
-        assert!(ws.last_viewed_at.is_some());
     }
 
     #[test]

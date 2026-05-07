@@ -108,6 +108,7 @@ query($query: String!, $first: Int!, $after: String) {
     }
   }
   rateLimit {
+    limit
     remaining
     resetAt
   }
@@ -172,8 +173,15 @@ pub struct GqlData {
 #[derive(Deserialize, Debug)]
 pub struct GqlRateLimit {
     pub remaining: u32,
+    /// Total quota. Optional in case GitHub stops returning it.
+    #[serde(default = "default_limit")]
+    pub limit: u32,
     #[serde(rename = "resetAt")]
     pub reset_at: String,
+}
+
+fn default_limit() -> u32 {
+    5000
 }
 
 #[derive(Deserialize, Debug)]
@@ -828,10 +836,9 @@ fn extract_repo_from_url(url: &str) -> String {
 
 // ─── GitHub Issues ─────────────────────────────────────────────────────
 //
-// v2 additive extension: Issues get fetched alongside PRs by a separate
-// GraphQL query. Issues are strictly a subset of PR fields (no branches,
-// no CI, no reviewers) so the query is simpler. v1 doesn't call any of
-// the following functions; they're only used by the v2 daemon.
+// Issues get fetched alongside PRs by a separate GraphQL query. Issues
+// are strictly a subset of PR fields (no branches, no CI, no reviewers)
+// so the query is simpler.
 
 const ISSUES_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
@@ -865,6 +872,7 @@ query($query: String!, $first: Int!, $after: String) {
     }
   }
   rateLimit {
+    limit
     remaining
     resetAt
   }

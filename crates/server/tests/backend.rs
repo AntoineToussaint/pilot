@@ -5,7 +5,7 @@
 //! means writing one new wrapper module — the contract suite stays
 //! shared so all impls satisfy the same behavior.
 
-use pilot_v2_server::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
+use pilot_server::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use std::sync::Arc;
 use std::time::Duration;
 

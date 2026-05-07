@@ -13,7 +13,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use pilot_v2_server::agent_spawn::{
+use pilot_server::agent_spawn::{
     AgentSpawnConfig, ProxyProvider, ProxyTarget, spawn_with_proxy,
 };
 use portable_pty::PtySize;
@@ -263,13 +263,13 @@ async fn child_request_through_proxy_emits_record() {
 async fn proxy_record_event_round_trips_through_ipc() {
     // Assemble a ProxyRecord, wrap it in Event::ProxyRecord, send it
     // through the channel transport, assert we get it back intact.
-    use pilot_v2_ipc::{Event, channel};
+    use pilot_ipc::{Event, channel};
 
-    let record = pilot_v2_llm_proxy::ProxyRecord {
+    let record = pilot_llm_proxy::ProxyRecord {
         session_key: "github:o/r#1".into(),
         started_at: chrono::Utc::now(),
         duration: Duration::from_millis(420),
-        provider: pilot_v2_llm_proxy::ApiProvider::Anthropic,
+        provider: pilot_llm_proxy::ApiProvider::Anthropic,
         endpoint: "/v1/messages".into(),
         request_model: Some("claude-sonnet-4-6".into()),
         tokens_input: Some(1024),

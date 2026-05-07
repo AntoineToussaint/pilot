@@ -1,7 +1,7 @@
 use crate::ServerConfig;
 use chrono::{DateTime, Utc};
 use pilot_auth::Credential;
-use pilot_v2_ipc::{Event, PrincipalId, ProviderCredentialInput, ProviderCredentialMetadata};
+use pilot_ipc::{Event, PrincipalId, ProviderCredentialInput, ProviderCredentialMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -296,6 +296,8 @@ fn send_auth_error(
     let _ = tx.send(Event::ProviderError {
         source: format!("auth:{provider_id}"),
         message: error.to_string(),
+            detail: String::new(),
+            kind: String::new(),
     });
 }
 

@@ -3,8 +3,8 @@
 //! Generic CLI gets its own block — it's the extensibility surface
 //! users will drive from YAML.
 
-use pilot_v2_agents::agent::builtins::{Claude, Codex, Cursor, GenericCli};
-use pilot_v2_agents::{Agent, AgentState, Registry, SessionWrapper, SpawnCtx};
+use pilot_agents::agent::builtins::{Claude, Codex, Cursor, GenericCli};
+use pilot_agents::{Agent, AgentState, Registry, SessionWrapper, SpawnCtx};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -65,18 +65,39 @@ fn inject_prompt_appends_newline() {
 }
 
 #[test]
-fn default_detect_state_returns_none() {
-    // Base trait default — agents without hooks or detectors shouldn't
-    // lie and return a state; returning None lets the daemon fall back
-    // cleanly.
+fn codex_detects_yn_prompt() {
+    // Codex prompts the user with `[y/n]` for tool approvals. The
+    // detector flags those as Asking; everything else is Active.
     let agent = Codex;
-    assert_eq!(agent.detect_state(b"whatever"), None);
+    assert_eq!(
+        agent.detect_state(b"run rm -rf? [y/n]"),
+        Some(AgentState::Asking)
+    );
+    assert_eq!(
+        agent.detect_state(b"hello world"),
+        Some(AgentState::Active)
+    );
 }
 
 #[test]
-fn default_hooks_is_none() {
-    let agent = Codex;
-    assert!(agent.hooks().is_none());
+fn claude_detects_chooser_footer() {
+    // The Claude Code chooser UI is recognisable by its `Esc to
+    // cancel · Tab to amend` footer plus a question phrasing. Both
+    // need to match for Asking; neither alone is sufficient
+    // (chat output could include the phrase).
+    let agent = Claude;
+    let buf = b"Do you want to proceed?\n> 1. Yes\n  2. No\n\n\
+                Esc to cancel \xc2\xb7 Tab to amend \xc2\xb7 ctrl+e to explain";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+}
+
+#[test]
+fn claude_active_when_just_streaming() {
+    let agent = Claude;
+    assert_eq!(
+        agent.detect_state(b"running tests..."),
+        Some(AgentState::Active)
+    );
 }
 
 #[test]
@@ -143,7 +164,7 @@ fn generic_cli_empty_patterns_returns_none() {
 
 #[test]
 fn tmux_wrap_shape() {
-    use pilot_v2_agents::TmuxWrapper;
+    use pilot_agents::TmuxWrapper;
     let w = TmuxWrapper::new();
     let argv = w.wrap(
         "github:o/r#1",
@@ -166,7 +187,7 @@ fn tmux_wrap_shape() {
 
 #[test]
 fn tmux_sanitize_id_replaces_reserved_chars() {
-    use pilot_v2_agents::TmuxWrapper;
+    use pilot_agents::TmuxWrapper;
     let w = TmuxWrapper::new();
     assert_eq!(w.sanitize_id("a:b/c"), "a_b_c");
     assert_eq!(w.sanitize_id("simple"), "simple");
@@ -175,7 +196,7 @@ fn tmux_sanitize_id_replaces_reserved_chars() {
 
 #[test]
 fn raw_wrapper_returns_inner_unchanged() {
-    use pilot_v2_agents::session_wrapper::RawWrapper;
+    use pilot_agents::session_wrapper::RawWrapper;
     let w = RawWrapper;
     let inner = vec!["bash".to_string(), "-c".to_string(), "echo x".to_string()];
     assert_eq!(

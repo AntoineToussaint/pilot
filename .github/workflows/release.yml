@@ -1,0 +1,129 @@
+# Release workflow — fires on tag pushes that match `v*.*.*`.
+#
+# This file is a hand-curated stand-in for what `cargo dist init`
+# would generate. Once cargo-dist is installed locally (`cargo
+# install cargo-dist`) the recommended workflow is:
+#
+#   1. Update `[workspace.package].version` in Cargo.toml.
+#   2. Run `cargo dist generate` to regenerate this workflow from
+#      the `[workspace.metadata.dist]` table — which keeps the
+#      version pin + matrix in sync.
+#   3. Commit, tag (`v0.1.0`), push tags. CI does the rest.
+#
+# Until cargo-dist is wired locally, this workflow runs `cargo dist`
+# at CI time so a bare-tag push still produces a release.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install cargo-dist
+        run: cargo install --locked --version 0.28.0 cargo-dist
+
+      - id: plan
+        run: |
+          cargo dist plan --output-format=json > plan.json
+          echo "manifest=$(cat plan.json | base64 -w0)" >> $GITHUB_OUTPUT
+          echo "tag=$GITHUB_REF_NAME" >> $GITHUB_OUTPUT
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Prereqs (mirrors `.github/release-setup.yml`) ──────────────
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Install C toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Install cargo-dist
+        run: cargo install --locked --version 0.28.0 cargo-dist
+
+      - name: Build release artifacts
+        run: cargo dist build --target=${{ matrix.target }} --output-format=json
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-${{ matrix.target }}
+          path: target/distrib/
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: target/distrib/
+          merge-multiple: true
+
+      - name: Install cargo-dist
+        run: cargo install --locked --version 0.28.0 cargo-dist
+
+      - name: Publish to GitHub Releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo dist host --steps=upload --steps=release \
+            --tag=${{ needs.plan.outputs.tag }}
+
+      - name: Push Homebrew formula
+        env:
+          # Personal access token with write access to the tap repo.
+          # Generate at https://github.com/settings/tokens (classic,
+          # `repo` scope) and add as a repo secret named
+          # HOMEBREW_TAP_TOKEN.
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          cargo dist host --steps=announce \
+            --tag=${{ needs.plan.outputs.tag }}

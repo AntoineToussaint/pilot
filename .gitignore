@@ -3,3 +3,6 @@
 *.swo
 .DS_Store
 /tmp/
+vendor/
+# Local Claude Code state (chat memory, agent task logs).
+.claude/

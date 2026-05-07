@@ -1,4 +1,4 @@
-//! Minimal JSON gateway for Pilot v2.
+//! Minimal JSON gateway for Pilot.
 //!
 //! This module is intentionally isolated from `lib.rs` wiring. It uses
 //! Hyper 1 for HTTP and exposes newline-delimited JSON frames so API
@@ -13,7 +13,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use pilot_store::StoreError;
-use pilot_v2_ipc::{Command, Connection, Event};
+use pilot_ipc::{Command, Connection, Event};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fmt::Display;
@@ -108,7 +108,7 @@ pub fn check_bearer_token(
 pub fn health_response() -> HealthResponse {
     HealthResponse {
         ok: true,
-        service: "pilot-v2-api-gateway".into(),
+        service: "pilot-api-gateway".into(),
     }
 }
 

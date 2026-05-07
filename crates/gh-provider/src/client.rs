@@ -12,13 +12,111 @@ pub enum GhError {
     Graphql(String),
 }
 
+/// Render a `GhError` as a useful string. The Display impl on
+/// `octocrab::Error::GitHub` *only prints `"GitHub"`* — it drops the
+/// inner status / message / errors entirely. We unwrap to the
+/// underlying `GitHubError` (or other variants) so the message
+/// actually reaches logs + the error modal.
+fn detail_of(err: &GhError) -> String {
+    match err {
+        GhError::Graphql(s) => s.clone(),
+        GhError::Api(octo) => match octo {
+            octocrab::Error::GitHub { source, .. } => {
+                // GitHubError's Display does the right thing —
+                // includes status, message, docs URL, errors.
+                format!("GitHub API ({}): {}", source.status_code, source)
+            }
+            other => format!("{other}"),
+        },
+    }
+}
+
+impl From<GhError> for pilot_core::ProviderError {
+    /// Classify GitHub failures so polling knows whether to retry.
+    /// Heuristics:
+    /// - 401/403 only when the GitHub API itself returned that status →
+    ///   Auth (user needs to rotate token).
+    /// - Hyper/Service/IO/Json variants → Retryable (transient).
+    /// - 5xx, network-y words, "rate limit" → Retryable.
+    /// - Everything else → Permanent.
+    fn from(err: GhError) -> Self {
+        const SOURCE: &str = "github";
+        let detail = detail_of(&err);
+
+        // Status-aware classification when we have an octocrab
+        // GitHub error: 401/403 → auth; 5xx + 429 → retryable. This
+        // is the ONLY path that mints `Auth` — substring matching for
+        // "unauthorized"/"forbidden" produced false positives on
+        // transient hyper/json errors that happen to mention either
+        // word in their message chains.
+        if let GhError::Api(octocrab::Error::GitHub { source, .. }) = &err {
+            let status = source.status_code.as_u16();
+            if status == 401 || status == 403 {
+                return pilot_core::ProviderError::auth(SOURCE, detail);
+            }
+            if status == 429 || (500..=599).contains(&status) {
+                return pilot_core::ProviderError::retryable(SOURCE, detail);
+            }
+            return pilot_core::ProviderError::permanent(SOURCE, detail);
+        }
+
+        // Variant-aware classification: every transport-layer variant
+        // is retryable by definition (no PR/issue data was ever
+        // returned, so a fresh attempt next tick is safe and likely
+        // to succeed).
+        if let GhError::Api(api) = &err {
+            if matches!(
+                api,
+                octocrab::Error::Hyper { .. }
+                    | octocrab::Error::Service { .. }
+                    | octocrab::Error::Http { .. }
+                    | octocrab::Error::Serde { .. }
+                    | octocrab::Error::Json { .. }
+                    | octocrab::Error::UriParse { .. }
+                    | octocrab::Error::Uri { .. }
+            ) {
+                return pilot_core::ProviderError::retryable(SOURCE, detail);
+            }
+        }
+
+        // Fallback string matching for everything else (GraphQL
+        // wrapper errors, future octocrab variants, etc.).
+        let lower = detail.to_lowercase();
+        let is_retryable = lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("connection")
+            || lower.contains("network")
+            || lower.contains("rate limit")
+            || lower.contains("hyper")
+            || lower.contains("502")
+            || lower.contains("503")
+            || lower.contains("504")
+            || lower.contains("temporarily");
+        if is_retryable {
+            return pilot_core::ProviderError::retryable(SOURCE, detail);
+        }
+
+        pilot_core::ProviderError::permanent(SOURCE, detail)
+    }
+}
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
     user: String,
     credential_source: String,
-    filters: Vec<String>,
+    /// Search qualifiers used by `fetch_all_prs` (PR-only — built
+    /// from `pr.*` keys plus scope).
+    pr_filters: Vec<String>,
+    /// Search qualifiers used by `fetch_all_issues` (Issue-only —
+    /// built from `issue.*` keys plus scope).
+    issue_filters: Vec<String>,
     watch_repos: Vec<String>,
+    /// Two-layer rate budget. See `crate::rate_budget`.
+    /// `Arc<Mutex>` so multiple `GhClient` clones share one bucket
+    /// (currently we only construct one, but cheap insurance against
+    /// future "spawn a worker pool" ideas).
+    budget: std::sync::Arc<std::sync::Mutex<crate::rate_budget::RateBudget>>,
 }
 
 impl GhClient {
@@ -41,13 +139,81 @@ impl GhClient {
             inner,
             user,
             credential_source: source,
-            filters: vec![],
+            pr_filters: vec![],
+            issue_filters: vec![],
             watch_repos: vec![],
+            budget: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_budget::RateBudget::default_for_pilot(),
+            )),
         })
     }
 
-    pub fn with_filters(mut self, filters: Vec<String>) -> Self {
-        self.filters = filters;
+    /// Snapshot of the current rate budget state. Used by the polling
+    /// layer to surface a status indicator and decide pacing.
+    pub fn rate_snapshot(&self) -> crate::rate_budget::Snapshot {
+        self.budget.lock().expect("budget mutex poisoned").snapshot()
+    }
+
+    /// The exact GraphQL search string `fetch_all_prs` will issue.
+    /// Exposed so the polling layer / TUI can show the user what
+    /// query is actually running — invaluable when debugging "why
+    /// did this return 0 results?".
+    pub fn pr_search_query(&self) -> String {
+        let mut quals = graphql::default_search_qualifiers();
+        if self.pr_filters.is_empty() {
+            quals.push(format!("involves:{}", self.user));
+        } else {
+            quals.extend(self.pr_filters.iter().cloned());
+        }
+        graphql::build_query(&quals)
+    }
+
+    /// Same as `pr_search_query` but for the issue search.
+    pub fn issue_search_query(&self) -> String {
+        let mut quals = graphql::default_issues_qualifiers();
+        if self.issue_filters.is_empty() {
+            quals.push(format!("involves:{}", self.user));
+        } else {
+            quals.extend(self.issue_filters.iter().cloned());
+        }
+        graphql::build_query(&quals)
+    }
+
+    /// Try to spend one rate-budget token. Caller must NOT make a
+    /// GraphQL request on `Err` — that's the whole point of the
+    /// budget. Caller should propagate the `AcquireError` so the
+    /// polling layer can surface it as a `Retryable` ProviderError.
+    fn try_acquire(&self) -> Result<(), crate::rate_budget::AcquireError> {
+        self.budget
+            .lock()
+            .expect("budget mutex poisoned")
+            .try_acquire()
+    }
+
+    /// Record GitHub's reported rate-limit. Wired into every
+    /// successful GraphQL response that includes the `rateLimit`
+    /// field.
+    fn observe_rate_limit(&self, ratelimit: &graphql::GqlRateLimit) {
+        let reset_at = chrono::DateTime::parse_from_rfc3339(&ratelimit.reset_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .ok();
+        let Some(reset_at) = reset_at else { return };
+        let observed = crate::rate_budget::RemoteRateLimit {
+            remaining: ratelimit.remaining as u32,
+            limit: ratelimit.limit as u32,
+            reset_at,
+            observed_at: std::time::Instant::now(),
+        };
+        if let Ok(mut b) = self.budget.lock() {
+            b.observe(observed);
+        }
+    }
+
+    /// Set both PR and Issue search qualifiers. Polling builds these
+    /// from the user's per-type role keys (`pr.*` / `issue.*`).
+    pub fn with_filters(mut self, pr_filters: Vec<String>, issue_filters: Vec<String>) -> Self {
+        self.pr_filters = pr_filters;
+        self.issue_filters = issue_filters;
         self
     }
 
@@ -216,13 +382,10 @@ impl GhClient {
         // string when filtered. This keeps GraphQL search precise:
         // PRs we'd just drop never come back over the wire.
         let mut quals = graphql::default_search_qualifiers();
-        if self.filters.is_empty() {
-            // No setup wired the qualifiers yet — fall back to the
-            // legacy involves-everything behavior so test paths and
-            // ad-hoc CLI use don't surprise anyone.
+        if self.pr_filters.is_empty() {
             quals.push(format!("involves:{}", self.user));
         } else {
-            quals.extend(self.filters.iter().cloned());
+            quals.extend(self.pr_filters.iter().cloned());
         }
         let search_query = graphql::build_query(&quals);
 
@@ -235,23 +398,30 @@ impl GhClient {
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
         loop {
+            // Local guard rail. Refuse to fire if pilot's
+            // self-imposed budget is exhausted OR the previous
+            // response told us GitHub is low. Surfaces as a
+            // retryable error to the polling layer.
+            if let Err(reason) = self.try_acquire() {
+                tracing::warn!("GraphQL search blocked by rate budget: {reason}");
+                return Err(GhError::Graphql(reason.to_string()));
+            }
+
             let body = graphql::query_body_after(&search_query, cursor.as_deref());
             tracing::debug!(
                 "GraphQL page {page} body: {}",
                 serde_json::to_string(&body).unwrap_or_default()
             );
 
-            // Fetch the raw JSON first so that on error we can dump the
-            // complete response body (not just the serde-parsed message) to
-            // `/tmp/pilot.log` — invaluable when debugging queries GitHub
-            // rejects with terse messages like "A query attribute must be
-            // specified and must be a string".
             let raw: serde_json::Value =
                 self.inner
                     .post("/graphql", Some(&body))
                     .await
                     .map_err(|e| {
-                        tracing::error!("GraphQL HTTP error (page {page}): {e}");
+                        // octocrab's Display on Error::GitHub drops
+                        // status + message — print Debug too so
+                        // /tmp/pilot.log has actionable context.
+                        tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
                         tracing::error!(
                             "GraphQL request body was: {}",
                             serde_json::to_string_pretty(&body).unwrap_or_default()
@@ -297,10 +467,12 @@ impl GhClient {
 
             if let Some(rl) = &data.rate_limit {
                 tracing::info!(
-                    "GitHub rate limit: {}/5000 remaining, resets {}",
+                    "GitHub rate limit: {}/{} remaining, resets {}",
                     rl.remaining,
+                    rl.limit,
                     rl.reset_at
                 );
+                self.observe_rate_limit(rl);
             }
 
             tasks.extend(
@@ -371,14 +543,14 @@ impl GhClient {
 
     /// Fetch all open GitHub Issues involving the authenticated user,
     /// paginated. Separate from `fetch_all_prs` so callers opt in
-    /// explicitly — v1 doesn't call this; v2 does.
+    /// explicitly.
     pub async fn fetch_all_issues(&self) -> Result<Vec<Task>, GhError> {
         // Same assembly as `fetch_all_prs` — see notes there.
         let mut quals = graphql::default_issues_qualifiers();
-        if self.filters.is_empty() {
+        if self.issue_filters.is_empty() {
             quals.push(format!("involves:{}", self.user));
         } else {
-            quals.extend(self.filters.iter().cloned());
+            quals.extend(self.issue_filters.iter().cloned());
         }
         let search_query = graphql::build_issues_query(&quals);
         tracing::info!("GraphQL issues search: {search_query}");
@@ -387,13 +559,18 @@ impl GhClient {
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
         loop {
+            // Same rate-budget guard as PR fetch — see fetch_all_prs.
+            if let Err(reason) = self.try_acquire() {
+                tracing::warn!("Issues GraphQL blocked by rate budget: {reason}");
+                return Err(GhError::Graphql(reason.to_string()));
+            }
             let body = graphql::issues_query_body(&search_query, cursor.as_deref());
             let response: graphql::GqlIssueResponse = self
                 .inner
                 .post("/graphql", Some(&body))
                 .await
                 .map_err(|e| {
-                    tracing::error!("Issues HTTP error (page {page}): {e}");
+                    tracing::error!("Issues HTTP error (page {page}): {e}\n{e:?}");
                     GhError::Api(e)
                 })?;
 
@@ -413,9 +590,11 @@ impl GhClient {
 
             if let Some(rl) = &data.rate_limit {
                 tracing::debug!(
-                    "GitHub rate limit after issues: {}/5000 remaining",
-                    rl.remaining
+                    "GitHub rate limit after issues: {}/{} remaining",
+                    rl.remaining,
+                    rl.limit
                 );
+                self.observe_rate_limit(rl);
             }
 
             tasks.extend(
@@ -446,24 +625,114 @@ impl GhClient {
     }
 
     /// Fetch PRs + Issues in parallel, combine into one `Vec<Task>`.
-    /// Errors from either side surface; we prefer a partial result
-    /// over a hard failure — the TUI degrades gracefully if one
-    /// source is down.
+    ///
+    /// "Empty" and "failed" are distinct outcomes: a successful fetch
+    /// returning zero rows is a normal state for a brand-new account
+    /// with no matching items. Only when **both** sides actually
+    /// errored do we surface a failure — and we keep both errors so
+    /// the TUI / logs can show them together. A single side erroring
+    /// degrades gracefully: the other side's results land in the inbox.
     pub async fn fetch_all(&self) -> Result<Vec<Task>, GhError> {
-        let (prs, issues) = tokio::join!(self.fetch_all_prs(), self.fetch_all_issues());
-        let mut tasks = Vec::new();
-        match prs {
-            Ok(v) => tasks.extend(v),
-            Err(e) => tracing::warn!("PRs fetch failed: {e}"),
+        // Drive each query only when the caller actually wants
+        // results. The polling layer signals intent by setting (or
+        // not setting) `pr_filters` / `issue_filters` via
+        // `with_filters`. An empty filter list means "no preferences
+        // wired" — at construction time we treat it as
+        // `involves:USER` for backward compat and run the query.
+        // The polling layer always wires explicit filters from the
+        // user's persisted setup, so:
+        //
+        //   - PR-only setup → `issue_filters` is empty + we skip the
+        //     issues query.
+        //   - Issues-only setup → opposite.
+        //
+        // This halves the GraphQL search rate-limit cost for the
+        // common single-type case.
+        let want_prs = !self.pr_filters.is_empty() || self.issue_filters.is_empty();
+        let want_issues = !self.issue_filters.is_empty();
+        self.fetch_selected(want_prs, want_issues).await
+    }
+
+    /// Underlying parallel-fetch driven by explicit booleans. Public
+    /// so the polling layer can pass the actual `pr_enabled()` /
+    /// `issue_enabled()` flags from the user's `ProviderConfig` and
+    /// avoid the legacy "infer from filters" logic above.
+    pub async fn fetch_selected(
+        &self,
+        want_prs: bool,
+        want_issues: bool,
+    ) -> Result<Vec<Task>, GhError> {
+        if !want_prs && !want_issues {
+            return Ok(Vec::new());
         }
-        match issues {
-            Ok(v) => tasks.extend(v),
-            Err(e) => tracing::warn!("Issues fetch failed: {e}"),
+        let pr_fut = async {
+            if want_prs {
+                self.fetch_all_prs().await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let issue_fut = async {
+            if want_issues {
+                self.fetch_all_issues().await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+        match (prs, issues) {
+            (Ok(mut p), Ok(i)) => {
+                p.extend(i);
+                Ok(p)
+            }
+            // Partial success: one side failed, the other returned
+            // results. We only soft-degrade if the OTHER side
+            // genuinely contributed something — otherwise the user
+            // gets "0 tasks, no error" because both sides ran but
+            // one was a silent zero. Bubble the failure up so they
+            // see an error modal.
+            (Ok(p), Err(e)) => {
+                if want_issues && p.is_empty() {
+                    Err(e)
+                } else {
+                    tracing::warn!("issues fetch failed (using PRs only): {e}");
+                    Ok(p)
+                }
+            }
+            (Err(e), Ok(i)) => {
+                if want_prs && i.is_empty() {
+                    Err(e)
+                } else {
+                    tracing::warn!("PRs fetch failed (using issues only): {e}");
+                    Ok(i)
+                }
+            }
+            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
+                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
+            ))),
         }
-        if tasks.is_empty() {
-            return Err(GhError::Graphql("both PR and issue fetches failed".into()));
-        }
-        Ok(tasks)
+    }
+
+    /// Post a top-level comment on an issue or PR. PRs ARE issues in
+    /// the REST API, so the same `issues/{n}/comments` endpoint works
+    /// for both. `repo` is the `owner/name` shorthand the rest of the
+    /// codebase uses; we split it once to feed octocrab's split-arg
+    /// API.
+    pub async fn post_issue_comment(
+        &self,
+        repo: &str,
+        issue_or_pr_number: u64,
+        body: &str,
+    ) -> Result<(), GhError> {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| GhError::Graphql(format!("repo '{repo}' not owner/name")))?;
+        self.inner
+            .issues(owner, name)
+            .create_comment(issue_or_pr_number, body)
+            .await
+            .map_err(GhError::Api)?;
+        Ok(())
     }
 
     /// Merge the base branch into this PR's head — same as the "Update
@@ -494,9 +763,7 @@ impl pilot_core::TaskProvider for GhClient {
     }
 
     async fn fetch_tasks(&self) -> Result<Vec<pilot_core::Task>, pilot_core::ProviderError> {
-        self.fetch_all_prs()
-            .await
-            .map_err(|e| pilot_core::ProviderError::Api(e.to_string()))
+        self.fetch_all_prs().await.map_err(Into::into)
     }
 
     fn username(&self) -> Option<&str> {

@@ -1,26 +1,22 @@
-//! pilot-v2-tui — the client TUI: component tree, key routing, event
-//! dispatch, rendering.
+//! pilot-tui — the client TUI: realm-based component tree, key
+//! routing, event dispatch, rendering.
 //!
-//! The architectural bet of v2 is in this crate: a single-path focus
-//! tree of `Component`s, replacing the four-slot state-desync mess of
-//! v1 (`state.selected` / `panes.focused` / `terminal_index.active_tab`
-//! / pane-tree target keys). Focus is ONE id; every other position is
-//! derived from it.
-//!
-//! Modules:
-//! - `component` — the `Component` trait and its surrounding types
-//!   (`ComponentId`, `Outcome`).
-//! - `tree` — `ComponentTree`, the owner of components, parent/child
-//!   edges, and focus state. Owns the key and event dispatch loops.
+//! Built on `tuirealm` 4.1 (which sits on `ratatui`); modal /
+//! component / orchestrator types live under `crate::realm`. Pilot's
+//! domain components (Sidebar, RightPane, TerminalStack, Mailbox,
+//! activity-feed renderers, status pills) live under
+//! `crate::components`.
 
-pub mod app;
-pub mod component;
 pub mod components;
-pub mod layout;
+pub mod editors;
+pub mod pane;
+pub mod pilot_theme;
+pub mod platform;
+pub mod realm;
 pub mod setup;
 pub mod setup_flow;
 pub mod test_mode;
-pub mod tree;
+pub mod theme;
 
-pub use component::{Component, ComponentId, Outcome};
-pub use tree::{ComponentTree, MountError};
+pub use pane::{Binding, DetachSpec, PaneId, PaneOutcome};
+pub use theme::Theme;

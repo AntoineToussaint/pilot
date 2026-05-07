@@ -1,0 +1,196 @@
+//! `Terminals` — tuirealm wrapper around
+//! `crate::components::terminal_stack::TerminalStack`.
+//!
+//! Hosts the libghostty embed (which is `!Send`). The probe earlier
+//! validated `!Send` components mount cleanly inside `Application`,
+//! so this wrapper just delegates render + key dispatch.
+
+use crate::components::terminal_stack::TerminalStack as PilotTerminals;
+use crate::realm::keymap::realm_key_to_crossterm;
+use crate::realm::{Msg, UserEvent};
+use crate::PaneId;
+use pilot_core::SessionKey;
+use pilot_ipc::Command as IpcCommand;
+use pilot_ipc::Event as IpcEvent;
+use pilot_ipc::TerminalId;
+use tuirealm::command::{Cmd, CmdResult};
+use tuirealm::component::{AppComponent, Component};
+use tuirealm::event::Event;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
+use tuirealm::ratatui::Frame;
+use tuirealm::ratatui::layout::Rect;
+use tuirealm::state::State;
+
+/// tuirealm-shaped terminal stack.
+pub struct Terminals {
+    inner: PilotTerminals,
+    focused: bool,
+    pending_cmds: Vec<IpcCommand>,
+}
+
+impl Terminals {
+    /// Construct.
+    pub fn new(id: PaneId) -> Self {
+        Self {
+            inner: PilotTerminals::new(id),
+            focused: false,
+            pending_cmds: Vec::new(),
+        }
+    }
+
+    /// Drain queued IPC commands (writes / resizes / etc).
+    pub fn drain_cmds(&mut self) -> Vec<IpcCommand> {
+        // Render-time resizes also need to drain.
+        let mut cmds = std::mem::take(&mut self.pending_cmds);
+        for (terminal_id, cols, rows) in self.inner.drain_pending_resizes() {
+            cmds.push(IpcCommand::Resize {
+                terminal_id,
+                cols,
+                rows,
+            });
+        }
+        cmds
+    }
+
+    /// Set which session's terminals to display.
+    pub fn set_active_session(&mut self, session: Option<SessionKey>) {
+        self.inner.set_active_session(session);
+    }
+
+    /// Currently active terminal id (the one keys route to).
+    pub fn active_terminal_id(&self) -> Option<TerminalId> {
+        self.inner.active_terminal_id()
+    }
+
+    /// Forward a daemon event so the inner stack stays in sync.
+    pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
+        self.inner.on_event(evt,
+        );
+    }
+
+    /// Direct render entry point.
+    pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
+        self.inner.render(area,
+            frame,
+            self.focused,
+        );
+    }
+
+    /// Direct key dispatch.
+    pub fn handle_key_direct(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        let _ = self.inner.handle_key(key,
+            cmds,
+        );
+    }
+
+    /// Update the focused-flag.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    /// Forward to the inner pane's keymap so the help panel can list
+    /// the same bindings the legacy hint bar showed.
+    pub fn keymap(&self) -> &'static [crate::pane::Binding] {
+        self.inner.keymap()
+    }
+
+    /// Detach spec for the focused tile, if any (delegates to the
+    /// inner stack's `detachable()` which scopes to the active tab).
+    pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
+        self.inner.detachable()
+    }
+
+    /// Scroll the active terminal's viewport by `delta` rows. Negative
+    /// = into scrollback; positive = back toward the live content.
+    /// Driven from the orchestrator's mouse-wheel handler.
+    pub fn scroll_active(&mut self, delta: isize) {
+        self.inner.scroll_active(delta);
+    }
+
+    /// True when this stack has no visible terminals for the active
+    /// session. Used by the orchestrator to fall back from "key into
+    /// PTY" to "key into sidebar's spawn binding" so `s`/`c`/`x`/`u`
+    /// from the empty-state hint actually create a session.
+    pub fn is_empty(&self) -> bool {
+        self.inner.visible_terminals().is_empty()
+    }
+
+    /// True when the focused terminal's inner program has enabled
+    /// mouse tracking (CSI ?1000h / ?1002h / ?1003h / ?1006h SGR).
+    /// Drives the "forward to PTY vs scroll the scrollback"
+    /// decision in `Model::handle_mouse`.
+    pub fn focused_terminal_tracks_mouse(&self) -> bool {
+        self.inner.focused_terminal_tracks_mouse()
+    }
+
+    /// Encode a mouse event for the focused terminal. Returns the
+    /// bytes to `Write` to the PTY (paired with the target terminal
+    /// id), or None when the terminal isn't tracking mouse or the
+    /// event encodes to nothing under its active protocol.
+    pub fn encode_mouse(
+        &mut self,
+        action: libghostty_vt::mouse::Action,
+        button: Option<libghostty_vt::mouse::Button>,
+        cell_col: u32,
+        cell_row: u32,
+    ) -> Option<(pilot_ipc::TerminalId, Vec<u8>)> {
+        self.inner
+            .encode_mouse_for_focused(action, button, cell_col, cell_row)
+    }
+}
+
+impl Component for Terminals {
+    fn view(&mut self, frame: &mut Frame, area: Rect) {
+        self.inner.render(area,
+            frame,
+            self.focused,
+        );
+    }
+
+    fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
+        None
+    }
+
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        if let (Attribute::Focus, AttrValue::Flag(f)) = (attr, value) {
+            self.focused = f;
+        }
+    }
+
+    fn state(&self) -> State {
+        State::None
+    }
+
+    fn perform(&mut self, _: Cmd) -> CmdResult {
+        CmdResult::NoChange
+    }
+}
+
+impl AppComponent<Msg, UserEvent> for Terminals {
+    fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
+        match ev {
+            Event::User(UserEvent::Daemon(evt)) => {
+                self.inner.on_event(evt,
+                );
+                None
+            }
+            Event::Keyboard(key) if self.focused => {
+                let ct_key = realm_key_to_crossterm(key);
+                let mut cmds: Vec<IpcCommand> = Vec::new();
+                let _ = self.inner.handle_key(ct_key,
+                    &mut cmds,
+                );
+                if !cmds.is_empty() {
+                    self.pending_cmds.extend(cmds);
+                    return Some(Msg::TerminalCmds);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}

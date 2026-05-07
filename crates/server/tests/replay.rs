@@ -4,7 +4,7 @@
 //! the replay already covers (client is responsible for gap-checking
 //! via seq).
 
-use pilot_v2_server::pty::{DaemonPty, OutputChunk};
+use pilot_server::pty::{DaemonPty, OutputChunk};
 use portable_pty::PtySize;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -159,7 +159,7 @@ async fn sequence_numbers_are_monotonic_across_subscribers() {
 /// eventually loses the early bytes. Verify `replay` has a ceiling.
 #[tokio::test]
 async fn ring_replay_stays_bounded_under_long_output() {
-    use pilot_v2_server::pty::REPLAY_RING_BYTES;
+    use pilot_server::pty::REPLAY_RING_BYTES;
 
     let pty = DaemonPty::spawn(
         &[

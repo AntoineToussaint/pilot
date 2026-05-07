@@ -25,18 +25,15 @@ pub mod spawn_handler;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use pilot_store::{MemoryStore, SqliteStore, Store};
-use pilot_v2_agents::Registry;
-use pilot_v2_ipc::{AgentRunId, Connection, Event, TerminalId};
+use pilot_agents::Registry;
+use pilot_ipc::{AgentRunId, Connection, Event, TerminalId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, broadcast};
 
-/// Where v2 keeps its state. Lives in `~/.pilot/v2/state.db` so it
-/// never collides with v1's `~/.pilot/state.db` — users can run both
-/// versions side-by-side and v2 can never corrupt v1's read/unread
-/// markers.
+/// Where pilot keeps its persistent state.
 pub fn state_db_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home)
@@ -45,16 +42,10 @@ pub fn state_db_path() -> PathBuf {
         .join("state.db")
 }
 
-/// v1's state.db, for the one-time import on first v2 launch.
-pub fn legacy_v1_state_db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".pilot").join("state.db")
-}
-
-/// Open v2's store at the canonical path. Returns `None` on open
-/// failure (corrupt DB, permissions); callers fall back to skipping
+/// Open the persistent store at the canonical path. Returns `None` on
+/// open failure (corrupt DB, permissions); callers fall back to skipping
 /// persistence rather than aborting startup.
-pub fn open_v2_store() -> Option<Arc<dyn Store>> {
+pub fn open_store() -> Option<Arc<dyn Store>> {
     let path = state_db_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -62,63 +53,17 @@ pub fn open_v2_store() -> Option<Arc<dyn Store>> {
     match SqliteStore::open(&path) {
         Ok(s) => Some(Arc::new(s)),
         Err(e) => {
-            tracing::warn!("v2 store open failed at {}: {e}", path.display());
+            tracing::warn!("store open failed at {}: {e}", path.display());
             None
         }
     }
 }
 
-/// Migrate every v1 session row into v2 as a `Workspace`. v1 used a
-/// one-task-per-row model (`Session.primary_task`); v2 collapses
-/// linked tasks under a single `Workspace`. We project each v1 row
-/// through `Workspace::from_v1_session` so the user's read/unread
-/// state and snooze timers carry across.
-///
-/// The v1 store is treated as read-only — we never mutate it. No-op
-/// when the source is empty or unreadable; returns how many rows were
-/// successfully migrated.
-pub fn import_v1_into(v2: &dyn Store, v1: &dyn Store) -> usize {
-    let rows = match v1.list_sessions() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("v1 list_sessions failed during import: {e}");
-            return 0;
-        }
-    };
-    let mut imported = 0;
-    for row in rows {
-        let Some(json) = row.session_json.as_deref() else {
-            continue;
-        };
-        let v1_session = match serde_json::from_str::<pilot_core::Session>(json) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("v1 → v2 import: skip {}: {e}", row.task_id);
-                continue;
-            }
-        };
-        let workspace = pilot_core::Workspace::from_v1_session(v1_session);
-        let key = workspace.key.as_str().to_string();
-        let json = match serde_json::to_string(&workspace) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!("v1 → v2 import: ser {}: {e}", row.task_id);
-                continue;
-            }
-        };
-        let record = pilot_store::WorkspaceRecord {
-            key,
-            created_at: workspace.created_at,
-            workspace_json: Some(json),
-        };
-        if let Err(e) = v2.save_workspace(&record) {
-            tracing::warn!("v1 → v2 import: save {}: {e}", row.task_id);
-        } else {
-            imported += 1;
-        }
-    }
-    imported
-}
+// REMOVED: wipe_legacy_worktrees. We never delete from `~/.pilot/`.
+// pilot is constrained to `~/.pilot/v2/` for everything it writes
+// — `state.db`, the bare-clone cache, every worktree. If a user
+// has real work in `~/.pilot/worktrees/` from a prior tool, that's
+// their data and pilot leaves it alone.
 
 /// Capacity of the daemon's process-wide event broadcast bus. Events
 /// produced by the poller and the PTY/proxy subsystems land here and
@@ -140,11 +85,7 @@ pub const BUS_CAPACITY: usize = 1024;
 #[derive(Clone)]
 pub struct ServerConfig {
     pub agents: Registry,
-    /// Persistent state. Lives in v2's own `~/.pilot/v2/state.db` so
-    /// it never collides with v1. On a brand-new install,
-    /// `from_user_config` performs a one-time read-only copy of v1's
-    /// sessions into the new file so read/unread markers survive the
-    /// upgrade.
+    /// Persistent state at `~/.pilot/v2/state.db`.
     pub store: Arc<dyn Store>,
     /// Process-wide event bus. Producers (poller, PTY, proxy) call
     /// `bus.send(event)`; each `Server::serve` connection subscribes
@@ -160,6 +101,26 @@ pub struct ServerConfig {
     /// translates between them. Every connection's serve loop reads
     /// + writes it.
     pub terminals: Arc<Mutex<HashMap<TerminalId, String>>>,
+    /// Wire-side `TerminalId` → owning `SessionId`. Lets the
+    /// migration code freeze just one session's runners during a
+    /// `git worktree move`, instead of freezing every backend
+    /// session in the process. Populated by `handle_spawn` when a
+    /// terminal is created against a known session; entries are
+    /// removed on `TerminalExited`.
+    pub terminal_sessions: Arc<Mutex<HashMap<TerminalId, pilot_core::SessionId>>>,
+    /// Cached `AgentState` per agent terminal. Populated by the
+    /// output pump's state detector; transitions are broadcast as
+    /// `Event::AgentState`. Caching avoids broadcasting on every
+    /// PTY chunk when nothing changed.
+    pub agent_states: Arc<Mutex<HashMap<TerminalId, pilot_ipc::AgentState>>>,
+    /// Wire-side metadata per terminal: `(session_key, kind)`. The
+    /// `terminals` map only carries the backend key; clients
+    /// reconnecting via Subscribe need the full pairing so the
+    /// initial Snapshot can route terminals into the right tab
+    /// strip. Populated by `handle_spawn`, cleaned on
+    /// `TerminalExited`.
+    pub terminal_meta:
+        Arc<Mutex<HashMap<TerminalId, (pilot_core::SessionKey, pilot_ipc::TerminalKind)>>>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -170,58 +131,30 @@ pub struct ServerConfig {
     pub credential_store: Arc<dyn auth::CredentialStore>,
     /// Local/dev fallback principal. API auth can replace this with a
     /// per-connection principal later.
-    pub default_principal_id: pilot_v2_ipc::PrincipalId,
+    pub default_principal_id: pilot_ipc::PrincipalId,
 }
 
 impl ServerConfig {
-    /// Open v2's store at `~/.pilot/v2/state.db`. On a brand-new
-    /// install (v2 file absent or empty), if v1's `~/.pilot/state.db`
-    /// has data we copy it once so the user's read/unread markers
-    /// survive the upgrade. After that, v2 only reads/writes v2's
-    /// store; v1 is left strictly alone.
+    /// Open the store at `~/.pilot/v2/state.db`.
     ///
     /// Open failures (permissions, disk corruption) fall back to an
     /// in-memory store so the daemon still starts — better empty than
     /// dead.
     pub fn from_user_config() -> Self {
-        let v2_path = state_db_path();
-        if let Some(parent) = v2_path.parent() {
+        let path = state_db_path();
+        if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let v2_store = match SqliteStore::open(&v2_path) {
+        let store = match SqliteStore::open(&path) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
                     "falling back to in-memory store: couldn't open {}: {e}",
-                    v2_path.display()
+                    path.display()
                 );
                 return Self::with_store(Arc::new(MemoryStore::new()));
             }
         };
-
-        // One-time import from v1. Skip if v2 already has anything —
-        // we never want to overwrite the user's progress on subsequent
-        // launches. We check workspaces (v2's row model) since that's
-        // what `import_v1_into` writes into.
-        let v2_empty = v2_store
-            .list_workspaces()
-            .map(|v| v.is_empty())
-            .unwrap_or(true);
-        if v2_empty {
-            let v1_path = legacy_v1_state_db_path();
-            if v1_path.exists() {
-                if let Ok(v1) = SqliteStore::open(&v1_path) {
-                    let n = import_v1_into(&v2_store, &v1);
-                    if n > 0 {
-                        tracing::info!(
-                            "imported {n} session(s) from {} into {}",
-                            v1_path.display(),
-                            v2_path.display()
-                        );
-                    }
-                }
-            }
-        }
 
         // Pick the strongest available backend. tmux means sessions
         // survive pilot-server restart and can be attached externally
@@ -237,7 +170,7 @@ impl ServerConfig {
                 Arc::new(RawPtyBackend::new())
             }
         };
-        Self::with_store_and_backend(Arc::new(v2_store), backend)
+        Self::with_store_and_backend(Arc::new(store), backend)
     }
 
     /// Build a config with an explicit store and the deterministic
@@ -260,10 +193,13 @@ impl ServerConfig {
             bus,
             backend,
             terminals: Arc::new(Mutex::new(HashMap::new())),
+            terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
+            agent_states: Arc::new(Mutex::new(HashMap::new())),
+            terminal_meta: Arc::new(Mutex::new(HashMap::new())),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
-            default_principal_id: pilot_v2_ipc::PrincipalId::local(),
+            default_principal_id: pilot_ipc::PrincipalId::local(),
         }
     }
 
@@ -301,7 +237,7 @@ impl Server {
                     let Some(cmd) = cmd else { break };
                     tracing::debug!("daemon ← {cmd:?}");
                     match cmd {
-                        pilot_v2_ipc::Command::Subscribe => {
+                        pilot_ipc::Command::Subscribe => {
                             let workspaces = load_workspaces(&*self.config.store);
                             let terminals = spawn_handler::snapshot_terminals(&self.config).await;
                             let _ = conn.tx.send(Event::Snapshot {
@@ -309,7 +245,7 @@ impl Server {
                                 terminals,
                             });
                         }
-                        pilot_v2_ipc::Command::Spawn { session_key, session_id, kind, cwd } => {
+                        pilot_ipc::Command::Spawn { session_key, session_id, kind, cwd } => {
                             spawn_handler::handle_spawn(
                                 &self.config,
                                 session_key,
@@ -319,7 +255,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::CreateSession { session_key, kind, label } => {
+                        pilot_ipc::Command::CreateSession { session_key, kind, label } => {
                             spawn_handler::handle_create_session(
                                 &self.config,
                                 session_key,
@@ -328,16 +264,16 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::Write { terminal_id, bytes } => {
+                        pilot_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
                         }
-                        pilot_v2_ipc::Command::Resize { terminal_id, cols, rows } => {
+                        pilot_ipc::Command::Resize { terminal_id, cols, rows } => {
                             spawn_handler::handle_resize(&self.config, terminal_id, cols, rows).await;
                         }
-                        pilot_v2_ipc::Command::Close { terminal_id } => {
+                        pilot_ipc::Command::Close { terminal_id } => {
                             spawn_handler::handle_close(&self.config, terminal_id).await;
                         }
-                        pilot_v2_ipc::Command::StartAgentRun {
+                        pilot_ipc::Command::StartAgentRun {
                             session_key,
                             session_id,
                             agent,
@@ -356,14 +292,14 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::SendAgentInput { run_id, message } => {
+                        pilot_ipc::Command::SendAgentInput { run_id, message } => {
                             agent_runs::handle_send_agent_input(&self.config, run_id, message)
                                 .await;
                         }
-                        pilot_v2_ipc::Command::InterruptAgentRun { run_id } => {
+                        pilot_ipc::Command::InterruptAgentRun { run_id } => {
                             agent_runs::handle_interrupt_agent_run(&self.config, run_id).await;
                         }
-                        pilot_v2_ipc::Command::DecideAgentApproval {
+                        pilot_ipc::Command::DecideAgentApproval {
                             run_id,
                             request_id,
                             decision,
@@ -376,7 +312,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::AnswerAgentQuestion {
+                        pilot_ipc::Command::AnswerAgentQuestion {
                             run_id,
                             question_id,
                             answer,
@@ -389,7 +325,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::UpsertProviderCredential {
+                        pilot_ipc::Command::UpsertProviderCredential {
                             principal_id,
                             credential,
                         } => {
@@ -401,7 +337,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::RemoveProviderCredential {
+                        pilot_ipc::Command::RemoveProviderCredential {
                             principal_id,
                             provider_id,
                         } => {
@@ -413,7 +349,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::ListProviderCredentials { principal_id } => {
+                        pilot_ipc::Command::ListProviderCredentials { principal_id } => {
                             auth::handle_list_provider_credentials(
                                 &self.config,
                                 &conn.tx,
@@ -421,10 +357,79 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_v2_ipc::Command::Shutdown => break,
-                        other => {
-                            tracing::trace!("daemon: command handler not yet wired: {other:?}");
+                        pilot_ipc::Command::MarkRead { session_key } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::mark_workspace_read(&self.config, &key);
                         }
+                        pilot_ipc::Command::MarkActivityRead { session_key, index } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::mark_activity_read(&self.config, &key, index);
+                        }
+                        pilot_ipc::Command::UnmarkActivityRead { session_key, index } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::unmark_activity_read(&self.config, &key, index);
+                        }
+                        pilot_ipc::Command::CreateWorkspace { name } => {
+                            polling::create_empty_workspace(&self.config, &name);
+                        }
+                        pilot_ipc::Command::Snooze { session_key, until } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::set_snooze(&self.config, &key, Some(until));
+                        }
+                        pilot_ipc::Command::Unsnooze { session_key } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::set_snooze(&self.config, &key, None);
+                        }
+                        pilot_ipc::Command::Kill { session_key } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::delete_workspace(&self.config, &key).await;
+                        }
+                        pilot_ipc::Command::Refresh => {
+                            // No-op for now: the polling loop runs on
+                            // its own interval. Wired so the catch-all
+                            // doesn't trace-log every `g` press as
+                            // "command handler not yet wired" — and so
+                            // a future manual-trigger refactor has the
+                            // arm to slot into.
+                        }
+                        pilot_ipc::Command::PostReply { session_key, body } => {
+                            polling::post_reply(&self.config, session_key, body).await;
+                        }
+                        pilot_ipc::Command::SetSessionLayout {
+                            session_key,
+                            session_id_raw,
+                            layout_json,
+                        } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            let session_id = uuid::Uuid::parse_str(&session_id_raw)
+                                .ok()
+                                .map(pilot_core::SessionId);
+                            let layout: Option<pilot_core::SessionLayout> =
+                                serde_json::from_str(&layout_json).ok();
+                            if let (Some(sid), Some(lay)) = (session_id, layout) {
+                                polling::set_session_layout(&self.config, &key, sid, lay);
+                            } else {
+                                tracing::warn!(
+                                    "SetSessionLayout: bad payload (id={:?})",
+                                    session_id_raw
+                                );
+                            }
+                        }
+                        pilot_ipc::Command::Shutdown => break,
                     }
                 }
                 bus = bus_rx.recv() => {

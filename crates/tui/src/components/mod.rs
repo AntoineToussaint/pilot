@@ -1,14 +1,14 @@
-//! Concrete UI components. Each module implements `Component` for a
-//! specific piece of the TUI (sidebar, right pane, overlays, etc.).
+//! Pilot domain components — pane structs (Sidebar, RightPane,
+//! TerminalStack), the activity-feed renderer, status icons, task
+//! labels. Realm modal/component ports live under `crate::realm`.
 
-pub mod overlays;
+pub mod comment_render;
+pub mod icons;
 pub mod right_pane;
-pub mod root;
 pub mod sidebar;
+pub mod task_label;
 pub mod terminal_stack;
 
-pub use overlays::{Help, NewWorktree, NewWorktreeResult};
 pub use right_pane::RightPane;
-pub use root::Root;
 pub use sidebar::{Mailbox, Sidebar, VisibleRow};
 pub use terminal_stack::TerminalStack;

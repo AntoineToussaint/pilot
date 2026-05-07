@@ -64,10 +64,14 @@ impl WorktreeManager {
         }
     }
 
-    /// Default base dir: ~/.pilot/
+    /// Default base dir: ~/.pilot/v2/
+    ///
+    /// v2-rooted so all of pilot's on-disk state — `state.db`, the
+    /// bare-clone cache, every worktree — sits under one directory.
+    /// One `rm -rf ~/.pilot/v2/` wipes pilot completely.
     pub fn default_base() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        Self::new(PathBuf::from(home).join(".pilot"))
+        Self::new(PathBuf::from(home).join(".pilot").join("v2"))
     }
 
     fn bare_clone_path(&self, owner: &str, repo: &str) -> PathBuf {
@@ -86,16 +90,33 @@ impl WorktreeManager {
 
     /// Ensure a bare clone exists, then create a worktree for the branch.
     /// Idempotent: returns existing worktree if already checked out.
+    /// Picks the path for you (`<base>/worktrees/<owner>-<repo>-<branch>`).
     pub async fn checkout(
         &self,
         owner: &str,
         repo: &str,
         branch: &str,
     ) -> Result<Worktree, GitError> {
-        let bare_path = self.bare_clone_path(owner, repo);
         let wt_path = self.worktree_path(owner, repo, branch);
+        self.checkout_at(&wt_path, owner, repo, branch).await
+    }
 
-        // Return early if worktree already exists.
+    /// Same as [`checkout`] but with an explicit target path. Used by
+    /// pilot's session model where the worktree path is derived from a
+    /// stable session UUID — `<state_root>/worktrees/<uuid>` — and
+    /// must never depend on owner/repo/branch (so renames + branch
+    /// changes don't relocate the on-disk folder).
+    pub async fn checkout_at(
+        &self,
+        wt_path: &Path,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Worktree, GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
+
+        // Return early if worktree already exists. Idempotent — pilot
+        // calls this on every session bring-up.
         if wt_path.exists() {
             let name = wt_path
                 .file_name()
@@ -103,7 +124,7 @@ impl WorktreeManager {
                 .unwrap_or_else(|| branch.to_string());
             return Ok(Worktree {
                 name,
-                path: wt_path,
+                path: wt_path.to_path_buf(),
                 branch: branch.into(),
             });
         }
@@ -167,7 +188,7 @@ impl WorktreeManager {
             .unwrap_or_else(|| branch.to_string());
         Ok(Worktree {
             name,
-            path: wt_path,
+            path: wt_path.to_path_buf(),
             branch: branch.into(),
         })
     }
@@ -371,6 +392,41 @@ impl WorktreeManager {
     }
 
     /// Remove a worktree.
+    /// Move a worktree from `old` to `new`. Wraps `git worktree move`,
+    /// which atomically renames the worktree directory and updates
+    /// git's internal pointer in `<bare>/worktrees/<name>/gitdir`.
+    /// Used by pilot's PR-attach migration: when a workspace gains a
+    /// PR mid-flight, the slug changes from "fix-login" to
+    /// "PR-1234-fix-login" and we need to relocate without reclone.
+    ///
+    /// `bare_path` is the bare repo (`<base>/repos/<owner>/<repo>.git`)
+    /// the worktree belongs to — `git worktree move` operates from
+    /// inside the bare clone's tree.
+    pub async fn move_worktree(
+        &self,
+        bare_path: &Path,
+        old: &Path,
+        new: &Path,
+    ) -> Result<(), GitError> {
+        run_git_in(
+            bare_path,
+            &[
+                "worktree",
+                "move",
+                &old.to_string_lossy(),
+                &new.to_string_lossy(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The bare-clone path for `owner/repo` under this manager's base.
+    /// Public so callers (pilot-server) can pass it to `move_worktree`.
+    pub fn bare_path(&self, owner: &str, repo: &str) -> PathBuf {
+        self.bare_clone_path(owner, repo)
+    }
+
     pub async fn remove(&self, owner: &str, repo: &str, branch: &str) -> Result<(), GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let wt_path = self.worktree_path(owner, repo, branch);
@@ -397,10 +453,30 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Environment overrides applied to every git invocation. The
+/// important one is `GIT_TERMINAL_PROMPT=0`: without it, a locked
+/// SSH key or HTTPS-without-auth would prompt the user — except
+/// pilot is in alternate-screen mode, so the prompt is invisible
+/// and the subprocess just hangs forever, freezing whatever async
+/// task awaited it (worktree migration, session restore, etc.).
+/// Disabling the prompt makes git fail fast with a clean error.
+fn git_env() -> [(&'static str, &'static str); 2] {
+    [
+        ("GIT_TERMINAL_PROMPT", "0"),
+        // Suppress git's progress bar to keep `output()` from
+        // accumulating huge stderr buffers on slow clones.
+        ("GIT_FLUSH", "1"),
+    ]
+}
+
 async fn run_git(args: &[&str]) -> Result<String, GitError> {
     let started = std::time::Instant::now();
     tracing::info!("git {}", args.join(" "));
-    let output = Command::new("git").args(args).output().await?;
+    let output = Command::new("git")
+        .args(args)
+        .envs(git_env())
+        .output()
+        .await?;
     let elapsed = started.elapsed();
     if output.status.success() {
         tracing::info!("git {} ok ({elapsed:?})", args.join(" "));
@@ -422,6 +498,7 @@ async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     let output = Command::new("git")
         .current_dir(cwd)
         .args(args)
+        .envs(git_env())
         .output()
         .await?;
     let elapsed = started.elapsed();

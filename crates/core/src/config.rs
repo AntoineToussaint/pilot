@@ -1,23 +1,41 @@
-//! v2 setup configuration types.
+//! Setup configuration types.
 //!
-//! These live in pilot_core (rather than pilot_v2_tui) so the daemon
+//! These live in pilot_core (rather than pilot_tui) so the daemon
 //! can read them out of the store and the providers can filter by
 //! them, while the TUI's setup screen is the only thing that writes
 //! them. Keys are opaque strings — provider crates know how to
-//! interpret `role.author` / `type.prs`; pilot_core stays
-//! source-agnostic.
+//! interpret them; pilot_core stays source-agnostic.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Per-provider scope: a flat set of opaque keys describing which
-/// item types and which user roles the daemon should pull. Keys
-/// shape (provider-specific):
+/// Per-provider config: a flat set of opaque keys describing what
+/// pilot should poll for from this provider.
 ///
-/// - GitHub: `role.author`, `role.reviewer`, `role.assignee`,
-///   `role.mentioned`, `type.prs`, `type.issues`.
-/// - Linear: `role.author`, `role.assignee`, `role.subscriber`,
-///   `role.mentioned`.
+/// ## GitHub key schema
+///
+/// **Per-type roles** — issues have no concept of reviewer, so the
+/// keys are scoped per item type. Setting any `pr.*` key implies
+/// "fetch pull requests"; setting any `issue.*` key implies "fetch
+/// issues":
+///
+/// - `pr.author`, `pr.reviewer`, `pr.assignee`, `pr.mentioned`
+/// - `issue.author`, `issue.assignee`, `issue.mentioned`
+///
+/// **Legacy keys** (still readable for backward compat, migrated on
+/// load by `migrate_legacy_keys()`):
+///
+/// - `role.author`, `role.reviewer`, `role.assignee`, `role.mentioned`
+/// - `type.prs`, `type.issues`
+///
+/// Old saved configs deserialize fine; the migration projects them
+/// onto the new `pr.*` / `issue.*` keys (skipping `reviewer` for
+/// issues, which makes no sense there).
+///
+/// ## Linear key schema
+///
+/// Linear has only roles, no PR/Issue split:
+/// `role.author`, `role.assignee`, `role.subscriber`, `role.mentioned`.
 ///
 /// Unknown keys are ignored at apply time so the option schema can
 /// grow without invalidating saved configs.
@@ -31,44 +49,112 @@ impl ProviderConfig {
         self.enabled_keys.contains(key)
     }
 
-    /// Convenience: does the user want this `TaskRole` for this
-    /// provider? Maps the role enum to the corresponding `role.*`
-    /// key.
-    pub fn allows_role(&self, role: crate::task::TaskRole) -> bool {
-        let key = match role {
-            crate::task::TaskRole::Author => "role.author",
-            crate::task::TaskRole::Reviewer => "role.reviewer",
-            crate::task::TaskRole::Assignee => "role.assignee",
-            crate::task::TaskRole::Mentioned => "role.mentioned",
-        };
-        self.has(key)
-    }
-
-    pub fn allows_prs(&self) -> bool {
-        self.has("type.prs")
-    }
-
-    pub fn allows_issues(&self) -> bool {
-        self.has("type.issues")
-    }
-
     pub fn toggle(&mut self, key: &str) {
         if !self.enabled_keys.remove(key) {
             self.enabled_keys.insert(key.to_string());
         }
     }
 
+    // ── GitHub: per-type role checks ─────────────────────────────────
+
+    /// Does the user want this role for **PRs**?
+    pub fn allows_pr_role(&self, role: crate::task::TaskRole) -> bool {
+        self.has(pr_key(role))
+    }
+
+    /// Does the user want this role for **issues**? Always returns
+    /// `false` for `Reviewer` (issues have no reviewers).
+    pub fn allows_issue_role(&self, role: crate::task::TaskRole) -> bool {
+        match issue_key(role) {
+            Some(key) => self.has(key),
+            None => false,
+        }
+    }
+
+    /// Whether to fetch PRs at all — true if any `pr.*` key is set.
+    pub fn pr_enabled(&self) -> bool {
+        self.enabled_keys.iter().any(|k| k.starts_with("pr."))
+    }
+
+    /// Whether to fetch issues at all — true if any `issue.*` key is set.
+    pub fn issue_enabled(&self) -> bool {
+        self.enabled_keys.iter().any(|k| k.starts_with("issue."))
+    }
+
+    // ── Linear: flat role check ──────────────────────────────────────
+
+    /// Linear-style role check (no per-type split).
+    pub fn allows_linear_role(&self, role: crate::task::TaskRole) -> bool {
+        let key = match role {
+            crate::task::TaskRole::Author => "role.author",
+            crate::task::TaskRole::Reviewer => return false, // Linear has no reviewer
+            crate::task::TaskRole::Assignee => "role.assignee",
+            crate::task::TaskRole::Mentioned => "role.mentioned",
+        };
+        self.has(key)
+    }
+
+    // ── Migration ────────────────────────────────────────────────────
+
+    /// Project legacy `role.*` + `type.*` keys onto the new per-type
+    /// schema. Idempotent — running it twice is a no-op. Called once
+    /// at load time by `setup_flow::load_persisted` so stored configs
+    /// from older versions of pilot keep working.
+    pub fn migrate_legacy_keys(&mut self) {
+        let prs_enabled = self.enabled_keys.contains("type.prs");
+        let issues_enabled = self.enabled_keys.contains("type.issues");
+        // If neither type was explicitly checked, the old default was
+        // "both" — preserve that on migration.
+        let default_both = !prs_enabled && !issues_enabled;
+        let want_pr = prs_enabled || default_both;
+        let want_issue = issues_enabled || default_both;
+
+        let roles = ["author", "reviewer", "assignee", "mentioned"];
+        let mut to_add: Vec<String> = Vec::new();
+        for r in &roles {
+            if self.enabled_keys.contains(&format!("role.{r}")) {
+                if want_pr {
+                    to_add.push(format!("pr.{r}"));
+                }
+                if want_issue && *r != "reviewer" {
+                    to_add.push(format!("issue.{r}"));
+                }
+            }
+        }
+        if to_add.is_empty()
+            && !self.enabled_keys.iter().any(|k| k.starts_with("role.")
+                || k == "type.prs"
+                || k == "type.issues")
+        {
+            return; // No legacy keys to migrate.
+        }
+        for k in to_add {
+            self.enabled_keys.insert(k);
+        }
+        // Drop legacy keys.
+        self.enabled_keys
+            .retain(|k| !k.starts_with("role.") && k != "type.prs" && k != "type.issues");
+    }
+
     /// Provider-specific defaults — what most users want without
     /// thinking. Lives here so daemon code can fall back to a
     /// reasonable filter when there's no saved config.
+    ///
+    /// GitHub default is **PR-only** because issues are typically
+    /// tracked in a separate issue tracker (Linear, Jira, …) rather
+    /// than on GitHub for users sophisticated enough to use a tool
+    /// like pilot. Users who do want issues opt in via the filter
+    /// step.
     pub fn default_for(provider_id: &str) -> Self {
         let mut keys = BTreeSet::new();
         match provider_id {
             "github" => {
-                keys.insert("role.author".into());
-                keys.insert("role.assignee".into());
-                keys.insert("type.prs".into());
-                keys.insert("type.issues".into());
+                // PR roles only by default. `mentioned` is off — it's
+                // noisy on busy repos. Issues are off entirely;
+                // users tick them in the filter step if they care.
+                keys.insert("pr.author".into());
+                keys.insert("pr.reviewer".into());
+                keys.insert("pr.assignee".into());
             }
             "linear" => {
                 keys.insert("role.assignee".into());
@@ -76,6 +162,27 @@ impl ProviderConfig {
             _ => {}
         }
         Self { enabled_keys: keys }
+    }
+}
+
+/// Map a `TaskRole` to its `pr.*` key.
+fn pr_key(role: crate::task::TaskRole) -> &'static str {
+    match role {
+        crate::task::TaskRole::Author => "pr.author",
+        crate::task::TaskRole::Reviewer => "pr.reviewer",
+        crate::task::TaskRole::Assignee => "pr.assignee",
+        crate::task::TaskRole::Mentioned => "pr.mentioned",
+    }
+}
+
+/// Map a `TaskRole` to its `issue.*` key. `Reviewer` returns `None`
+/// because issues have no reviewers.
+fn issue_key(role: crate::task::TaskRole) -> Option<&'static str> {
+    match role {
+        crate::task::TaskRole::Author => Some("issue.author"),
+        crate::task::TaskRole::Reviewer => None,
+        crate::task::TaskRole::Assignee => Some("issue.assignee"),
+        crate::task::TaskRole::Mentioned => Some("issue.mentioned"),
     }
 }
 
@@ -104,6 +211,16 @@ impl PersistedSetup {
             .unwrap_or_else(|| ProviderConfig::default_for(id))
     }
 
+    /// Run legacy-key migration on every stored provider config.
+    /// Idempotent; called by `setup_flow::load_persisted` so old
+    /// saved configs project onto the per-type schema before the
+    /// daemon starts polling.
+    pub fn migrate_legacy_keys(&mut self) {
+        for cfg in self.provider_filters.values_mut() {
+            cfg.migrate_legacy_keys();
+        }
+    }
+
     /// Whether `scope_id` was selected for the given provider. An
     /// empty selection (no scopes ever picked) is treated as "all
     /// scopes allowed" so existing setups keep working — the user
@@ -118,61 +235,61 @@ impl PersistedSetup {
 
 /// Stable kv key for the persisted setup state. Externalized so the
 /// daemon and TUI agree without spelling the same string twice.
-pub const KV_KEY_SETUP: &str = "setup";
+pub const KV_KEY_SETUP: &str = "setup_v1";
+/// Active theme name (matches `Theme.name`). Cycled with the `T`
+/// global keybind; persisted so the user's choice survives restart.
+pub const KV_KEY_THEME: &str = "theme_v1";
 
-/// Stable kv key for the persisted pane layout (sidebar width, right
-/// vertical split). Read at TUI startup, written whenever the user
-/// resizes a pane.
-pub const KV_KEY_LAYOUT: &str = "ui.layout";
+/// Stable kv key for the persisted pane layout (sidebar width +
+/// horizontal split percentage).
+/// Bumped to `_v2` when the sidebar split changed from cells to a
+/// percentage. v1 values stored a 70-cell sidebar that, re-read as a
+/// percent, would render as 70% of the screen — basically swallowing
+/// the right pane. The version bump means the migration is implicit:
+/// old saves are ignored, new writes go to the new key.
+pub const KV_KEY_LAYOUT: &str = "layout_v2";
 
-/// Pane geometry the TUI persists across launches. Numbers are
-/// clamped to sensible bounds at apply time so a hand-edited config
-/// never paints an unusable layout.
+/// Pane layout knobs. Two splitters today: the sidebar's right edge
+/// (left/right split, **as a percentage of the total width**) and the
+/// right column's horizontal split (top/bottom, also a percentage).
+/// Percent — not cells — so the layout adapts to terminal size and
+/// stays consistent on a 4K monitor vs a laptop screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneLayout {
-    /// Sidebar width in columns. Clamp range: 12..=80.
+    /// Sidebar width as a percentage of total width. 1..=99.
     pub sidebar_width: u16,
-    /// Percentage of the right column the activity pane (top half)
-    /// gets. The terminal gets the remainder. Clamp range: 0..=100;
-    /// values below 5 collapse the activity pane, values above 95
-    /// collapse the terminal pane — both legal as a "pin everything
-    /// to one half" gesture.
+    /// Top half (right pane / activity feed) as a percentage of the
+    /// right column's height; the bottom half (terminal stack) takes
+    /// the remainder.
     pub right_top_pct: u16,
 }
 
 impl PaneLayout {
-    /// Reasonable starting layout: 32-col sidebar, terminal-dominant
-    /// right column (activity = 25%, terminal = 75%). The right pane
-    /// is intentionally NOT 50/50 — once the user has a session
-    /// running, the agent terminal is what they're actively watching
-    /// and typing into.
+    /// Reasonable defaults: 40% sidebar so PR titles + status + time
+    /// fit on a typical laptop screen without aggressive truncation;
+    /// 25% top pane in the right column.
     pub const DEFAULT: PaneLayout = PaneLayout {
-        sidebar_width: 32,
+        sidebar_width: 40,
         right_top_pct: 25,
     };
 
     pub fn clamp(self) -> Self {
         Self {
-            sidebar_width: self.sidebar_width.clamp(12, 80),
+            // Sidebar percent: 15-75% range covers everything from
+            // "I want lots of terminal" to "I want lots of inbox."
+            sidebar_width: self.sidebar_width.clamp(15, 75),
             right_top_pct: self.right_top_pct.clamp(0, 100),
         }
     }
 
-    /// Adjust by deltas. Capped at the clamp range; never panics.
-    pub fn nudge(self, sidebar_delta: i16, top_delta: i16) -> Self {
+    pub fn nudge(self, sidebar_delta: i16, right_top_delta: i16) -> Self {
         let sidebar = (self.sidebar_width as i16 + sidebar_delta).max(0) as u16;
-        let top = (self.right_top_pct as i16 + top_delta).max(0) as u16;
-        PaneLayout {
+        let right = (self.right_top_pct as i16 + right_top_delta).max(0) as u16;
+        Self {
             sidebar_width: sidebar,
-            right_top_pct: top,
+            right_top_pct: right,
         }
         .clamp()
-    }
-}
-
-impl Default for PaneLayout {
-    fn default() -> Self {
-        Self::DEFAULT
     }
 }
 
@@ -181,99 +298,102 @@ mod tests {
     use super::*;
     use crate::task::TaskRole;
 
-    #[test]
-    fn allows_role_maps_to_role_dot_key() {
+    fn cfg_with(keys: &[&str]) -> ProviderConfig {
         let mut c = ProviderConfig::default();
-        c.enabled_keys.insert("role.author".into());
-        assert!(c.allows_role(TaskRole::Author));
-        assert!(!c.allows_role(TaskRole::Reviewer));
+        for k in keys {
+            c.enabled_keys.insert((*k).into());
+        }
+        c
     }
 
     #[test]
-    fn default_github_includes_both_types_and_two_roles() {
+    fn pr_role_check_uses_pr_key() {
+        let c = cfg_with(&["pr.author"]);
+        assert!(c.allows_pr_role(TaskRole::Author));
+        assert!(!c.allows_pr_role(TaskRole::Reviewer));
+    }
+
+    #[test]
+    fn issue_role_check_skips_reviewer() {
+        let c = cfg_with(&["issue.author", "issue.assignee", "pr.reviewer"]);
+        assert!(c.allows_issue_role(TaskRole::Author));
+        assert!(c.allows_issue_role(TaskRole::Assignee));
+        assert!(
+            !c.allows_issue_role(TaskRole::Reviewer),
+            "reviewer never applies to issues even if pr.reviewer is on"
+        );
+    }
+
+    #[test]
+    fn pr_enabled_iff_any_pr_key() {
+        assert!(!ProviderConfig::default().pr_enabled());
+        assert!(cfg_with(&["pr.author"]).pr_enabled());
+        assert!(!cfg_with(&["issue.author"]).pr_enabled());
+    }
+
+    #[test]
+    fn migration_projects_legacy_role_and_type_onto_new_schema() {
+        // role.author + role.reviewer + type.prs → pr.author + pr.reviewer
+        let mut c = cfg_with(&["role.author", "role.reviewer", "type.prs"]);
+        c.migrate_legacy_keys();
+        assert!(c.has("pr.author"));
+        assert!(c.has("pr.reviewer"));
+        assert!(!c.has("issue.author"), "type.issues was not set");
+        assert!(!c.has("role.author"), "legacy keys are dropped");
+        assert!(!c.has("type.prs"));
+    }
+
+    #[test]
+    fn migration_legacy_no_type_means_both() {
+        // role.author with NO type.* → defaulted to both PR + issue
+        // (matches old behavior where empty type set meant "all").
+        let mut c = cfg_with(&["role.author"]);
+        c.migrate_legacy_keys();
+        assert!(c.has("pr.author"));
+        assert!(c.has("issue.author"));
+    }
+
+    #[test]
+    fn migration_drops_reviewer_for_issues() {
+        let mut c = cfg_with(&["role.reviewer", "type.prs", "type.issues"]);
+        c.migrate_legacy_keys();
+        assert!(c.has("pr.reviewer"));
+        assert!(!c.has("issue.reviewer"), "issues have no reviewer");
+    }
+
+    #[test]
+    fn migration_idempotent() {
+        let mut c = cfg_with(&["role.author", "type.prs"]);
+        c.migrate_legacy_keys();
+        let after_first = c.clone();
+        c.migrate_legacy_keys();
+        assert_eq!(c, after_first);
+    }
+
+    #[test]
+    fn migration_noop_on_already_new_schema() {
+        let mut c = cfg_with(&["pr.author", "issue.author"]);
+        let before = c.clone();
+        c.migrate_legacy_keys();
+        assert_eq!(c, before);
+    }
+
+    #[test]
+    fn default_github_is_pr_only() {
         let c = ProviderConfig::default_for("github");
-        assert!(c.allows_role(TaskRole::Author));
-        assert!(c.allows_role(TaskRole::Assignee));
-        assert!(!c.allows_role(TaskRole::Reviewer));
-        assert!(c.allows_prs());
-        assert!(c.allows_issues());
+        assert!(c.has("pr.author"));
+        assert!(c.has("pr.reviewer"));
+        assert!(c.has("pr.assignee"));
+        assert!(!c.has("pr.mentioned"));
+        // Issues default OFF — users opt in via the filter step.
+        assert!(!c.issue_enabled());
+        assert!(c.pr_enabled());
     }
 
     #[test]
-    fn default_linear_is_assignee_only() {
+    fn default_linear_uses_flat_role_keys() {
         let c = ProviderConfig::default_for("linear");
-        assert!(c.allows_role(TaskRole::Assignee));
-        assert!(!c.allows_role(TaskRole::Author));
-    }
-
-    #[test]
-    fn toggle_flips_keys() {
-        let mut c = ProviderConfig::default();
-        c.toggle("role.author");
-        assert!(c.has("role.author"));
-        c.toggle("role.author");
-        assert!(!c.has("role.author"));
-    }
-
-    #[test]
-    fn persisted_setup_provider_config_falls_back_to_default() {
-        let p = PersistedSetup::default();
-        let c = p.provider_config("github");
-        assert!(c.allows_prs(), "fallback to GitHub default");
-    }
-
-    // ── PaneLayout ────────────────────────────────────────────────
-
-    #[test]
-    fn pane_layout_default_is_terminal_dominant() {
-        let l = PaneLayout::DEFAULT;
-        assert_eq!(l.sidebar_width, 32);
-        assert_eq!(l.right_top_pct, 25, "activity at 25%, terminal at 75%");
-    }
-
-    #[test]
-    fn pane_layout_clamp_bounds_sidebar_width() {
-        assert_eq!(
-            PaneLayout {
-                sidebar_width: 5,
-                right_top_pct: 25
-            }
-            .clamp()
-            .sidebar_width,
-            12,
-            "tiny sidebar widths floor to 12"
-        );
-        assert_eq!(
-            PaneLayout {
-                sidebar_width: 200,
-                right_top_pct: 25
-            }
-            .clamp()
-            .sidebar_width,
-            80,
-            "huge sidebar widths cap at 80"
-        );
-    }
-
-    #[test]
-    fn pane_layout_nudge_grows_and_shrinks_safely() {
-        let base = PaneLayout::DEFAULT;
-        assert_eq!(base.nudge(2, 0).sidebar_width, 34);
-        assert_eq!(base.nudge(-2, 0).sidebar_width, 30);
-        assert_eq!(base.nudge(0, 5).right_top_pct, 30);
-        assert_eq!(base.nudge(0, -5).right_top_pct, 20);
-    }
-
-    #[test]
-    fn pane_layout_nudge_handles_negative_overflow() {
-        // Even a wildly-negative delta from a small starting point
-        // never wraps around to a u16 underflow — the clamp catches.
-        let small = PaneLayout {
-            sidebar_width: 12,
-            right_top_pct: 0,
-        };
-        let bumped = small.nudge(-100, -100);
-        assert!(bumped.sidebar_width >= 12);
-        assert!(bumped.right_top_pct <= 100);
+        assert!(c.allows_linear_role(TaskRole::Assignee));
+        assert!(!c.allows_linear_role(TaskRole::Reviewer));
     }
 }

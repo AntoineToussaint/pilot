@@ -1,4 +1,4 @@
-//! Pilot v2 IPC — protocol between the TUI and the daemon.
+//! Pilot IPC — protocol between the TUI and the daemon.
 //!
 //! The daemon is the single source of truth for all state (sessions,
 //! worktrees, PTYs, provider polling, persistence). The TUI issues
@@ -23,6 +23,7 @@ use std::fmt;
 
 pub mod channel;
 pub mod socket;
+pub mod transport;
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
@@ -58,12 +59,47 @@ pub enum TerminalKind {
     LogTail { path: String },
 }
 
+/// `RunnerKind` is the user-facing vocabulary: every PTY child of a
+/// session is a "runner", whether it runs an agent or a plain shell.
+/// `TerminalKind` is the wire-historic name kept for back-compat.
+/// They're the same type — pick whichever reads better at the call
+/// site. New code should prefer `RunnerKind`.
+pub type RunnerKind = TerminalKind;
+
+/// `RunnerId` mirrors `TerminalId` for the same reason. Daemon-
+/// allocated u64 — a session-local handle, not a global UUID.
+pub type RunnerId = TerminalId;
+
+impl TerminalKind {
+    /// Whether at most one runner of this kind may exist in a single
+    /// session. Singleton kinds (Agent variants — Claude, Codex,
+    /// Cursor) toggle-or-focus on duplicate spawn requests; multi
+    /// kinds (Shell) always spawn a new instance.
+    pub fn is_singleton(&self) -> bool {
+        matches!(self, TerminalKind::Agent(_))
+    }
+
+    /// Equality of "uniqueness identity". Two singleton kinds collide
+    /// iff their agent ids match. Two shells never collide. LogTail
+    /// collides on path.
+    pub fn singleton_key(&self) -> Option<String> {
+        match self {
+            TerminalKind::Agent(id) => Some(format!("agent:{id}")),
+            TerminalKind::LogTail { path } => Some(format!("logtail:{path}")),
+            TerminalKind::Shell => None,
+        }
+    }
+}
+
+/// What the agent's PTY is doing right now. Drives the "needs
+/// input" badge on the TerminalStack tab. Two states is enough
+/// today — `Idle`/`Stopped` distinctions don't have a consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentState {
+    /// Working / streaming output. Default.
     Active,
-    Idle,
+    /// Waiting on a user choice (Y/N, approval, prompt).
     Asking,
-    Stopped,
 }
 
 /// User input sent to a structured agent runtime.
@@ -235,6 +271,39 @@ pub enum Command {
     MarkRead {
         session_key: SessionKey,
     },
+    /// Mark exactly one activity row as read. The auto-mark-on-hover
+    /// flow uses this so a brief glance at one comment doesn't flip
+    /// the whole workspace's unread badge to zero. `index` is the
+    /// activity slot in `Workspace.activity` after the daemon's
+    /// `sort_activity` pass — the same view the TUI sees.
+    MarkActivityRead {
+        session_key: SessionKey,
+        index: usize,
+    },
+    /// Reverse a previous `MarkActivityRead`. Bound to the `z` undo
+    /// affordance.
+    UnmarkActivityRead {
+        session_key: SessionKey,
+        index: usize,
+    },
+    /// Create a brand-new pre-PR workspace with a user-chosen name.
+    /// The daemon allocates a fresh `WorkspaceKey` (slug-based, with
+    /// a numeric suffix on collision) and persists it. Used by the
+    /// sidebar's `n` key — "I'm starting a new piece of work and a
+    /// PR doesn't exist yet."
+    CreateWorkspace {
+        name: String,
+    },
+    /// Update the per-session tile/tab layout (`SessionLayout`).
+    /// Persisted so the user's split arrangement survives restart.
+    /// `layout_json` carries the serialized `pilot_core::SessionLayout`
+    /// — a string here keeps the wire type free of a core dep without
+    /// forcing the IPC crate into the workspace types.
+    SetSessionLayout {
+        session_key: SessionKey,
+        session_id_raw: String,
+        layout_json: String,
+    },
     Snooze {
         session_key: SessionKey,
         until: chrono::DateTime<chrono::Utc>,
@@ -242,14 +311,14 @@ pub enum Command {
     Unsnooze {
         session_key: SessionKey,
     },
-    Merge {
+    /// Post a top-level reply to the workspace's primary task. Today
+    /// this maps to "create an issue/PR comment" on GitHub; future
+    /// providers (Linear, etc.) wire their own send path. The daemon
+    /// posts via the workspace's owning provider, then `Refresh`-es so
+    /// the new comment lands in the activity feed on the next poll.
+    PostReply {
         session_key: SessionKey,
-    },
-    Approve {
-        session_key: SessionKey,
-    },
-    UpdateBranch {
-        session_key: SessionKey,
+        body: String,
     },
     Refresh,
     Shutdown,
@@ -301,7 +370,7 @@ pub enum Command {
 /// Connection → TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    // ── v2 hierarchy reminder ─────────────────────────────────────
+    // ── Hierarchy reminder ────────────────────────────────────────
     //
     // Repo (string `"owner/name"` from the task's provider)
     //  └── Workspace (one unit-of-work; `Workspace`)
@@ -314,10 +383,9 @@ pub enum Event {
     // `WorkspaceRemoved` are the fan-out events; `TerminalSpawned` /
     // `TerminalOutput` / `TerminalExited` track the bottom layer.
     /// Initial snapshot reply to `Subscribe`. Sent once before the
-    /// live stream starts so the client has a baseline. The v2 row
-    /// model is `Workspace` — one per worktree, holding the linked
-    /// PR + issues. The legacy `Session` (one task per row) is gone:
-    /// every component reads from the workspace directly and
+    /// live stream starts so the client has a baseline. The row model
+    /// is `Workspace` — one per worktree, holding the linked PR +
+    /// issues; every component reads from the workspace directly and
     /// projects to a primary task via `workspace.primary_task()`.
     Snapshot {
         workspaces: Vec<pilot_core::Workspace>,
@@ -358,12 +426,50 @@ pub enum Event {
         terminal_id: TerminalId,
         exit_code: Option<i32>,
     },
+    /// Daemon-driven "focus this existing terminal instead of
+    /// spawning a duplicate". Fired by the singleton guard in
+    /// `handle_spawn` when a `Spawn { Agent(id) }` lands and a
+    /// matching agent is already running. The TUI moves the active
+    /// tab + focuses the terminal stack.
+    TerminalFocusRequested {
+        terminal_id: TerminalId,
+    },
     AgentState {
         session_key: SessionKey,
         state: AgentState,
     },
     ProviderError {
         source: String,
+        /// Terse one-line summary for the status bar.
+        message: String,
+        /// Full diagnostic for the error modal / dev tools. Empty
+        /// if the producer didn't classify the error (legacy path).
+        #[serde(default)]
+        detail: String,
+        /// Severity. `"retryable"` / `"auth"` / `"permanent"`. Drives
+        /// whether the TUI auto-mounts an error modal. Empty
+        /// (uncategorized) is treated as `"permanent"` for safety.
+        #[serde(default)]
+        kind: String,
+    },
+    /// Emitted at the end of every successful poll cycle, even when
+    /// no tasks matched. The TUI uses this to distinguish "polling
+    /// hasn't run yet" from "polling ran and found nothing matching
+    /// the user's filter." Drives the polling-modal's empty-state
+    /// dismiss path.
+    PollCompleted {
+        source: String,
+        /// Number of tasks the source's filter kept post-fetch.
+        count: usize,
+    },
+    /// Granular progress signal during a poll cycle. Drives the
+    /// polling modal's "what is pilot doing right now" indicator
+    /// (e.g. "Querying PRs in tensorzero/tensorzero…", "Got 5 PRs,
+    /// fetching reviews…"). Also great for debugging — every
+    /// progress step shows up in the log.
+    PollProgress {
+        source: String,
+        /// Short, user-facing description of the current step.
         message: String,
     },
     Notification {
@@ -374,7 +480,7 @@ pub enum Event {
     /// request/response the agent made through the daemon-injected
     /// HTTP proxy. Clients use this to populate the Cost/Tokens tile
     /// and the tool-call activity timeline.
-    ProxyRecord(pilot_v2_llm_proxy::ProxyRecord),
+    ProxyRecord(pilot_llm_proxy::ProxyRecord),
     AgentRunStarted {
         run_id: AgentRunId,
         session_key: SessionKey,
@@ -480,7 +586,10 @@ use tokio::sync::mpsc;
 /// over a socket. The TUI doesn't see the difference.
 pub struct Client {
     tx: mpsc::UnboundedSender<Command>,
-    rx: mpsc::UnboundedReceiver<Event>,
+    /// Inbound daemon events. Pub so the realm orchestrator can
+    /// `try_recv` non-blocking from a sync main loop. (Old async
+    /// loop uses `Client::recv` instead.)
+    pub rx: mpsc::UnboundedReceiver<Event>,
 }
 
 impl Client {

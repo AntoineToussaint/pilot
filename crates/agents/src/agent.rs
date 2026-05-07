@@ -1,6 +1,6 @@
 //! The `Agent` trait and built-in implementations.
 
-use pilot_v2_ipc::AgentState;
+use pilot_ipc::AgentState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,19 +13,6 @@ pub struct SpawnCtx {
     pub repo: Option<String>,
     pub pr_number: Option<String>,
     pub env: HashMap<String, String>,
-}
-
-/// Hooks into an agent's lifecycle (optional — only Claude Code today).
-/// If `Some`, the daemon will write this config so the agent emits state
-/// transitions the daemon can watch without PTY pattern-matching.
-#[derive(Debug, Clone)]
-pub struct HookConfig {
-    /// JSON (or YAML) blob to write as the agent's config file.
-    pub config_blob: serde_json::Value,
-    /// Where to write it, relative to the worktree or user home.
-    pub install_path: PathBuf,
-    /// Directory the hooks write state files into. Server watches.
-    pub state_dir: PathBuf,
 }
 
 pub trait Agent: Send + Sync {
@@ -53,12 +40,7 @@ pub trait Agent: Send + Sync {
         None
     }
 
-    /// Return a hook config if this agent supports it. Default: None.
-    fn hooks(&self) -> Option<HookConfig> {
-        None
-    }
-
-    /// Encode a prompt as bytes the daemon should write to the PTY.
+/// Encode a prompt as bytes the daemon should write to the PTY.
     /// Most agents accept plain text + a newline; some need bracketed
     /// paste or specific control sequences.
     fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
@@ -115,7 +97,37 @@ pub mod builtins {
         fn resume(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["claude".into(), "--continue".into()]
         }
-        // detect_state + hooks wired in Week 1-2 of the rewrite.
+
+        /// Claude Code's interactive prompt UI is recognisable by a
+        /// stable footer line (`Esc to cancel · Tab to amend · …`)
+        /// plus a small set of question phrasings. Matching the
+        /// footer is highest-confidence — Claude only renders it
+        /// when it's waiting on the user. The phrase fallbacks catch
+        /// cases where the footer is scrolled off the recent buffer
+        /// but the question is still visible.
+        fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
+            let s = strip_ansi_lossy(recent_output);
+            // Highest-precision: the chooser footer.
+            if s.contains("Esc to cancel") && s.contains("Tab to amend") {
+                return Some(AgentState::Asking);
+            }
+            // Common question phrasings. "Do you want to" alone is
+            // weak (chat output could include the phrase) so we pair
+            // with a numbered choice marker.
+            let has_choice = s.contains("1. Yes") || s.contains("(y/n)") || s.contains("[y/n]");
+            if has_choice
+                && (s.contains("Do you want to")
+                    || s.contains("Allow Claude")
+                    || s.contains("Approve"))
+            {
+                return Some(AgentState::Asking);
+            }
+            // Default: assume Active. Returning Some(Active) lets the
+            // daemon notice the transition Asking → Active when the
+            // user hits 1/2; without it the cached state would stay
+            // Asking forever.
+            Some(AgentState::Active)
+        }
     }
 
     #[derive(Default)]
@@ -130,6 +142,16 @@ pub mod builtins {
         }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["codex".into()]
+        }
+
+        /// Codex CLI uses `[y/n]` style prompts for tool approvals.
+        /// Same generic pattern + a few Codex-specific phrasings.
+        fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
+            let s = strip_ansi_lossy(recent_output);
+            if s.contains("[y/n]") || s.contains("(y/n)") || s.contains("approve?") {
+                return Some(AgentState::Asking);
+            }
+            Some(AgentState::Active)
         }
     }
 
@@ -146,6 +168,62 @@ pub mod builtins {
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["cursor-agent".into()]
         }
+
+        fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
+            let s = strip_ansi_lossy(recent_output);
+            if s.contains("[y/n]") || s.contains("(y/n)") {
+                return Some(AgentState::Asking);
+            }
+            Some(AgentState::Active)
+        }
+    }
+
+    /// Quick-and-dirty ANSI stripper for state detection. We don't
+    /// need correctness for rendering (libghostty-vt does that) — just
+    /// enough to make pattern matches survive cursor moves and color
+    /// codes interleaved with the literal text.
+    fn strip_ansi_lossy(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b {
+                // ESC: skip until the next final byte for CSI/OSC.
+                i += 1;
+                if i >= bytes.len() {
+                    break;
+                }
+                let intro = bytes[i];
+                i += 1;
+                if intro == b'[' {
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1;
+                    }
+                } else if intro == b']' {
+                    while i < bytes.len() && bytes[i] != 0x07 {
+                        if bytes[i] == 0x1b
+                            && i + 1 < bytes.len()
+                            && bytes[i + 1] == b'\\'
+                        {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if i < bytes.len() && bytes[i] == 0x07 {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            // Cheap UTF-8: push byte regardless. The pattern matcher
+            // works on byte-equivalent ASCII substrings.
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
     }
 
     /// User-defined agent loaded from YAML. Kept minimal — spawn cmd +

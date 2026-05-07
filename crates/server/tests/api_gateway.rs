@@ -1,4 +1,4 @@
-pub use pilot_v2_server::{Server, ServerConfig};
+pub use pilot_server::{Server, ServerConfig};
 
 #[allow(dead_code)]
 #[path = "../src/api_gateway.rs"]
@@ -15,8 +15,8 @@ use hyper::header::{AUTHORIZATION, HeaderValue};
 use hyper::{Method, Request, StatusCode};
 use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 use pilot_store::WorkspaceRecord;
-use pilot_v2_agents::{Agent, SpawnCtx};
-use pilot_v2_ipc::{AgentInputMessage, AgentRuntimeMode, Command, Event};
+use pilot_agents::{Agent, SpawnCtx};
+use pilot_ipc::{AgentInputMessage, AgentRuntimeMode, Command, Event};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -149,7 +149,7 @@ async fn health_route_returns_json() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: HealthResponse = read_json(response).await;
-    assert_eq!(payload.service, "pilot-v2-api-gateway");
+    assert_eq!(payload.service, "pilot-api-gateway");
     assert!(payload.ok);
 }
 

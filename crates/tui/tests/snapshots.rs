@@ -12,9 +12,9 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
-use pilot_v2_ipc::Event;
-use pilot_v2_tui::components::Sidebar;
-use pilot_v2_tui::{Component, ComponentId};
+use pilot_ipc::Event;
+use pilot_tui::components::Sidebar;
+use pilot_tui::PaneId;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -82,7 +82,7 @@ fn render_to_string(component: &mut Sidebar, w: u16, h: u16, focused: bool) -> S
 
 #[test]
 fn sidebar_golden_render_focused() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     // Build three workspaces with known ages so sort order is
     // deterministic in the snapshot.
     s.on_event(&Event::Snapshot {
@@ -99,7 +99,7 @@ fn sidebar_golden_render_focused() {
 
 #[test]
 fn sidebar_golden_render_unfocused() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(make_task("o/r#1", 10), fixed_time())],
         terminals: vec![],
@@ -110,7 +110,7 @@ fn sidebar_golden_render_unfocused() {
 
 #[test]
 fn sidebar_golden_render_empty() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let rendered = render_to_string(&mut s, 40, 5, true);
     insta::assert_snapshot!("sidebar_empty", rendered);
 }

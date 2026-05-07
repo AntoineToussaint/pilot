@@ -12,66 +12,139 @@ Source-agnostic: GitHub is one provider, but Linear/Jira/etc. plug in the same w
 
 ```bash
 cargo build                    # build (first build compiles SQLite, takes ~30s)
-cargo run -p pilot          # run (uses `gh auth token` automatically)
+cargo run -p pilot-tui      # run (uses `gh auth token` automatically)
 cargo test --workspace         # tests
 cargo clippy --workspace       # lint
+make run                       # same as cargo run -p pilot-tui
 ```
 
-Logs go to `/tmp/pilot.log`. State persisted in `~/.pilot/state.db`.
+Logs go to `/tmp/pilot.log`. State persisted in `~/.pilot/v2/state.db`.
 
 ## Architecture
 
-10 crates. The reusable library crates must NEVER depend on each other.
+14 crates organized as a client/daemon split with shared library crates. The
+core library crates (core, auth, events, store) must NEVER depend on each
+other.
 
 ```
 crates/
-  core/          # Task, Session, Activity, time helpers. Source-agnostic types.
-  auth/          # CredentialProvider trait + chain. Env, Command, Static providers.
-  events/        # Event bus (broadcast channel). EventKind enum.
-  store/         # Store trait + SQLite backend. Persists full session + read/unread state.
-  config/        # YAML config loading from ~/.pilot/config.yaml.
-  tui-term/      # Embedded terminal: portable-pty + vt100 + tui-term widget. Scrollback support.
-  gh-provider/   # GitHub provider: octocrab polling → generic Events. Needs-reply detection.
-  git-ops/       # Git worktree manager (bare clones + worktrees).
-  app/           # TUI binary. Event loop, pane system, tabs, search, confirmation prompts.
+  # ── shared libraries ────────────────────────────────────────────────
+  core/            # Task, Session, Activity, SessionKey, time helpers. Source-agnostic.
+  auth/            # CredentialProvider trait + chain. Env, Command, Static providers.
+  events/          # In-process event bus (broadcast channel). EventKind enum.
+  store/           # Store trait + SQLite backend. Sessions, read/unread, snooze.
+  config/          # YAML loader for ~/.pilot/config.yaml.
+  git-ops/         # Worktree manager (bare clones + per-task worktrees).
+  tui-term/        # Embedded terminal: portable-pty + ghostty-vt + widget. Used
+                   #   by both daemon (PTY ownership) and TUI (replay).
+
+  # ── providers ───────────────────────────────────────────────────────
+  gh-provider/     # GitHub PRs + Issues: octocrab polling → generic Events.
+  linear-provider/ # Linear issues via GraphQL.
+
+  # ── daemon-side ─────────────────────────────────────────────────────
+  ipc/             # Wire types (Command/Event), framing, transport traits
+                   #   (in-process channel and Unix-socket variants).
+  agents/          # Agent trait + Claude/Codex/Cursor/GenericCli built-ins.
+                   #   SessionWrapper trait (tmux is the default).
+  llm-proxy/       # 127.0.0.1 HTTP pass-through that records structured
+                   #   telemetry (tokens, tool calls, cost) from agent traffic.
+  server/          # Server library: PTY lifecycle, ring buffers, provider
+                   #   polling, agent runs, JSON API gateway.
+
+  # ── client / binary ─────────────────────────────────────────────────
+  tui/             # Component-tree TUI client. Hosts `pilot` binary with
+                   #   subcommands: default (in-process daemon + TUI),
+                   #   `daemon start/stop/status`, `server api`,
+                   #   `--connect <socket>`.
 ```
 
 ### Key patterns
 
-- **Action pattern**: All inputs → `Action` enum → single mpsc channel → drain-then-render.
-- **Event bus**: `tokio::sync::broadcast`. Providers produce, app consumes.
+- **Client / daemon split**: Server owns state and IO (PTYs, polling, store);
+  TUI is a thin renderer. Same process by default — transport is a tokio mpsc
+  channel pair, no serialization. Out-of-process mode uses a Unix socket
+  (length-prefixed bincode); SSH `-L` forwards it for remote use.
+- **TUI tiers**: three traits, three jobs.
+  - **`Pane`** (`crates/tui/src/pane.rs`) — focusable region. Owns keymap,
+    border, handles keys, reacts to events. Three impls: `Sidebar`,
+    `RightPane`, `TerminalStack`. `App` holds them as concrete fields, no
+    `dyn Pane` indirection; focus is a single `PaneId`.
+  - **`Modal`** (`crates/tui/src/modal.rs`) — full-screen overlay. Stack-
+    based via `ModalStack`. Owns input while mounted; `tick()` polls async
+    work (e.g. `LoadingModal` waits on a future).
+  - **`Component`** (`crates/tui/src/component.rs`) — dumb sub-widget.
+    Pure `render(area, frame)` + optional `on_event`. No focus, no keymap.
+- **Configuration as `Flow`** (`crates/tui/src/flow.rs`): multi-step wizards
+  (first-run setup, "Add Linear", "Edit scopes") are `Flow` impls that chain
+  generic Modal primitives in `crates/tui/src/components/config/`
+  (`ChoiceModal<T>`, `InputModal`, `ConfirmModal`, `LoadingModal<T>`). The
+  App routes modal payloads back through `Flow::step()`; each flow accumulates
+  its own state and emits a typed `Output`.
+- **Event bus**: `tokio::sync::broadcast` inside the daemon. Providers
+  produce; subscribers (TUI clients, JSON API gateway) consume.
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
-- **Store**: `Store` trait with `SqliteStore` backend. Read/unread state persists across sessions.
-- **Terminal**: PTY reader on std::thread. vt100 Parser behind Mutex. 100ms tick redraws. Auto-resize.
+- **Store**: `Store` trait with `SqliteStore` backend at `~/.pilot/v2/state.db`.
+  Read/unread, snooze, and session metadata persist across launches.
+- **Terminal**: PTY reader on std::thread. ghostty-vt parser behind Mutex.
+  Daemon keeps a per-terminal ring buffer (64 KB) for replay on reconnect.
 - **Markdown**: PR descriptions rendered via `tui-markdown` (pulldown-cmark + syntect).
-- **Agent autonomy**: spawned Claude Code sessions drive the repo directly with `gh` and `git`. Pilot does not wrap these actions behind an MCP/tool-approval layer — the agent has the same tools it would in any other worktree.
+- **Structured agent runs**: Claude Code launched with `-p --input-format
+  stream-json --output-format stream-json` for non-terminal clients (Tauri,
+  iOS, JSON API). Raw JSON is preserved alongside normalized events.
+- **Agent autonomy**: spawned Claude Code sessions drive the repo directly
+  with `gh` and `git`. Pilot does not wrap these actions behind an
+  MCP/tool-approval layer — the agent has the same tools it would in any
+  other worktree.
 
 ### Adding a new provider
 
 1. Create `crates/foo-provider/` depending on `pilot-core` + `pilot-events` + `pilot-auth`
 2. Build a credential chain for auth
 3. Implement client returning `Vec<Task>` + poller emitting `Event`s
-4. Wire in `app.rs` alongside the GitHub poller
+4. Wire in `crates/server/` alongside the GitHub and Linear pollers
 
 ### Adding a new auth source
 
 Implement `CredentialProvider` trait with `name()` and `async resolve(scope) → Credential`.
-Add to the chain in `app.rs`.
+Add to the chain in `crates/server/`.
 
 ### Adding a new storage backend
 
 Implement `Store` trait (get/save/mark_read/list/delete session records).
-Swap in `app.rs` instead of `SqliteStore`.
+Swap in `crates/server/` instead of `SqliteStore`.
+
+### Adding a new agent
+
+Implement `Agent` in `crates/agents/` (id, spawn argv, resume argv, state
+detection, optional hook config, prompt injection). Register in
+`agents::registry()`. The `GenericCli` agent already handles arbitrary CLIs
+via YAML config without recompilation.
 
 ## Keybindings
 
-**Sidebar**: j/k navigate, Enter/c Claude Code, b shell, d detail, m mark read, Tab switch, q quit
-**Detail**: j/k scroll, c Claude, b shell, Tab/Esc back
-**Terminal**: all keys → PTY, Ctrl-] → sidebar, Ctrl-d → detail
+Each Pane (Sidebar / RightPane / TerminalStack) declares its own
+keymap; the bottom hint bar reads from the focused Pane's
+`Pane::keymap()`. Global keys live in `app::dispatch_key`.
+
+**Global**: `Tab` cycle panes, `?` help, `q q` quit, `Ctrl-Shift-D`
+detach focused pane to a new window, `Shift-arrows` resize splitters,
+mouse-click any pane to focus it, mouse-drag splitters to resize.
+
+**Sidebar**: `j/k` navigate, `Enter` open, `c` claude, `b` shell,
+`x` codex, `u` cursor, `m` mark read, `/` search.
+
+**RightPane (Activity)**: `j/k` scroll, `g/G` top/bottom.
+
+**TerminalStack**: all keys forward to the PTY. `]]` (configurable
+escape sequence) returns to the sidebar; `Ctrl-c` is forwarded as an
+interrupt.
 
 ## Conventions
 
-- `thiserror` for errors in library crates, `anyhow` in app
+- `thiserror` for errors in library crates, `anyhow` in the binary (`tui`)
 - No `unwrap()` in library crates
 - Core 4 libraries (core, auth, events, store) must not depend on each other
 - Provider crates depend on core + events + auth only
+- Every public function has a test; every TUI component has a render snapshot
+  (insta + ratatui `TestBackend`); every bug fix lands with a regression test

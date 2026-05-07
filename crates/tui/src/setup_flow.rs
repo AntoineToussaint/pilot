@@ -1,91 +1,47 @@
-//! Phased first-run setup flow.
+//! First-run / re-run setup as a state machine over realm modals.
 //!
-//! Owns the entire screen until done — the main TUI does not render
-//! while setup is in progress. Two phases today:
-//!
-//! 1. **Detecting**: probe each tool concurrently, stream results into
-//!    the UI with staggered reveal + a `MIN_VISIBLE_DURATION` floor so
-//!    even instant detections feel intentional. Inspired by the
-//!    Bubble Tea / charm-style installer aesthetic — braille spinners,
-//!    dim "Searching for…" → bold "Found X 1.0.42 ✓".
-//!
-//! 2. **Integrations**: every detected provider/agent shows up as a
-//!    toggleable row. Defaults to all enabled. Lets the user opt out
-//!    of, say, Linear even though `LINEAR_API_KEY` is set — useful if
-//!    the same machine has both work and personal Linear accounts and
-//!    only one matters here.
-//!
-//! The flow returns a `SetupOutcome` that the caller passes to
-//! `polling::spawn` so disabled integrations don't get polled.
+//! The runner detects available tools, asks the user to enable
+//! integrations (providers + agents), configure per-provider filters,
+//! and pick scopes (orgs + repos) for providers that support them.
+//! Each step is a generic `Choice` / `Loading` / `ErrorModal` from
+//! `crate::realm::components::*` — pilot-specific knowledge lives in
+//! `SetupRunner` which decides which step comes next.
 
-use crate::setup::{self, Category, SetupReport, ToolState, ToolStatus};
-use crossterm::event::{Event as CEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::{execute, terminal};
-use futures_util::StreamExt;
-use pilot_core::{KV_KEY_SETUP, PersistedSetup, ProviderConfig};
+use crate::realm::components::{
+    choice::Choice,
+    error::{Accent, ErrorModal},
+    loading::Loading,
+    splash::Splash,
+};
+use crate::realm::{Msg, UserEvent};
+use crate::setup::{self, Category, SetupReport, ToolStatus};
+use pilot_core::{KV_KEY_SETUP, PersistedSetup, ProviderConfig, ProviderError, Scope, ScopeSource};
 use pilot_store::Store;
-use ratatui::Terminal;
-use ratatui::prelude::*;
-use ratatui::widgets::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use tuirealm::component::AppComponent;
 
 /// Re-export for callers that want the canonical name.
 pub type ProviderFilter = ProviderConfig;
 
-// ── Animation tuning ────────────────────────────────────────────────
+// ── SetupOutcome ────────────────────────────────────────────────────────
 
-/// Braille "MiniDot" spinner. Same set Bubble Tea ships as default.
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// How fast the spinner cycles.
-const FRAME_INTERVAL: Duration = Duration::from_millis(80);
-
-/// Stagger between rows starting their search animation. Even-spaced
-/// reveal feels more deliberate than firing them all at once.
-const ROW_STAGGER: Duration = Duration::from_millis(120);
-
-/// Each row's spinner stays up at least this long before settling to
-/// found/missing. Without this, fast detections flash by faster than
-/// the eye registers, and the screen feels broken instead of brisk.
-const MIN_VISIBLE_DURATION: Duration = Duration::from_millis(350);
-
-/// After every row settles, hold for a beat before showing the prompt.
-const SETTLE_HOLD: Duration = Duration::from_millis(200);
-
-// ── Color palette (lipgloss-inspired) ───────────────────────────────
-
-const ACCENT: Color = Color::Cyan;
-const FOUND: Color = Color::Green;
-const MISSING: Color = Color::Yellow;
-const DIM: Color = Color::DarkGray;
-
-// ── Public surface ──────────────────────────────────────────────────
-
+/// The end product of a successful setup: which providers/agents are
+/// enabled, per-provider filter (roles + item types), per-provider
+/// scope selection. Persisted via `outcome_to_persisted` →
+/// `KV_KEY_SETUP`.
 #[derive(Debug, Clone)]
 pub struct SetupOutcome {
     pub report: SetupReport,
     pub enabled_providers: BTreeSet<String>,
     pub enabled_agents: BTreeSet<String>,
-    /// Per-provider filter: which item types and which user roles
-    /// the daemon should pull. Keyed by provider id ("github" /
-    /// "linear"). See `ProviderConfig::default_for` for the per-id
-    /// default sets.
     pub provider_filters: BTreeMap<String, ProviderConfig>,
-    /// Per-provider scope selection (org / repo / project ids). Empty
-    /// for a provider means "everything the token can see" — the
-    /// pre-picker default. The setup flow's `ScopePicker` step is
-    /// where the user narrows this; the polling pipeline drops tasks
-    /// that don't match (see `polling::filter_github_tasks`).
     pub selected_scopes: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl SetupOutcome {
-    /// Default: every detected tool is enabled and every provider
-    /// gets its provider-specific default filter. The user can opt
-    /// out / narrow before continuing.
+    /// Default outcome: every detected tool enabled, default filter
+    /// per provider, no scope narrowing yet.
     pub fn default_enabled(report: SetupReport) -> Self {
         let enabled_providers: BTreeSet<String> = report
             .tools
@@ -108,91 +64,13 @@ impl SetupOutcome {
             enabled_providers,
             enabled_agents,
             provider_filters,
-            // Empty by default: until the user visits the picker,
-            // we subscribe to everything the token can see.
             selected_scopes: BTreeMap::new(),
         }
     }
 }
 
-/// One row on a provider-config screen.
-#[derive(Debug, Clone)]
-pub struct ProviderOption {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub group: &'static str,
-}
+// ── Persistence ─────────────────────────────────────────────────────────
 
-/// What the user can configure for a given provider. Returned in
-/// render order. An empty Vec means the provider has no per-id
-/// options — its config screen still shows for symmetry but the user
-/// just hits Enter to continue.
-pub fn options_for_provider(provider_id: &str) -> Vec<ProviderOption> {
-    match provider_id {
-        "github" => vec![
-            ProviderOption {
-                key: "role.author",
-                label: "Author — I created it",
-                group: "ROLES",
-            },
-            ProviderOption {
-                key: "role.reviewer",
-                label: "Reviewer — review requested",
-                group: "ROLES",
-            },
-            ProviderOption {
-                key: "role.assignee",
-                label: "Assignee — assigned to me",
-                group: "ROLES",
-            },
-            ProviderOption {
-                key: "role.mentioned",
-                label: "Mentioned — @ me",
-                group: "ROLES",
-            },
-            ProviderOption {
-                key: "type.prs",
-                label: "Pull Requests",
-                group: "ITEM TYPES",
-            },
-            ProviderOption {
-                key: "type.issues",
-                label: "Issues",
-                group: "ITEM TYPES",
-            },
-        ],
-        "linear" => vec![
-            ProviderOption {
-                key: "role.author",
-                label: "Author — I created it",
-                group: "ROLES",
-            },
-            ProviderOption {
-                key: "role.assignee",
-                label: "Assignee — assigned to me",
-                group: "ROLES",
-            },
-            ProviderOption {
-                key: "role.subscriber",
-                label: "Subscriber",
-                group: "ROLES",
-            },
-            ProviderOption {
-                key: "role.mentioned",
-                label: "Mentioned — @ me",
-                group: "ROLES",
-            },
-        ],
-        _ => vec![],
-    }
-}
-
-// ── Persistence ─────────────────────────────────────────────────────
-
-/// Lift the slice of `SetupOutcome` that survives restarts. The
-/// detection `report` is intentionally NOT persisted — we re-detect
-/// on every launch so freshly-installed binaries surface in the UI
-/// without the user needing to clear anything.
 pub fn outcome_to_persisted(o: &SetupOutcome) -> PersistedSetup {
     PersistedSetup {
         enabled_providers: o.enabled_providers.clone(),
@@ -202,7 +80,6 @@ pub fn outcome_to_persisted(o: &SetupOutcome) -> PersistedSetup {
     }
 }
 
-/// Combine persisted choices with a fresh detection report.
 pub fn persisted_to_outcome(p: PersistedSetup, report: SetupReport) -> SetupOutcome {
     SetupOutcome {
         report,
@@ -213,10 +90,6 @@ pub fn persisted_to_outcome(p: PersistedSetup, report: SetupReport) -> SetupOutc
     }
 }
 
-/// Load the persisted setup from the v2 store's kv table. Returns
-/// `None` for missing key OR corrupt JSON OR backend failure — every
-/// failure mode is fixed by re-running the setup screen, so we
-/// degrade rather than crash startup.
 pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
     let raw = match store.get_kv(KV_KEY_SETUP) {
         Ok(Some(s)) => s,
@@ -226,8 +99,14 @@ pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
             return None;
         }
     };
-    match serde_json::from_str(&raw) {
-        Ok(p) => Some(p),
+    match serde_json::from_str::<PersistedSetup>(&raw) {
+        Ok(mut p) => {
+            // Project legacy `role.*` + `type.*` keys onto the new
+            // per-type schema (`pr.*` / `issue.*`). Idempotent — no-op
+            // for already-migrated configs.
+            p.migrate_legacy_keys();
+            Some(p)
+        }
         Err(e) => {
             tracing::warn!("setup config corrupt in kv: {e}; treating as missing");
             None
@@ -235,9 +114,6 @@ pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
     }
 }
 
-/// Save the persisted setup into the v2 store. Best-effort — failures
-/// are logged but don't propagate, since saving the preference is
-/// never worth blocking startup over.
 pub fn save_persisted(store: &dyn Store, p: &PersistedSetup) {
     let json = match serde_json::to_string(p) {
         Ok(s) => s,
@@ -251,1529 +127,942 @@ pub fn save_persisted(store: &dyn Store, p: &PersistedSetup) {
     }
 }
 
-/// Human-readable provider name for the title bar.
-fn provider_display(id: &str) -> &str {
-    match id {
-        "github" => "GitHub",
-        "linear" => "Linear",
-        other => other,
-    }
-}
+// ── Choices ─────────────────────────────────────────────────────────────
 
-/// Index of the next selectable scope. Now that the picker is
-/// org-only (every entry is selectable), this is a simple wrap.
-/// Kept as a function so future per-org repo drill-down can
-/// reintroduce header rows without restructuring.
-fn next_selectable(scopes: &[pilot_core::Scope], from: usize) -> Option<usize> {
-    let n = scopes.len();
-    (n > 0).then(|| (from + 1) % n)
-}
-
-fn previous_selectable(scopes: &[pilot_core::Scope], from: usize) -> Option<usize> {
-    let n = scopes.len();
-    (n > 0).then(|| (from + n - 1) % n)
-}
-
-// ── Alignment helpers ──────────────────────────────────────────
-//
-// Every aligned row renders through `aligned_row` so column starts
-// don't drift between Detection rows, ScopePicker rows, and any
-// future flat-list phase. Adding a new row variant only needs to
-// fill the slots; the widths are encoded once.
-
-/// Fixed column widths for the detection-and-picker layout. The two
-/// phases share these so the visual rhythm carries across.
-const COL_INDENT: usize = 2; // outer card padding
-const COL_CURSOR: usize = 2; // "▸ " or "  "
-const COL_CHECKBOX: usize = 4; // "[x] " or "    "
-const COL_MARK: usize = 2; // "✓ " / "✗ " / spinner
-const COL_NAME: usize = 14; // "Cursor Agent" + a couple spare chars
-
-/// Build a fully-padded row from per-column spans. Each input span
-/// is rendered into a fixed-width slot; missing values pad with
-/// spaces. `detail` consumes the rest of the row.
-fn aligned_row(
-    cursor: Option<Span<'static>>,
-    checkbox: Option<Span<'static>>,
-    mark: Option<Span<'static>>,
-    name: Span<'static>,
-    detail: Span<'static>,
-) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(" ".repeat(COL_INDENT)),
-        pad_to(cursor, COL_CURSOR),
-        pad_to(checkbox, COL_CHECKBOX),
-        pad_to(mark, COL_MARK),
-        pad_span(name, COL_NAME),
-        Span::raw(" "),
-        detail,
-    ])
-}
-
-/// Indent matching where `detail` starts in `aligned_row`. Used by
-/// secondary lines (install hints) so they line up under the detail
-/// column instead of floating off in space.
-fn detail_indent() -> String {
-    " ".repeat(COL_INDENT + COL_CURSOR + COL_CHECKBOX + COL_MARK + COL_NAME + 1)
-}
-
-/// Right-pad an arbitrary `Span` to `width` *visual columns* without
-/// losing its style. Counts chars rather than bytes — multibyte
-/// glyphs (▸, ✓, ✗) all render in 1 column, so `chars().count()`
-/// is the right proxy for visual width given the labels we use.
-/// CJK / emoji would need `unicode-width`, but nothing in the setup
-/// flow needs that today.
-fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
-    let visible = span.content.chars().count();
-    let pad = width.saturating_sub(visible);
-    if pad == 0 {
-        return span;
-    }
-    let padded = format!("{}{}", span.content, " ".repeat(pad));
-    Span::styled(padded, span.style)
-}
-
-/// Pad an optional Span to a fixed width. None → all spaces.
-fn pad_to(span: Option<Span<'static>>, width: usize) -> Span<'static> {
-    match span {
-        Some(s) => pad_span(s, width),
-        None => Span::raw(" ".repeat(width)),
-    }
-}
-
-/// Run the setup flow on the given Terminal. Returns the user's
-/// final SetupOutcome (with their integration toggles applied) or
-/// `None` if they hit Ctrl-C / quit.
-///
-/// `force_show` keeps the flow visible even when nothing's missing —
-/// `pilot --fresh` uses this so devs can review the first-run UX.
-pub async fn run(
-    term: &mut Terminal<crate::app::AppBackend>,
-    force_show: bool,
-) -> anyhow::Result<Option<SetupOutcome>> {
-    run_with_persistence(term, force_show, None).await
-}
-
-/// `run` plus a store to read+save the user's choices. On every
-/// launch:
-/// - if a persisted config exists AND `force_show` is false, the
-///   flow is skipped entirely and the persisted choices are merged
-///   with a fresh detection report.
-/// - otherwise the flow runs normally and the confirmed outcome is
-///   saved to the store so the next launch skips the screen.
-pub async fn run_with_persistence(
-    term: &mut Terminal<crate::app::AppBackend>,
-    force_show: bool,
-    store: Option<Arc<dyn Store>>,
-) -> anyhow::Result<Option<SetupOutcome>> {
-    run_with_persistence_and_scopes(term, force_show, store, Vec::new()).await
-}
-
-/// Full-fat entry point: takes per-provider `ScopeSource`s so the
-/// runner can drive the `ScopePicker` phase. Production wires
-/// `pilot_gh::GhScopes`; tests pass `MockScopeSource` so the picker
-/// works without real auth.
-pub async fn run_with_persistence_and_scopes(
-    term: &mut Terminal<crate::app::AppBackend>,
-    force_show: bool,
-    store: Option<Arc<dyn Store>>,
-    scope_sources: Vec<Box<dyn pilot_core::ScopeSource>>,
-) -> anyhow::Result<Option<SetupOutcome>> {
-    let report = setup::detect_all().await;
-
-    // Skip-fast: a persisted config means the user already chose, and
-    // unless they explicitly asked for the screen via --fresh we
-    // shouldn't re-prompt every launch.
-    if !force_show
-        && let Some(s) = &store
-        && let Some(persisted) = load_persisted(&**s)
-    {
-        return Ok(Some(persisted_to_outcome(persisted, report)));
-    }
-
-    // No saved config + nothing missing: also skip (first launch with
-    // a fully-green environment).
-    if !force_show && report.is_ready() && store.is_none() {
-        return Ok(Some(SetupOutcome::default_enabled(report)));
-    }
-
-    let mut flow = SetupFlow::new(report);
-    let mut events = EventStream::new();
-    let mut ticker = tokio::time::interval(FRAME_INTERVAL);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    // Async fetch state for the picker phases. When the flow
-    // enters a loading picker we spawn the matching
-    // `ScopeSource::list_scopes` / `list_children` future. The
-    // select loop polls it; on resolve we call the corresponding
-    // setter / fail method on the flow. Two distinct queues — orgs
-    // first, repos after — so the in-flight result tag carries
-    // whether it was an org list or a child list.
-    use std::pin::Pin;
-    enum ScopeFetchTarget {
-        Orgs(String),
-        Repos {
-            provider_id: String,
-            parent_id: String,
-        },
-    }
-    type ScopeFut = Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = (
-                        ScopeFetchTarget,
-                        Result<Vec<pilot_core::Scope>, pilot_core::ProviderError>,
-                    ),
-                > + Send,
-        >,
-    >;
-    let mut scope_fetch: Option<ScopeFut> = None;
-    let scope_sources_arc: std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>> =
-        std::sync::Arc::new(scope_sources);
-
-    loop {
-        flow.advance(Instant::now());
-
-        // Phase entered ScopePicker with no fetch in flight → start one.
-        if let Phase::ScopePicker {
-            provider_id,
-            loading: true,
-            ..
-        } = &flow.phase
-            && scope_fetch.is_none()
-        {
-            let target_id = provider_id.clone();
-            let sources = scope_sources_arc.clone();
-            scope_fetch = Some(Box::pin(async move {
-                let result = match sources.iter().find(|s| s.provider_id() == target_id) {
-                    Some(src) => src.list_scopes().await,
-                    None => Ok(Vec::new()), // no source registered → "all repos"
-                };
-                (ScopeFetchTarget::Orgs(target_id), result)
-            }));
-        }
-
-        // Phase entered ScopePickerRepos with no fetch in flight → start one.
-        if let Phase::ScopePickerRepos {
-            provider_id,
-            parent_id,
-            loading: true,
-            ..
-        } = &flow.phase
-            && scope_fetch.is_none()
-        {
-            let target_provider = provider_id.clone();
-            let target_parent = parent_id.clone();
-            let sources = scope_sources_arc.clone();
-            scope_fetch = Some(Box::pin(async move {
-                let result = match sources.iter().find(|s| s.provider_id() == target_provider) {
-                    Some(src) => src.list_children(&target_parent).await,
-                    None => Ok(Vec::new()),
-                };
-                (
-                    ScopeFetchTarget::Repos {
-                        provider_id: target_provider,
-                        parent_id: target_parent,
-                    },
-                    result,
-                )
-            }));
-        }
-
-        term.draw(|frame| draw(frame, &flow))?;
-        if flow.is_done() {
-            let outcome = flow.into_outcome();
-            if let Some(s) = &store {
-                save_persisted(&**s, &outcome_to_persisted(&outcome));
-            }
-            return Ok(Some(outcome));
-        }
-
-        tokio::select! {
-            _ = ticker.tick() => {}
-            ev = events.next() => {
-                let Some(Ok(ev)) = ev else { break };
-                if let CEvent::Key(key) = ev
-                    && let Some(action) = handle_key(key, &flow)
-                {
-                    match action {
-                        Dispatch::Quit => return Ok(None),
-                        Dispatch::Apply(act) => flow.apply(act),
-                    }
-                }
-            }
-            // Pending scope fetch resolved — feed the result back
-            // into the flow. `else` arm bypasses this branch when
-            // `scope_fetch` is None (most of the setup lifetime).
-            Some((target, result)) = async {
-                match &mut scope_fetch {
-                    Some(fut) => Some(fut.await),
-                    None => None,
-                }
-            } => {
-                scope_fetch = None;
-                match (target, result) {
-                    (ScopeFetchTarget::Orgs(provider_id), Ok(scopes)) => {
-                        flow.set_scopes(&provider_id, scopes);
-                    }
-                    (ScopeFetchTarget::Orgs(provider_id), Err(e)) => {
-                        tracing::warn!(
-                            provider = %provider_id,
-                            error = %e,
-                            "org list fetch failed; subscribing to all by default"
-                        );
-                        flow.fail_scopes(&provider_id);
-                    }
-                    (
-                        ScopeFetchTarget::Repos { provider_id, parent_id },
-                        Ok(scopes),
-                    ) => {
-                        flow.set_repo_scopes(&provider_id, &parent_id, scopes);
-                    }
-                    (
-                        ScopeFetchTarget::Repos { provider_id, parent_id },
-                        Err(e),
-                    ) => {
-                        tracing::warn!(
-                            provider = %provider_id,
-                            parent = %parent_id,
-                            error = %e,
-                            "repo list fetch failed; keeping org-level scope"
-                        );
-                        flow.fail_repo_scopes(&provider_id, &parent_id);
-                    }
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Convenience entry point: handles raw mode + alt screen so callers
-/// (the binary's `app::run`) don't have to think about it. After this
-/// returns, the terminal is back to its prior state regardless of how
-/// the flow exited.
-pub async fn run_with_terminal_setup(force_show: bool) -> anyhow::Result<Option<SetupOutcome>> {
-    terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut term = Terminal::new(backend)?;
-    let result = run(&mut term, force_show).await;
-    let _ = terminal::disable_raw_mode();
-    let _ = execute!(term.backend_mut(), terminal::LeaveAlternateScreen);
-    let _ = term.show_cursor();
-    result
-}
-
-// ── State machine ───────────────────────────────────────────────────
-
-#[derive(Debug)]
-pub struct SetupFlow {
-    pub phase: Phase,
-    pub started_at: Instant,
-    pub rows: Vec<Row>,
-    /// Which rows the user has toggled OFF in the integrations phase.
-    /// Inverted-set storage keeps the default ("everything detected
-    /// gets enabled") expressible without iterating `rows` to seed it.
-    pub disabled: BTreeSet<String>,
-    pub cursor: usize,
-    pub frame: u64,
-    pub all_settled_at: Option<Instant>,
-    /// Provider ids still waiting for their config phase. After
-    /// Integrations confirms, this is seeded with every enabled
-    /// provider; each `ProviderConfig` confirm pops the head onto
-    /// `provider_filters` and either advances to the next id or
-    /// to Done if empty.
-    pub pending_providers: VecDeque<String>,
-    /// Per-provider filter state, built up as the user moves through
-    /// each provider's config phase. Defaults are seeded as soon as a
-    /// provider enters the queue.
-    pub provider_filters: BTreeMap<String, ProviderFilter>,
-    /// Per-provider scope selection, populated by the picker phase.
-    /// Empty = "all scopes" (legacy default; valid for providers
-    /// whose runner didn't supply a `ScopeSource`).
-    pub selected_scopes: BTreeMap<String, BTreeSet<String>>,
-    /// Provider ids still waiting for a `ScopePicker` phase. Seeded
-    /// on entry to the picker queue (after the last ProviderConfig
-    /// confirms); each picker confirm pops the head and the runner
-    /// kicks off the next fetch.
-    pub pending_pickers: VecDeque<String>,
-    /// Pending per-org repo drill-downs. Seeded when a `ScopePicker`
-    /// confirms with one or more orgs selected: one entry per
-    /// (provider_id, parent_id, parent_label). Each
-    /// `ScopePickerRepos` confirm pops the head.
-    pub pending_repo_pickers: VecDeque<(String, String, String)>,
-}
-
-/// Phases of the setup flow. Each phase that targets a specific
-/// provider carries the `provider_id` so the renderer / dispatcher
-/// don't need a separate "current provider" field.
-///
-/// Order:
-///
-/// ```text
-///   Detecting → Integrations → ProviderConfig*  → ScopePicker* → ScopePickerRepos* → Done
-///                              (one per           (one per         (one per selected
-///                               provider)          provider with    org from each
-///                                                  a ScopeSource)   org picker)
-/// ```
-///
-/// Each `*` queue is skipped when there's nothing to drive it:
-/// `ScopePicker` skips for providers with ≤ 1 visible scope or no
-/// `ScopeSource`; `ScopePickerRepos` skips for orgs that the runner
-/// can't resolve children for.
+/// One detected tool — payload for both the provider-picker and
+/// agent-picker. The `Category` is set at fixture time; the picker
+/// filters by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Phase {
-    Detecting,
-    Integrations,
-    ProviderConfig {
-        provider_id: String,
-    },
-    /// Org-level picker. `loading=true` while the runner's
-    /// `ScopeSource::list_scopes` future is in flight; once it
-    /// resolves, `scopes` is populated and the user can toggle.
-    ScopePicker {
-        provider_id: String,
-        loading: bool,
-        scopes: Vec<pilot_core::Scope>,
-        selected: BTreeSet<String>,
-        cursor: usize,
-    },
-    /// Per-org repo picker. Drilling into one parent (org) and
-    /// listing its repos. Empty selection on confirm keeps the
-    /// org-level scope; non-empty replaces it with the chosen
-    /// repo ids.
-    ScopePickerRepos {
-        provider_id: String,
-        parent_id: String,
-        parent_label: String,
-        loading: bool,
-        scopes: Vec<pilot_core::Scope>,
-        selected: BTreeSet<String>,
-        cursor: usize,
-    },
-    Done,
+pub struct ToolChoice {
+    pub id: String,
+    pub display_name: String,
+    pub category: Category,
+    /// Whether detection succeeded. Missing tools still appear in the
+    /// picker (greyed out + un-tickable) so the user knows what the
+    /// install hint is for.
+    pub found: bool,
+    /// Short hint shown after the name. For Found tools: the
+    /// authenticated username / version. For Missing tools: the
+    /// friendly install-hint label.
+    pub detail: String,
 }
 
-impl Phase {
-    pub fn is_detecting(&self) -> bool {
-        matches!(self, Phase::Detecting)
-    }
-    pub fn is_integrations(&self) -> bool {
-        matches!(self, Phase::Integrations)
-    }
-    pub fn current_provider(&self) -> Option<&str> {
-        match self {
-            Phase::ProviderConfig { provider_id } => Some(provider_id.as_str()),
-            Phase::ScopePicker { provider_id, .. } => Some(provider_id.as_str()),
-            Phase::ScopePickerRepos { provider_id, .. } => Some(provider_id.as_str()),
-            _ => None,
+impl ToolChoice {
+    fn from_tool(t: &ToolStatus) -> Self {
+        let (found, detail) = match &t.state {
+            crate::setup::ToolState::Found { detail } => (true, detail.clone()),
+            crate::setup::ToolState::Missing { kind, .. } => (false, kind.label().to_string()),
+        };
+        Self {
+            id: t.id.to_string(),
+            display_name: t.display_name.to_string(),
+            category: t.category,
+            found,
+            detail,
         }
     }
+
+    fn label(&self) -> String {
+        if self.detail.is_empty() {
+            self.display_name.clone()
+        } else {
+            format!("{}  ·  {}", self.display_name, self.detail)
+        }
+    }
+}
+
+/// One option in a per-provider filter modal — "include PRs", "include
+/// reviewer role", etc. Maps to a `ProviderConfig` field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterOption {
+    pub key: String,
+    pub label: String,
+}
+
+/// Human-readable provider name for titles + prompts.
+fn provider_display(id: &str) -> String {
+    match id {
+        "github" => "GitHub".into(),
+        "linear" => "Linear".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Provider-specific filter options. GitHub uses a per-type schema
+/// (`pr.*` / `issue.*`); Linear is flat.
+fn filter_options(provider_id: &str) -> Vec<FilterOption> {
+    match provider_id {
+        "github" => vec![
+            FilterOption { key: "pr.author".into(), label: "I authored".into() },
+            FilterOption { key: "pr.reviewer".into(), label: "Awaiting my review".into() },
+            FilterOption { key: "pr.assignee".into(), label: "Assigned to me".into() },
+            FilterOption { key: "pr.mentioned".into(), label: "Mentioned me".into() },
+            FilterOption { key: "issue.author".into(), label: "I authored".into() },
+            FilterOption { key: "issue.assignee".into(), label: "Assigned to me".into() },
+            FilterOption { key: "issue.mentioned".into(), label: "Mentioned me".into() },
+        ],
+        "linear" => vec![
+            FilterOption { key: "role.author".into(), label: "I created".into() },
+            FilterOption { key: "role.assignee".into(), label: "Assigned to me".into() },
+            FilterOption { key: "role.subscriber".into(), label: "Subscribed to".into() },
+            FilterOption { key: "role.mentioned".into(), label: "Mentioned me".into() },
+        ],
+        _ => vec![],
+    }
+}
+
+fn filter_keys_set(c: &ProviderConfig) -> BTreeSet<String> {
+    c.enabled_keys.clone()
+}
+
+fn filter_from_keys(keys: &BTreeSet<String>) -> ProviderConfig {
+    ProviderConfig { enabled_keys: keys.clone() }
+}
+
+// ── Async entry shim ────────────────────────────────────────────────────
+
+/// Run detection — convenience wrapper around `setup::detect_all` that
+/// `run_embedded_realm` calls before constructing `SetupRunner`.
+pub async fn detect() -> SetupReport {
+    setup::detect_all().await
+}
+
+// ── SetupRunner ─────────────────────────────────────────────────────────
+
+/// What the runner wants the orchestrator to do next.
+pub enum RunnerStep {
+    /// Mount this component as the next modal step.
+    Next(Box<dyn AppComponent<Msg, UserEvent>>),
+    /// Setup completed; fire on_complete with this outcome.
+    Finish(SetupOutcome),
+    /// User cancelled. Drop the wizard, return to defaults.
+    Cancel,
+    /// No-op / stay on the current modal.
+    Stay,
 }
 
 #[derive(Debug, Clone)]
-pub struct Row {
-    pub tool: ToolStatus,
-    pub revealed_at: Instant,
-    pub settled_at: Option<Instant>,
+enum ExpectingStep {
+    /// Splash card. Already mounted at runner-construction time;
+    /// SplashConfirmed advances to Providers.
+    Splash,
+    /// Provider multi-select.
+    Providers,
+    /// `Loading` running fresh `detect_all()` after user hit `r`.
+    ProvidersRefresh,
+    /// Agent multi-select.
+    Agents,
+    /// `Loading` re-detecting after `r` on Agents.
+    AgentsRefresh,
+    /// Filter step for `provider_id`.
+    FilterFor(String),
+    /// Scope-loading step for `provider_id`.
+    ScopeLoadFor(String),
+    /// Scope-pick step for `provider_id`.
+    ScopePickFor(String),
+    /// Repo-loading step for `(provider_id, parent_id, parent_label)`.
+    RepoLoadFor(String, String, String),
+    /// Repo-pick step for `(provider_id, parent_id)`.
+    RepoPickFor(String, String),
+    /// Generic info / error modal — dismiss returns to next pending
+    /// step. Carries the step the runner was on when the error fired
+    /// so dismissal can resume correctly.
+    InfoFor(Box<ExpectingStep>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    /// Move cursor in the integrations list.
-    CursorUp,
-    CursorDown,
-    /// Toggle the tool under the cursor.
-    Toggle,
-    /// Confirm + advance phase (Detecting→Integrations or Integrations→Done).
-    Confirm,
+/// Track items behind the active `Choice` modal — `Choice` emits
+/// indices and we map them back here.
+enum CurrentChoice {
+    Providers(Vec<ToolChoice>),
+    Agents(Vec<ToolChoice>),
+    Filter(Vec<FilterOption>),
+    ScopePick(Vec<Scope>),
+    RepoPick(Vec<Scope>),
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Dispatch {
-    Apply(Action),
-    Quit,
+/// First-run / `--fresh` setup. Owns the state machine; the model
+/// routes `Msg::SplashConfirmed` / `Msg::Choice*` / `Msg::LoadingResolved`
+/// / `Msg::ModalDismissed` here when it's active.
+pub struct SetupRunner {
+    accumulator: SetupOutcome,
+    sources: Arc<Vec<Box<dyn ScopeSource>>>,
+    pending_filters: VecDeque<String>,
+    pending_scopes: VecDeque<String>,
+    pending_repo_pickers: VecDeque<(String, String, String)>,
+    expecting: ExpectingStep,
+    current_choice: Option<CurrentChoice>,
 }
 
-impl SetupFlow {
-    pub fn new(report: SetupReport) -> Self {
-        let started_at = Instant::now();
-        let rows = report
-            .tools
-            .iter()
-            .enumerate()
-            .map(|(i, tool)| Row {
-                tool: tool.clone(),
-                revealed_at: started_at + ROW_STAGGER * i as u32,
-                settled_at: None,
-            })
-            .collect();
+/// Entry point for the in-session "Settings" palette. Each variant
+/// jumps directly to the relevant wizard step pre-seeded with the
+/// current persisted setup, runs only that fragment of the flow,
+/// and finishes — the orchestrator then writes the merged result
+/// back to the store.
+#[derive(Debug, Clone)]
+pub enum PartialEntry {
+    /// Re-show the providers picker. Filter + scope steps run only
+    /// for newly-enabled providers; existing ones keep their config.
+    EditProviders,
+    /// Re-show the agents picker only.
+    EditAgents,
+    /// Edit role/type filters for a specific provider.
+    EditFilter(String),
+    /// Re-show the scope picker for a specific provider so the user
+    /// can add (or remove) orgs / repos. Existing selections come
+    /// pre-checked.
+    EditScopes(String),
+}
+
+impl SetupRunner {
+    /// Build a runner rooted at `report` (detection already done).
+    pub fn new(report: SetupReport, sources: Arc<Vec<Box<dyn ScopeSource>>>) -> Self {
         Self {
-            phase: Phase::Detecting,
-            started_at,
-            rows,
-            disabled: BTreeSet::new(),
-            cursor: 0,
-            frame: 0,
-            all_settled_at: None,
-            pending_providers: VecDeque::new(),
-            provider_filters: BTreeMap::new(),
-            selected_scopes: BTreeMap::new(),
-            pending_pickers: VecDeque::new(),
+            accumulator: SetupOutcome::default_enabled(report),
+            sources,
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::Splash,
+            current_choice: None,
         }
     }
 
-    /// Should the spinner have advanced its frame on `now`?
-    fn frame_for(&self, now: Instant) -> u64 {
-        (now.duration_since(self.started_at).as_millis() / FRAME_INTERVAL.as_millis()) as u64
-    }
-
-    pub fn advance(&mut self, now: Instant) {
-        self.frame = self.frame_for(now);
-        if self.phase != Phase::Detecting {
-            return;
-        }
-
-        // Pin each row's settle time to *exactly* `revealed_at +
-        // MIN_VISIBLE_DURATION` rather than `now`. That way calling
-        // advance() once with a very-late `now` still produces the
-        // same final state as calling it many times with monotonic
-        // intermediate `now`s — the timing is content-derived, not
-        // tick-derived.
-        for row in self.rows.iter_mut() {
-            if row.settled_at.is_some() {
-                continue;
-            }
-            let eligible = row.revealed_at + MIN_VISIBLE_DURATION;
-            if now >= eligible {
-                row.settled_at = Some(eligible);
-            }
-        }
-
-        let all_settled = !self.rows.is_empty() && self.rows.iter().all(|r| r.settled_at.is_some());
-        if all_settled {
-            // The "all-settled" instant is the latest row's settle —
-            // not when we observed it, so the SETTLE_HOLD timing is
-            // stable across tick frequencies.
-            let last = self
-                .rows
-                .iter()
-                .filter_map(|r| r.settled_at)
-                .max()
-                .unwrap_or(now);
-            self.all_settled_at = Some(last);
-            if now.duration_since(last) >= SETTLE_HOLD {
-                self.advance_phase();
-            }
-        }
-    }
-
-    fn advance_phase(&mut self) {
-        self.phase = match &self.phase {
-            Phase::Detecting => {
-                self.cursor = self.first_selectable_row().unwrap_or(0);
-                Phase::Integrations
-            }
-            Phase::Integrations => {
-                // Seed the provider-config queue from the user's
-                // post-Integrations enabled set, in render order.
-                self.pending_providers.clear();
-                self.pending_pickers.clear();
-                for row in &self.rows {
-                    if row.tool.category == Category::Provider
-                        && row.tool.state.is_found()
-                        && !self.disabled.contains(row.tool.id)
-                    {
-                        let id = row.tool.id.to_string();
-                        self.provider_filters
-                            .entry(id.clone())
-                            .or_insert_with(|| ProviderFilter::default_for(&id));
-                        self.pending_providers.push_back(id.clone());
-                        // Every enabled provider gets queued for a
-                        // ScopePicker phase. The runner skips it for
-                        // providers without a `ScopeSource` (e.g.
-                        // tests) by short-circuiting in
-                        // `next_phase_after_provider_config`.
-                        self.pending_pickers.push_back(id);
-                    }
-                }
-                self.next_provider_phase()
-            }
-            Phase::ProviderConfig { .. } => self.next_provider_phase(),
-            Phase::ScopePicker { .. } => self.next_picker_phase(),
-            Phase::ScopePickerRepos { .. } => self.next_repo_picker_phase(),
-            Phase::Done => Phase::Done,
+    /// Build a runner pre-seeded with the user's existing persisted
+    /// setup, jumping directly to a specific wizard step. Used by
+    /// the in-session Settings palette ("Add a repo" / "Edit
+    /// agents" / etc.) to avoid re-walking the full wizard. Returns
+    /// the runner + the first `RunnerStep` to mount.
+    pub fn at_partial(
+        outcome: SetupOutcome,
+        sources: Arc<Vec<Box<dyn ScopeSource>>>,
+        entry: PartialEntry,
+    ) -> (Self, RunnerStep) {
+        let mut runner = Self {
+            accumulator: outcome,
+            sources,
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::Splash,
+            current_choice: None,
         };
+        let step = match entry {
+            PartialEntry::EditProviders => {
+                let modal = runner.build_providers_modal();
+                runner.expecting = ExpectingStep::Providers;
+                RunnerStep::Next(modal)
+            }
+            PartialEntry::EditAgents => {
+                let modal = runner.build_agents_modal();
+                runner.expecting = ExpectingStep::Agents;
+                RunnerStep::Next(modal)
+            }
+            PartialEntry::EditFilter(provider_id) => {
+                let modal = runner.build_filter_modal(&provider_id);
+                runner.expecting = ExpectingStep::FilterFor(provider_id);
+                RunnerStep::Next(modal)
+            }
+            PartialEntry::EditScopes(provider_id) => {
+                let modal = runner.build_scope_load_modal(provider_id.clone());
+                runner.expecting = ExpectingStep::ScopeLoadFor(provider_id);
+                RunnerStep::Next(modal)
+            }
+        };
+        (runner, step)
     }
 
-    /// Pop the next pending provider into a `ProviderConfig` phase,
-    /// or move on to the picker queue if no more providers need
-    /// configuration.
-    fn next_provider_phase(&mut self) -> Phase {
-        if let Some(provider_id) = self.pending_providers.pop_front() {
-            self.cursor = 0;
-            Phase::ProviderConfig { provider_id }
-        } else {
-            // ProviderConfigs exhausted; hand off to the picker queue.
-            self.next_picker_phase()
-        }
+    // ── Entry points called by Model::update ──────────────────────────
+
+    /// Splash already mounted at construction — `SplashConfirmed`
+    /// advances to Providers.
+    pub fn step_splash_confirmed(&mut self) -> RunnerStep {
+        let modal = self.build_providers_modal();
+        self.expecting = ExpectingStep::Providers;
+        RunnerStep::Next(modal)
     }
 
-    /// Pop the next picker phase. **Repo pickers drain before org
-    /// pickers** so the user picks an org → immediately drills into
-    /// its repos → then moves on to the next org / provider. Without
-    /// this ordering all orgs would resolve before any repos, which
-    /// breaks the mental flow.
-    ///
-    /// Queue priority on each call:
-    ///   1. pending_repo_pickers (drilling into a just-picked org)
-    ///   2. pending_pickers (next provider's orgs)
-    ///   3. Done
-    fn next_picker_phase(&mut self) -> Phase {
-        if let Some((provider_id, parent_id, parent_label)) = self.pending_repo_pickers.pop_front()
-        {
-            self.cursor = 0;
-            return Phase::ScopePickerRepos {
-                provider_id,
-                parent_id,
-                parent_label,
-                loading: true,
-                scopes: Vec::new(),
-                selected: BTreeSet::new(),
-                cursor: 0,
-            };
-        }
-        if let Some(provider_id) = self.pending_pickers.pop_front() {
-            self.cursor = 0;
-            return Phase::ScopePicker {
-                provider_id,
-                loading: true,
-                scopes: Vec::new(),
-                selected: BTreeSet::new(),
-                cursor: 0,
-            };
-        }
-        Phase::Done
-    }
-
-    fn next_repo_picker_phase(&mut self) -> Phase {
-        // Repo-picker confirmations route through the unified
-        // `next_picker_phase` so the priority rules apply uniformly.
-        self.next_picker_phase()
-    }
-
-    /// Runner-driven: populate a `ScopePicker` with the fetched
-    /// scopes.
-    ///
-    /// - 0 entries → auto-skip (no choice; advance with no selection).
-    /// - 1 entry  → auto-select THAT entry, persist it, queue the
-    ///   repo drill-down for it, advance. The user gets the same
-    ///   end-state as if they'd hit Space + Enter without the click.
-    /// - 2+       → render the picker, wait for user input.
-    pub fn set_scopes(&mut self, provider_id: &str, scopes: Vec<pilot_core::Scope>) {
-        if let Phase::ScopePicker {
-            provider_id: pid,
-            loading,
-            scopes: dst,
-            cursor,
-            ..
-        } = &mut self.phase
-            && pid == provider_id
-        {
-            *loading = false;
-            *dst = scopes;
-            *cursor = 0;
-
-            match dst.len() {
-                0 => {
-                    self.advance_phase();
-                }
-                1 => {
-                    // Auto-select + queue the repo drill-down.
-                    let only = dst[0].clone();
-                    let pid_owned = provider_id.to_string();
-                    self.selected_scopes
-                        .entry(pid_owned.clone())
-                        .or_default()
-                        .insert(only.id.clone());
-                    self.pending_repo_pickers.push_back((
-                        pid_owned,
-                        only.id.clone(),
-                        only.label.clone(),
-                    ));
-                    self.advance_phase();
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Mark a picker as failed (network error, missing token, etc.).
-    /// The flow moves on without persisting any selection — same
-    /// effect as the user choosing "all repos".
-    pub fn fail_scopes(&mut self, provider_id: &str) {
-        if matches!(&self.phase, Phase::ScopePicker { provider_id: pid, .. } if pid == provider_id)
-        {
-            self.advance_phase();
-        }
-    }
-
-    /// Runner-driven: populate a `ScopePickerRepos` with the
-    /// fetched repos for one parent. Same auto-skip semantics as
-    /// `set_scopes` (≤ 1 child = no choice to make).
-    pub fn set_repo_scopes(
-        &mut self,
-        provider_id: &str,
-        parent_id: &str,
-        scopes: Vec<pilot_core::Scope>,
-    ) {
-        if let Phase::ScopePickerRepos {
-            provider_id: pid,
-            parent_id: par,
-            loading,
-            scopes: dst,
-            cursor,
-            ..
-        } = &mut self.phase
-            && pid == provider_id
-            && par == parent_id
-        {
-            *loading = false;
-            *dst = scopes;
-            *cursor = 0;
-            if dst.len() <= 1 {
-                self.advance_phase();
-            }
-        }
-    }
-
-    /// Mark a repo picker as failed — keep the org-level scope
-    /// (the parent stays in `selected_scopes` from the previous
-    /// org-picker step) and move on to the next queued picker.
-    pub fn fail_repo_scopes(&mut self, provider_id: &str, parent_id: &str) {
-        if matches!(
-            &self.phase,
-            Phase::ScopePickerRepos {
-                provider_id: pid,
-                parent_id: par,
-                ..
-            } if pid == provider_id && par == parent_id
-        ) {
-            self.advance_phase();
-        }
-    }
-
-    pub fn apply(&mut self, action: Action) {
-        match (self.phase.clone(), action) {
-            (Phase::Detecting, Action::Confirm) => {
-                // Confirm during detection is a "skip animation" gesture.
-                let now = Instant::now();
-                for row in self.rows.iter_mut() {
-                    row.settled_at.get_or_insert(now);
-                }
-                self.all_settled_at = Some(now - SETTLE_HOLD);
-                self.advance_phase();
-            }
-            (Phase::Integrations, Action::CursorUp) => {
-                let n = self.selectable_count();
-                if n > 0 {
-                    let pos = self.cursor_in_selectables();
-                    let next = (pos + n - 1) % n;
-                    self.cursor = self.selectable_indices()[next];
-                }
-            }
-            (Phase::Integrations, Action::CursorDown) => {
-                let n = self.selectable_count();
-                if n > 0 {
-                    let pos = self.cursor_in_selectables();
-                    let next = (pos + 1) % n;
-                    self.cursor = self.selectable_indices()[next];
-                }
-            }
-            (Phase::Integrations, Action::Toggle) => {
-                if let Some(row) = self.rows.get(self.cursor)
-                    && row.tool.state.is_found()
-                {
-                    let id = row.tool.id.to_string();
-                    if !self.disabled.remove(&id) {
-                        self.disabled.insert(id);
-                    }
-                }
-            }
-            (Phase::Integrations, Action::Confirm) => self.advance_phase(),
-            (Phase::ProviderConfig { provider_id }, Action::CursorUp) => {
-                let n = options_for_provider(&provider_id).len();
-                if n > 0 {
-                    self.cursor = (self.cursor + n - 1) % n;
-                }
-            }
-            (Phase::ProviderConfig { provider_id }, Action::CursorDown) => {
-                let n = options_for_provider(&provider_id).len();
-                if n > 0 {
-                    self.cursor = (self.cursor + 1) % n;
-                }
-            }
-            (Phase::ProviderConfig { provider_id }, Action::Toggle) => {
-                let opts = options_for_provider(&provider_id);
-                if let Some(opt) = opts.get(self.cursor) {
-                    let filter = self
+    /// User picked items in the active Choice.
+    pub fn step_choice_picked(&mut self, picks: Vec<usize>) -> RunnerStep {
+        let current = match self.current_choice.take() {
+            Some(c) => c,
+            None => return RunnerStep::Cancel,
+        };
+        match (self.expecting.clone(), current) {
+            (ExpectingStep::Providers, CurrentChoice::Providers(items)) => {
+                let chosen: Vec<ToolChoice> = picks
+                    .into_iter()
+                    .filter_map(|i| items.get(i).cloned())
+                    .collect();
+                self.accumulator.enabled_providers.clear();
+                self.pending_filters.clear();
+                self.pending_scopes.clear();
+                for choice in chosen {
+                    self.accumulator
                         .provider_filters
-                        .entry(provider_id.clone())
-                        .or_insert_with(|| ProviderFilter::default_for(&provider_id));
-                    filter.toggle(opt.key);
+                        .entry(choice.id.clone())
+                        .or_insert_with(|| ProviderFilter::default_for(&choice.id));
+                    self.accumulator.enabled_providers.insert(choice.id.clone());
+                    self.pending_filters.push_back(choice.id.clone());
+                    self.pending_scopes.push_back(choice.id);
                 }
+                let modal = self.build_agents_modal();
+                self.expecting = ExpectingStep::Agents;
+                RunnerStep::Next(modal)
             }
-            (Phase::ProviderConfig { .. }, Action::Confirm) => self.advance_phase(),
-
-            // ── ScopePicker ─────────────────────────────────────
-            (Phase::ScopePicker { loading: true, .. }, _) => {
-                // Block all input until the runner finishes the
-                // fetch and calls set_scopes. Avoids accidental
-                // "confirm with empty selection" when the user
-                // hammers Enter during a slow API call.
-            }
-            (
-                Phase::ScopePicker {
-                    scopes,
-                    cursor: pcur,
-                    ..
-                },
-                Action::CursorUp,
-            ) => {
-                if let Some(prev) = previous_selectable(&scopes, pcur)
-                    && let Phase::ScopePicker { cursor, .. } = &mut self.phase
-                {
-                    *cursor = prev;
+            (ExpectingStep::Agents, CurrentChoice::Agents(items)) => {
+                let chosen: Vec<ToolChoice> = picks
+                    .into_iter()
+                    .filter_map(|i| items.get(i).cloned())
+                    .collect();
+                self.accumulator.enabled_agents.clear();
+                for choice in chosen {
+                    self.accumulator.enabled_agents.insert(choice.id);
                 }
+                self.next_filter_step()
             }
-            (
-                Phase::ScopePicker {
-                    scopes,
-                    cursor: pcur,
-                    ..
-                },
-                Action::CursorDown,
-            ) => {
-                if let Some(next) = next_selectable(&scopes, pcur)
-                    && let Phase::ScopePicker { cursor, .. } = &mut self.phase
-                {
-                    *cursor = next;
-                }
+            (ExpectingStep::FilterFor(provider_id), CurrentChoice::Filter(items)) => {
+                let picked: Vec<FilterOption> = picks
+                    .into_iter()
+                    .filter_map(|i| items.get(i).cloned())
+                    .collect();
+                let keys: BTreeSet<String> = picked.into_iter().map(|f| f.key).collect();
+                self.accumulator
+                    .provider_filters
+                    .insert(provider_id, filter_from_keys(&keys));
+                self.next_filter_step()
             }
-            (
-                Phase::ScopePicker {
-                    scopes,
-                    cursor: pcur,
-                    ..
-                },
-                Action::Toggle,
-            ) => {
-                if let Some(scope) = scopes.get(pcur)
-                    && let Phase::ScopePicker { selected, .. } = &mut self.phase
-                    && !selected.remove(&scope.id)
-                {
-                    selected.insert(scope.id.clone());
-                }
-            }
-            (
-                Phase::ScopePicker {
-                    provider_id,
-                    scopes,
-                    selected,
-                    ..
-                },
-                Action::Confirm,
-            ) => {
-                if !selected.is_empty() {
-                    self.selected_scopes
-                        .insert(provider_id.clone(), selected.clone());
-                    // Queue a per-org repo drill-down for each
-                    // selected org so the user can narrow further
-                    // (or skip with Enter to keep org-level scope).
-                    for scope in scopes.iter().filter(|s| selected.contains(&s.id)) {
+            (ExpectingStep::ScopePickFor(provider_id), CurrentChoice::ScopePick(items)) => {
+                let picked: Vec<Scope> = picks
+                    .into_iter()
+                    .filter_map(|i| items.get(i).cloned())
+                    .collect();
+                if !picked.is_empty() {
+                    let ids: BTreeSet<String> = picked.iter().map(|s| s.id.clone()).collect();
+                    self.accumulator
+                        .selected_scopes
+                        .insert(provider_id.clone(), ids);
+                    for s in picked {
                         self.pending_repo_pickers.push_back((
                             provider_id.clone(),
-                            scope.id.clone(),
-                            scope.label.clone(),
+                            s.id.clone(),
+                            s.label.clone(),
                         ));
                     }
                 }
-                self.advance_phase();
-            }
-
-            // ── ScopePickerRepos ────────────────────────────────
-            (Phase::ScopePickerRepos { loading: true, .. }, _) => {
-                // Block input until the runner finishes the fetch.
+                self.next_scope_step()
             }
             (
-                Phase::ScopePickerRepos {
-                    scopes,
-                    cursor: pcur,
-                    ..
-                },
-                Action::CursorUp,
+                ExpectingStep::RepoPickFor(provider_id, parent_id),
+                CurrentChoice::RepoPick(items),
             ) => {
-                if let Some(prev) = previous_selectable(&scopes, pcur)
-                    && let Phase::ScopePickerRepos { cursor, .. } = &mut self.phase
-                {
-                    *cursor = prev;
-                }
-            }
-            (
-                Phase::ScopePickerRepos {
-                    scopes,
-                    cursor: pcur,
-                    ..
-                },
-                Action::CursorDown,
-            ) => {
-                if let Some(next) = next_selectable(&scopes, pcur)
-                    && let Phase::ScopePickerRepos { cursor, .. } = &mut self.phase
-                {
-                    *cursor = next;
-                }
-            }
-            (
-                Phase::ScopePickerRepos {
-                    scopes,
-                    cursor: pcur,
-                    ..
-                },
-                Action::Toggle,
-            ) => {
-                if let Some(scope) = scopes.get(pcur)
-                    && let Phase::ScopePickerRepos { selected, .. } = &mut self.phase
-                    && !selected.remove(&scope.id)
-                {
-                    selected.insert(scope.id.clone());
-                }
-            }
-            (
-                Phase::ScopePickerRepos {
-                    provider_id,
-                    parent_id,
-                    selected,
-                    ..
-                },
-                Action::Confirm,
-            ) => {
-                // Empty selection → keep the org-level scope (already
-                // in selected_scopes from the previous picker step).
-                // Non-empty selection → REPLACE the org id with the
-                // chosen repo ids; the user is opting for finer
-                // granularity within this org.
-                if !selected.is_empty()
-                    && let Some(set) = self.selected_scopes.get_mut(&provider_id)
-                {
-                    set.remove(&parent_id);
-                    for repo_id in selected {
-                        set.insert(repo_id);
+                let picked: Vec<Scope> = picks
+                    .into_iter()
+                    .filter_map(|i| items.get(i).cloned())
+                    .collect();
+                if !picked.is_empty() {
+                    let entry = self
+                        .accumulator
+                        .selected_scopes
+                        .entry(provider_id)
+                        .or_default();
+                    entry.remove(&parent_id);
+                    for s in picked {
+                        entry.insert(s.id);
                     }
                 }
-                self.advance_phase();
+                self.next_repo_step()
             }
-            _ => {}
+            _ => RunnerStep::Cancel,
         }
     }
 
-    fn selectable_indices(&self) -> Vec<usize> {
-        self.rows
+    /// User hit `r` on the active Choice.
+    pub fn step_choice_refresh(&mut self) -> RunnerStep {
+        match self.expecting.clone() {
+            ExpectingStep::Providers => {
+                let modal = build_detect_modal();
+                self.expecting = ExpectingStep::ProvidersRefresh;
+                RunnerStep::Next(modal)
+            }
+            ExpectingStep::Agents => {
+                let modal = build_detect_modal();
+                self.expecting = ExpectingStep::AgentsRefresh;
+                RunnerStep::Next(modal)
+            }
+            _ => RunnerStep::Stay,
+        }
+    }
+
+    /// User hit Backspace on the active Choice.
+    pub fn step_choice_back(&mut self) -> RunnerStep {
+        match self.expecting.clone() {
+            ExpectingStep::Splash => RunnerStep::Cancel,
+            ExpectingStep::Providers => {
+                self.current_choice = None;
+                self.expecting = ExpectingStep::Splash;
+                RunnerStep::Next(Box::new(Splash::new()))
+            }
+            ExpectingStep::Agents => {
+                let modal = self.build_providers_modal();
+                self.expecting = ExpectingStep::Providers;
+                RunnerStep::Next(modal)
+            }
+            ExpectingStep::ProvidersRefresh => {
+                let modal = self.build_providers_modal();
+                self.expecting = ExpectingStep::Providers;
+                RunnerStep::Next(modal)
+            }
+            ExpectingStep::AgentsRefresh => {
+                let modal = self.build_agents_modal();
+                self.expecting = ExpectingStep::Agents;
+                RunnerStep::Next(modal)
+            }
+            // Anything inside the per-provider portion → back to Agents.
+            // Step-by-step rewind through filter→scope→repo gets
+            // confusing fast; "back to start of provider config" is
+            // what users actually want.
+            ExpectingStep::FilterFor(_)
+            | ExpectingStep::ScopeLoadFor(_)
+            | ExpectingStep::ScopePickFor(_)
+            | ExpectingStep::RepoLoadFor(_, _, _)
+            | ExpectingStep::RepoPickFor(_, _) => {
+                self.rebuild_pending_queues();
+                let modal = self.build_agents_modal();
+                self.expecting = ExpectingStep::Agents;
+                RunnerStep::Next(modal)
+            }
+            ExpectingStep::InfoFor(_) => RunnerStep::Stay,
+        }
+    }
+
+    /// Loading modal resolved its background task — payload is the
+    /// boxed value the producer sent.
+    pub fn step_loading_resolved(
+        &mut self,
+        payload: Box<dyn std::any::Any + Send>,
+    ) -> RunnerStep {
+        match self.expecting.clone() {
+            ExpectingStep::ProvidersRefresh => {
+                if let Ok(report) = payload.downcast::<crate::setup::SetupReport>() {
+                    self.accumulator.report = *report;
+                }
+                let modal = self.build_providers_modal();
+                self.expecting = ExpectingStep::Providers;
+                RunnerStep::Next(modal)
+            }
+            ExpectingStep::AgentsRefresh => {
+                if let Ok(report) = payload.downcast::<crate::setup::SetupReport>() {
+                    self.accumulator.report = *report;
+                }
+                let modal = self.build_agents_modal();
+                self.expecting = ExpectingStep::Agents;
+                RunnerStep::Next(modal)
+            }
+            ExpectingStep::ScopeLoadFor(provider_id) => match downcast_load_result::<Scope>(payload) {
+                LoadOutcome::Items(scopes) if scopes.is_empty() => self.next_scope_step(),
+                LoadOutcome::Items(scopes) => {
+                    let modal = self.build_scope_pick_modal(&provider_id, scopes);
+                    self.expecting = ExpectingStep::ScopePickFor(provider_id);
+                    RunnerStep::Next(modal)
+                }
+                LoadOutcome::Failed(err) => {
+                    let info = scope_error_modal(&provider_id, "orgs", &err);
+                    self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                    RunnerStep::Next(info)
+                }
+                LoadOutcome::BadType => RunnerStep::Cancel,
+            },
+            ExpectingStep::RepoLoadFor(provider_id, parent_id, parent_label) => {
+                match downcast_load_result::<Scope>(payload) {
+                    LoadOutcome::Items(scopes) if scopes.is_empty() => {
+                        let info = empty_repos_modal(&parent_label);
+                        self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                        RunnerStep::Next(info)
+                    }
+                    LoadOutcome::Items(scopes) => {
+                        let modal = self.build_repo_pick_modal(&parent_label, scopes);
+                        self.expecting = ExpectingStep::RepoPickFor(provider_id, parent_id);
+                        RunnerStep::Next(modal)
+                    }
+                    LoadOutcome::Failed(err) => {
+                        let info = scope_error_modal(
+                            &provider_id,
+                            &format!("repos for {parent_label}"),
+                            &err,
+                        );
+                        self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                        RunnerStep::Next(info)
+                    }
+                    LoadOutcome::BadType => RunnerStep::Cancel,
+                }
+            }
+            _ => RunnerStep::Stay,
+        }
+    }
+
+    /// User dismissed the active modal (Esc / any key on info modal).
+    /// Info modals advance to the next pending step; everything else
+    /// cancels the wizard.
+    pub fn step_dismissed(&mut self) -> RunnerStep {
+        match self.expecting.clone() {
+            ExpectingStep::InfoFor(prev) => match *prev {
+                ExpectingStep::ScopeLoadFor(_) => {
+                    self.expecting = ExpectingStep::ScopeLoadFor(String::new());
+                    self.next_scope_step()
+                }
+                ExpectingStep::RepoLoadFor(_, _, _) => {
+                    self.expecting = ExpectingStep::RepoLoadFor(String::new(), String::new(), String::new());
+                    self.next_repo_step()
+                }
+                _ => RunnerStep::Cancel,
+            },
+            _ => RunnerStep::Cancel,
+        }
+    }
+
+    // ── Internal step builders ────────────────────────────────────────
+
+    fn next_filter_step(&mut self) -> RunnerStep {
+        if let Some(provider_id) = self.pending_filters.pop_front() {
+            let modal = self.build_filter_modal(&provider_id);
+            self.expecting = ExpectingStep::FilterFor(provider_id);
+            return RunnerStep::Next(modal);
+        }
+        self.next_scope_step()
+    }
+
+    fn next_scope_step(&mut self) -> RunnerStep {
+        // Skip providers without a registered ScopeSource — we can't
+        // enumerate their orgs, and "no narrowing" is the right
+        // default for those.
+        while let Some(provider_id) = self.pending_scopes.pop_front() {
+            let has_source = self.sources.iter().any(|s| s.provider_id() == provider_id);
+            if !has_source {
+                continue;
+            }
+            let modal = self.build_scope_load_modal(provider_id.clone());
+            self.expecting = ExpectingStep::ScopeLoadFor(provider_id);
+            return RunnerStep::Next(modal);
+        }
+        self.next_repo_step()
+    }
+
+    fn next_repo_step(&mut self) -> RunnerStep {
+        if let Some((provider_id, parent_id, parent_label)) = self.pending_repo_pickers.pop_front()
+        {
+            tracing::info!(
+                "next_repo_step: building Loading for provider={provider_id} parent={parent_id}"
+            );
+            let modal = self.build_repo_load_modal(
+                provider_id.clone(),
+                parent_id.clone(),
+                parent_label.clone(),
+            );
+            self.expecting = ExpectingStep::RepoLoadFor(provider_id, parent_id, parent_label);
+            return RunnerStep::Next(modal);
+        }
+        tracing::info!("next_repo_step: no pending repo pickers — flow finishing");
+        RunnerStep::Finish(self.accumulator.clone())
+    }
+
+    /// Reset per-provider work queues to match the current
+    /// `enabled_providers`. Called on `back` from filter/scope land
+    /// so the forward path re-queues every enabled provider fresh.
+    fn rebuild_pending_queues(&mut self) {
+        self.pending_filters.clear();
+        self.pending_scopes.clear();
+        self.pending_repo_pickers.clear();
+        let providers: Vec<String> = self
+            .accumulator
+            .enabled_providers
             .iter()
-            .enumerate()
-            .filter(|(_, r)| r.tool.state.is_found())
-            .map(|(i, _)| i)
-            .collect()
+            .cloned()
+            .collect();
+        for pid in providers {
+            self.pending_filters.push_back(pid.clone());
+            self.pending_scopes.push_back(pid);
+        }
     }
 
-    fn selectable_count(&self) -> usize {
-        self.rows.iter().filter(|r| r.tool.state.is_found()).count()
-    }
+    // ── Realm modal construction ──────────────────────────────────────
 
-    fn cursor_in_selectables(&self) -> usize {
-        self.selectable_indices()
-            .iter()
-            .position(|i| *i == self.cursor)
-            .unwrap_or(0)
-    }
-
-    fn first_selectable_row(&self) -> Option<usize> {
-        self.selectable_indices().first().copied()
-    }
-
-    pub fn is_done(&self) -> bool {
-        matches!(self.phase, Phase::Done)
-    }
-
-    /// True if `tool_id` is found AND the user hasn't disabled it.
-    pub fn is_enabled(&self, tool_id: &str) -> bool {
-        self.rows
-            .iter()
-            .any(|r| r.tool.id == tool_id && r.tool.state.is_found())
-            && !self.disabled.contains(tool_id)
-    }
-
-    pub fn into_outcome(self) -> SetupOutcome {
-        let report = SetupReport {
-            tools: self.rows.iter().map(|r| r.tool.clone()).collect(),
-        };
-        let enabled_providers: BTreeSet<String> = report
+    fn build_providers_modal(&mut self) -> Box<dyn AppComponent<Msg, UserEvent>> {
+        let items: Vec<ToolChoice> = self
+            .accumulator
+            .report
             .tools
             .iter()
-            .filter(|t| {
-                t.category == Category::Provider
-                    && t.state.is_found()
-                    && !self.disabled.contains(t.id)
-            })
-            .map(|t| t.id.to_string())
+            .filter(|t| t.category == Category::Provider)
+            .map(ToolChoice::from_tool)
             .collect();
-        let enabled_agents = report
+        let enabled_ids = self.accumulator.enabled_providers.clone();
+        self.current_choice = Some(CurrentChoice::Providers(items.clone()));
+        Box::new(
+            Choice::multi(
+                "Where do your tasks come from?  Pilot polls these for new \
+                 PRs, issues, and tickets so you don't have to refresh.",
+                items,
+            )
+            .title("Setup · providers")
+            .label(|c: &ToolChoice| c.label())
+            .selectable(|c: &ToolChoice| c.found)
+            .with_selected_by(move |c: &ToolChoice| enabled_ids.contains(&c.id))
+            .with_refresh(true)
+            .with_back(true),
+        )
+    }
+
+    fn build_agents_modal(&mut self) -> Box<dyn AppComponent<Msg, UserEvent>> {
+        let items: Vec<ToolChoice> = self
+            .accumulator
+            .report
             .tools
             .iter()
-            .filter(|t| {
-                t.category == Category::Agent && t.state.is_found() && !self.disabled.contains(t.id)
-            })
-            .map(|t| t.id.to_string())
+            .filter(|t| t.category == Category::Agent)
+            .map(ToolChoice::from_tool)
             .collect();
-        // Keep a filter row per enabled provider, defaulting any
-        // provider the user didn't actually walk through (which can
-        // only happen if they disabled it or skipped via Ctrl-C, but
-        // we're robust anyway).
-        let provider_filters = enabled_providers
-            .iter()
-            .map(|id| {
-                let f = self
-                    .provider_filters
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| ProviderFilter::default_for(id));
-                (id.clone(), f)
-            })
-            .collect();
-        SetupOutcome {
-            report,
-            enabled_providers,
-            enabled_agents,
-            provider_filters,
-            selected_scopes: self.selected_scopes.clone(),
-        }
-    }
-}
-
-// ── Key dispatch ────────────────────────────────────────────────────
-
-pub fn handle_key_for_test(key: KeyEvent, flow: &SetupFlow) -> Option<Action> {
-    match handle_key(key, flow) {
-        Some(Dispatch::Apply(a)) => Some(a),
-        _ => None,
-    }
-}
-
-fn handle_key(key: KeyEvent, flow: &SetupFlow) -> Option<Dispatch> {
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Some(Dispatch::Quit);
-    }
-    // Integrations + ProviderConfig phases share the same key bindings:
-    // up/down/space/enter/q. Detecting only listens for skip + quit.
-    let in_select_phase = flow.phase.is_integrations() || flow.phase.current_provider().is_some();
-    if flow.phase.is_detecting() {
-        return match (key.code, key.modifiers) {
-            (KeyCode::Enter | KeyCode::Char(' '), _) => Some(Dispatch::Apply(Action::Confirm)),
-            (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Dispatch::Quit),
-            _ => None,
-        };
-    }
-    if in_select_phase {
-        return match (key.code, key.modifiers) {
-            (KeyCode::Up | KeyCode::Char('k'), _) => Some(Dispatch::Apply(Action::CursorUp)),
-            (KeyCode::Down | KeyCode::Char('j'), _) => Some(Dispatch::Apply(Action::CursorDown)),
-            (KeyCode::Char(' '), _) => Some(Dispatch::Apply(Action::Toggle)),
-            (KeyCode::Enter, _) => Some(Dispatch::Apply(Action::Confirm)),
-            (KeyCode::Char('q') | KeyCode::Esc, _) => Some(Dispatch::Quit),
-            _ => None,
-        };
-    }
-    None
-}
-
-// ── Rendering ───────────────────────────────────────────────────────
-
-fn draw(frame: &mut Frame, flow: &SetupFlow) {
-    let area = frame.area();
-    let card = centered(72, 24, area);
-    frame.render_widget(Clear, card);
-
-    let title = match &flow.phase {
-        Phase::ProviderConfig { provider_id } => {
-            format!(" pilot setup · {} ", provider_display(provider_id))
-        }
-        Phase::ScopePicker { provider_id, .. } => {
-            format!(" pilot setup · {} orgs ", provider_display(provider_id))
-        }
-        Phase::ScopePickerRepos {
-            provider_id,
-            parent_label,
-            ..
-        } => format!(
-            " pilot setup · {} · {} repos ",
-            provider_display(provider_id),
-            parent_label
-        ),
-        _ => " pilot setup ".into(),
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(card);
-    frame.render_widget(block, card);
-
-    let lines = match &flow.phase {
-        Phase::ProviderConfig { provider_id } => render_provider_phase(flow, provider_id),
-        Phase::ScopePicker { .. } => render_scope_picker(flow),
-        Phase::ScopePickerRepos { .. } => render_scope_picker_repos(flow),
-        _ => render_detection_phase(flow),
-    };
-
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-    frame.render_widget(para, inner);
-}
-
-fn render_detection_phase(flow: &SetupFlow) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::raw(""));
-    lines.push(section_header("PROVIDERS"));
-    for (i, row) in flow.rows.iter().enumerate() {
-        if row.tool.category == Category::Provider {
-            lines.extend(render_row(flow, row, i));
-        }
-    }
-    lines.push(Line::raw(""));
-    lines.push(section_header("AGENTS"));
-    for (i, row) in flow.rows.iter().enumerate() {
-        if row.tool.category == Category::Agent {
-            lines.extend(render_row(flow, row, i));
-        }
-    }
-    lines.push(Line::raw(""));
-    lines.push(footer(flow));
-    lines
-}
-
-fn render_provider_phase(flow: &SetupFlow, provider_id: &str) -> Vec<Line<'static>> {
-    let opts = options_for_provider(provider_id);
-    let filter = flow
-        .provider_filters
-        .get(provider_id)
-        .cloned()
-        .unwrap_or_else(|| ProviderFilter::default_for(provider_id));
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Configure ", Style::default().fg(Color::Gray)),
-        Span::styled(
-            provider_display(provider_id).to_string(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            " — pull items where I am:",
-            Style::default().fg(Color::Gray),
-        ),
-    ]));
-    lines.push(Line::raw(""));
-
-    let mut last_group: &str = "";
-    for (i, opt) in opts.iter().enumerate() {
-        if opt.group != last_group {
-            if !last_group.is_empty() {
-                lines.push(Line::raw(""));
-            }
-            lines.push(section_header(opt.group));
-            last_group = opt.group;
-        }
-        let on = filter.has(opt.key);
-        let glyph = if on { "[x]" } else { "[ ]" };
-        let cursor_marker = if flow.cursor == i { "▸" } else { " " };
-        let marker_color = if flow.cursor == i { ACCENT } else { DIM };
-        let label_style = if on {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("{cursor_marker} {glyph} "),
-                Style::default()
-                    .fg(marker_color)
-                    .add_modifier(if flow.cursor == i {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
-            Span::styled(opt.label.to_string(), label_style),
-        ]));
-    }
-
-    // Tail summary: how many providers remain after this one.
-    let remaining = flow.pending_providers.len();
-    if remaining > 0 {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {remaining} more provider{} after this",
-                if remaining == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-        )));
-    }
-    lines.push(Line::raw(""));
-    lines.push(footer(flow));
-    lines
-}
-
-fn render_scope_picker(flow: &SetupFlow) -> Vec<Line<'static>> {
-    let Phase::ScopePicker {
-        provider_id,
-        loading,
-        scopes,
-        selected,
-        cursor,
-    } = &flow.phase
-    else {
-        return Vec::new();
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Choose ", Style::default().fg(Color::Gray)),
-        Span::styled(
-            provider_display(provider_id).to_string(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" orgs to subscribe to:", Style::default().fg(Color::Gray)),
-    ]));
-    lines.push(Line::raw(""));
-
-    if *loading {
-        lines.push(Line::from(vec![
-            Span::raw(detail_indent()),
-            Span::styled(
-                "fetching orgs…",
-                Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
-    } else if scopes.is_empty() {
-        lines.push(Line::from(vec![
-            Span::raw(detail_indent()),
-            Span::styled(
-                "no orgs visible to this token",
-                Style::default().fg(MISSING).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
-    } else {
-        // Org-only flat list. Selecting an org subscribes to every
-        // PR / issue under owner/* — repo-level narrowing is a
-        // separate drill-down to keep the initial fetch cheap.
-        for (i, scope) in scopes.iter().enumerate() {
-            let is_cursor = i == *cursor;
-            let on = selected.contains(&scope.id);
-            let cursor_span = is_cursor.then(|| {
-                Span::styled(
-                    "▸",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                )
-            });
-            let checkbox_span = Some(Span::styled(
-                if on { "[x]" } else { "[ ]" }.to_string(),
-                Style::default().fg(if is_cursor { ACCENT } else { DIM }),
-            ));
-            let label_style = if on {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            lines.push(aligned_row(
-                cursor_span,
-                checkbox_span,
-                None,
-                Span::styled(scope.label.clone(), label_style),
-                Span::raw(""),
-            ));
-        }
-    }
-
-    // Counter line: "3 selected" so the user knows what they're
-    // committing to before confirming. An empty selection means
-    // "all repos" (legacy default), which we surface explicitly.
-    lines.push(Line::raw(""));
-    let n = selected.len();
-    let counter = if n == 0 {
-        "  empty selection · enter = subscribe to ALL orgs".to_string()
-    } else {
-        format!("  {n} org{} selected", if n == 1 { "" } else { "s" })
-    };
-    lines.push(Line::from(Span::styled(
-        counter,
-        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-    )));
-
-    lines.push(Line::raw(""));
-    lines.push(footer(flow));
-    lines
-}
-
-fn render_scope_picker_repos(flow: &SetupFlow) -> Vec<Line<'static>> {
-    let Phase::ScopePickerRepos {
-        provider_id,
-        parent_label,
-        loading,
-        scopes,
-        selected,
-        cursor,
-        ..
-    } = &flow.phase
-    else {
-        return Vec::new();
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Repos in ", Style::default().fg(Color::Gray)),
-        Span::styled(
-            parent_label.clone(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "  · enter with none selected = subscribe to whole org",
-            Style::default().fg(DIM),
-        ),
-    ]));
-    lines.push(Line::raw(""));
-
-    if *loading {
-        lines.push(Line::from(vec![
-            Span::raw(detail_indent()),
-            Span::styled(
-                "fetching repos…",
-                Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
-    } else if scopes.is_empty() {
-        lines.push(Line::from(vec![
-            Span::raw(detail_indent()),
-            Span::styled(
-                "no repos visible to this token",
-                Style::default().fg(MISSING).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
-    } else {
-        for (i, scope) in scopes.iter().enumerate() {
-            let is_cursor = i == *cursor;
-            let on = selected.contains(&scope.id);
-            let cursor_span = is_cursor.then(|| {
-                Span::styled(
-                    "▸",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                )
-            });
-            let checkbox_span = Some(Span::styled(
-                if on { "[x]" } else { "[ ]" }.to_string(),
-                Style::default().fg(if is_cursor { ACCENT } else { DIM }),
-            ));
-            let label_style = if on {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            // Strip the org prefix — `acme/web` → `web` since we're
-            // already scoped to one parent.
-            let short = scope
-                .label
-                .split_once('/')
-                .map(|(_, r)| r.to_string())
-                .unwrap_or_else(|| scope.label.clone());
-            lines.push(aligned_row(
-                cursor_span,
-                checkbox_span,
-                None,
-                Span::styled(short, label_style),
-                Span::raw(""),
-            ));
-        }
-    }
-
-    lines.push(Line::raw(""));
-    let n = selected.len();
-    let counter = if n == 0 {
-        format!("  no repo picked · enter = subscribe to all of {parent_label}/*")
-    } else {
-        format!("  {n} repo{} selected", if n == 1 { "" } else { "s" })
-    };
-    lines.push(Line::from(Span::styled(
-        counter,
-        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-    )));
-
-    // How many drill-downs are left so the user knows how many
-    // confirms remain.
-    let remaining = flow.pending_repo_pickers.len();
-    if remaining > 0 {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {remaining} more org{} after this",
-                if remaining == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-        )));
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(footer(flow));
-    let _ = provider_id;
-    lines
-}
-
-fn section_header(label: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            label.to_string(),
-            Style::default().fg(DIM).add_modifier(Modifier::BOLD),
-        ),
-    ])
-}
-
-fn render_row(flow: &SetupFlow, row: &Row, idx: usize) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let now = Instant::now();
-    let now_revealed = now >= row.revealed_at;
-    let settled = row.settled_at.is_some();
-
-    let (mark, mark_color) = match (settled, &row.tool.state) {
-        (false, _) => {
-            let f = (flow.frame as usize) % SPINNER_FRAMES.len();
-            (SPINNER_FRAMES[f], ACCENT)
-        }
-        (true, ToolState::Found { .. }) => ("✓", FOUND),
-        (true, ToolState::Missing) => ("✗", MISSING),
-    };
-
-    let label_style = if settled {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
-    };
-
-    let detail = if !settled {
-        format!("Searching for {}…", row.tool.display_name)
-    } else {
-        match &row.tool.state {
-            ToolState::Found { detail } => detail.clone(),
-            ToolState::Missing => "not found".into(),
-        }
-    };
-    let detail_style = match (settled, &row.tool.state) {
-        (false, _) => Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-        (true, ToolState::Found { .. }) => Style::default().fg(Color::Gray),
-        (true, ToolState::Missing) => Style::default().fg(DIM),
-    };
-
-    // Hide rows whose stagger hasn't arrived yet (don't pollute layout).
-    if !now_revealed {
-        out.push(Line::raw(""));
-        return out;
-    }
-
-    let cursor = (flow.phase == Phase::Integrations && flow.cursor == idx).then(|| {
-        Span::styled(
-            "▸",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        let enabled_ids = self.accumulator.enabled_agents.clone();
+        self.current_choice = Some(CurrentChoice::Agents(items.clone()));
+        Box::new(
+            Choice::multi(
+                "Which AI coding agents should pilot let you spawn into a \
+                 worktree?  Press `c`/`x`/`u` on a row to drop into them.",
+                items,
+            )
+            .title("Setup · agents")
+            .label(|c: &ToolChoice| c.label())
+            .selectable(|c: &ToolChoice| c.found)
+            .with_selected_by(move |c: &ToolChoice| enabled_ids.contains(&c.id))
+            .with_refresh(true)
+            .with_back(true),
         )
-    });
+    }
 
-    let checkbox = (flow.phase == Phase::Integrations && row.tool.state.is_found()).then(|| {
-        let on = !flow.disabled.contains(row.tool.id);
-        let glyph = if on { "[x]" } else { "[ ]" };
-        Span::styled(
-            glyph.to_string(),
-            Style::default().fg(if flow.cursor == idx { ACCENT } else { DIM }),
+    fn build_filter_modal(&mut self, provider_id: &str) -> Box<dyn AppComponent<Msg, UserEvent>> {
+        let opts = filter_options(provider_id);
+        let active = self
+            .accumulator
+            .provider_filters
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_else(|| ProviderConfig::default_for(provider_id));
+        let selected_keys: BTreeSet<String> = filter_keys_set(&active);
+        let display = provider_display(provider_id);
+        // Section headers: GitHub splits roles by item type (PR vs
+        // Issue); Linear shows a single flat role list.
+        let section_for: fn(&FilterOption) -> &'static str = match provider_id {
+            "github" => |f: &FilterOption| {
+                if f.key.starts_with("pr.") {
+                    "Pull Requests  ·  your relationship"
+                } else if f.key.starts_with("issue.") {
+                    "Issues  ·  your relationship"
+                } else {
+                    ""
+                }
+            },
+            _ => |_| "",
+        };
+        self.current_choice = Some(CurrentChoice::Filter(opts.clone()));
+        Box::new(
+            Choice::multi(
+                format!(
+                    "Which {display} items show up in your inbox?  \
+                     Untick everything in a section to skip that item type entirely."
+                ),
+                opts,
+            )
+            .title(format!("Setup · {display} · filters"))
+            .label(|f: &FilterOption| f.label.clone())
+            .section_for(section_for)
+            .with_selected_by(move |f: &FilterOption| selected_keys.contains(&f.key))
+            .with_back(true),
         )
-    });
+    }
 
-    let mark_span = Span::styled(
-        mark.to_string(),
-        Style::default().fg(mark_color).add_modifier(Modifier::BOLD),
+    fn build_scope_load_modal(&self, provider_id: String) -> Box<dyn AppComponent<Msg, UserEvent>> {
+        let sources = self.sources.clone();
+        let pid = provider_id.clone();
+        let (modal, result) = Loading::pending(format!("Fetching {provider_id} orgs…"));
+        tokio::spawn(async move {
+            let value = match sources.iter().find(|s| s.provider_id() == pid) {
+                Some(src) => src.list_scopes().await,
+                None => Ok(Vec::<Scope>::new()),
+            };
+            let _ = result.send(value);
+        });
+        Box::new(modal.title("Setup · scopes"))
+    }
+
+    fn build_scope_pick_modal(
+        &mut self,
+        provider_id: &str,
+        scopes: Vec<Scope>,
+    ) -> Box<dyn AppComponent<Msg, UserEvent>> {
+        self.current_choice = Some(CurrentChoice::ScopePick(scopes.clone()));
+        Box::new(
+            Choice::multi(format!("{provider_id} · pick orgs (none = all)"), scopes)
+                .title("Setup · scopes")
+                .label(|s: &Scope| match &s.parent {
+                    Some(p) => format!("{p} / {}", s.label),
+                    None => s.label.clone(),
+                })
+                .allow_empty(true)
+                .with_back(true),
+        )
+    }
+
+    fn build_repo_load_modal(
+        &self,
+        provider_id: String,
+        parent_id: String,
+        parent_label: String,
+    ) -> Box<dyn AppComponent<Msg, UserEvent>> {
+        let sources = self.sources.clone();
+        let pid = provider_id.clone();
+        let parent = parent_id.clone();
+        let (modal, result) = Loading::pending(format!("Fetching {parent_label} repos…"));
+        tokio::spawn(async move {
+            let value = match sources.iter().find(|s| s.provider_id() == pid) {
+                Some(src) => src.list_children(&parent).await,
+                None => Ok(Vec::<Scope>::new()),
+            };
+            let _ = result.send(value);
+        });
+        Box::new(modal.title("Setup · repos"))
+    }
+
+    fn build_repo_pick_modal(
+        &mut self,
+        parent_label: &str,
+        scopes: Vec<Scope>,
+    ) -> Box<dyn AppComponent<Msg, UserEvent>> {
+        self.current_choice = Some(CurrentChoice::RepoPick(scopes.clone()));
+        Box::new(
+            Choice::multi(
+                format!(
+                    "Narrow {parent_label} to specific repos (optional).\n\n\
+                     Tick one or more to subscribe to ONLY those repos. \
+                     Press Enter without ticking anything to keep the \
+                     ORG-level subscription (all {parent_label} repos).",
+                ),
+                scopes,
+            )
+            .title(format!("Setup · {parent_label} repos"))
+            .label(|s: &Scope| s.label.clone())
+            .allow_empty(true)
+            .with_back(true),
+        )
+    }
+}
+
+/// `Loading` modal running fresh `detect_all()`. Used by both
+/// `ProvidersRefresh` and `AgentsRefresh`.
+fn build_detect_modal() -> Box<dyn AppComponent<Msg, UserEvent>> {
+    let (modal, result) = Loading::pending("Re-detecting providers + agents…");
+    tokio::spawn(async move {
+        let _ = result.send(setup::detect_all().await);
+    });
+    Box::new(modal.title("Setup · refreshing"))
+}
+
+// ── Loading payload helpers ─────────────────────────────────────────────
+
+enum LoadOutcome<T> {
+    Items(Vec<T>),
+    Failed(ProviderError),
+    /// Programming error — payload type didn't match.
+    BadType,
+}
+
+fn downcast_load_result<T: std::any::Any + Send + 'static>(
+    payload: Box<dyn std::any::Any + Send>,
+) -> LoadOutcome<T> {
+    let result = match payload.downcast::<Result<Vec<T>, ProviderError>>() {
+        Ok(r) => *r,
+        Err(_) => return LoadOutcome::BadType,
+    };
+    match result {
+        Ok(v) => LoadOutcome::Items(v),
+        Err(e) => LoadOutcome::Failed(e),
+    }
+}
+
+/// Build an `ErrorModal` for a scope-load failure. Pushed instead of
+/// silently advancing — without this the user picks an org and sees
+/// the modal disappear with no explanation.
+fn scope_error_modal(
+    provider_id: &str,
+    what: &str,
+    err: &ProviderError,
+) -> Box<dyn AppComponent<Msg, UserEvent>> {
+    let accent = if err.is_auth() {
+        Accent::new("auth", crate::theme::current().hover)
+    } else if err.is_retryable() {
+        Accent::warn("retryable")
+    } else {
+        Accent::error("permanent")
+    };
+    let body = format!(
+        "Failed to load {what} for {provider_id}.\n\n{}\n\n\
+         Press any key to dismiss; setup will continue with what's been \
+         configured so far.",
+        err.diagnostic()
     );
-
-    out.push(aligned_row(
-        cursor,
-        checkbox,
-        Some(mark_span),
-        Span::styled(row.tool.display_name.to_string(), label_style),
-        Span::styled(detail, detail_style),
-    ));
-
-    if settled && matches!(row.tool.state, ToolState::Missing) && !row.tool.install_hint.is_empty()
-    {
-        out.push(Line::from(vec![
-            Span::raw(detail_indent()),
-            Span::styled(
-                format!("install: {}", row.tool.install_hint),
-                Style::default().fg(MISSING),
-            ),
-        ]));
-    }
-    out
+    Box::new(ErrorModal::new(provider_id, accent, body))
 }
 
-fn footer(flow: &SetupFlow) -> Line<'static> {
-    let text = match &flow.phase {
-        Phase::Detecting => "  ".to_string() + "press enter to skip animation · ctrl-c to quit",
-        Phase::Integrations
-        | Phase::ProviderConfig { .. }
-        | Phase::ScopePicker { loading: false, .. }
-        | Phase::ScopePickerRepos { loading: false, .. } => {
-            "  ".to_string() + "j/k move · space toggle · enter continue · q quit"
+/// Info modal for "no repos visible under {parent}". Pushed instead
+/// of silently moving on so the user knows their org-level
+/// subscription is still active but per-repo narrowing didn't happen.
+fn empty_repos_modal(parent_label: &str) -> Box<dyn AppComponent<Msg, UserEvent>> {
+    let body = format!(
+        "No repositories visible under {parent_label}.\n\n\
+         This usually means your token doesn't have repo-read scope, \
+         or there are no repos in this org / account.\n\n\
+         Setup will continue with the org-level subscription — pilot \
+         will poll for any items the token CAN see in {parent_label}.\n\n\
+         Press any key to continue."
+    );
+    Box::new(ErrorModal::new(parent_label, Accent::warn("notice"), body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::setup::ToolState;
+
+    fn report() -> SetupReport {
+        SetupReport {
+            tools: vec![
+                ToolStatus {
+                    id: "github",
+                    display_name: "GitHub",
+                    category: Category::Provider,
+                    state: ToolState::Found { detail: "gh".into() },
+                    install_hint: "",
+                },
+                ToolStatus {
+                    id: "claude",
+                    display_name: "Claude",
+                    category: Category::Agent,
+                    state: ToolState::Found { detail: "1.0".into() },
+                    install_hint: "",
+                },
+            ],
         }
-        Phase::ScopePicker { loading: true, .. } => "  ".to_string() + "fetching orgs…",
-        Phase::ScopePickerRepos { loading: true, .. } => "  ".to_string() + "fetching repos…",
-        Phase::Done => "  ".to_string() + "starting…",
-    };
-    Line::from(Span::styled(text, Style::default().fg(DIM)))
-}
+    }
 
-fn centered(width: u16, height: u16, r: Rect) -> Rect {
-    let w = width.min(r.width);
-    let h = height.min(r.height);
-    let x = r.x + r.width.saturating_sub(w) / 2;
-    let y = r.y + r.height.saturating_sub(h) / 2;
-    Rect {
-        x,
-        y,
-        width: w,
-        height: h,
+    #[test]
+    fn default_enabled_picks_all_found_tools() {
+        let o = SetupOutcome::default_enabled(report());
+        assert!(o.enabled_providers.contains("github"));
+        assert!(o.enabled_agents.contains("claude"));
+        assert!(o.provider_filters.contains_key("github"));
+    }
+
+    #[test]
+    fn outcome_round_trips_via_persisted() {
+        let o = SetupOutcome::default_enabled(report());
+        let p = outcome_to_persisted(&o);
+        let back = persisted_to_outcome(p, report());
+        assert_eq!(o.enabled_providers, back.enabled_providers);
+        assert_eq!(o.enabled_agents, back.enabled_agents);
+    }
+
+    #[test]
+    fn runner_starts_at_splash() {
+        let runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        assert!(matches!(runner.expecting, ExpectingStep::Splash));
+    }
+
+    #[test]
+    fn splash_advances_to_providers() {
+        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        match runner.step_splash_confirmed() {
+            RunnerStep::Next(_) => {
+                assert!(matches!(runner.expecting, ExpectingStep::Providers));
+            }
+            _ => panic!("expected Next (providers)"),
+        }
+    }
+
+    #[test]
+    fn providers_pick_advances_to_agents() {
+        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let _ = runner.step_splash_confirmed();
+        // GitHub is index 0 (only provider in the report).
+        match runner.step_choice_picked(vec![0]) {
+            RunnerStep::Next(_) => {
+                assert!(matches!(runner.expecting, ExpectingStep::Agents));
+            }
+            _ => panic!("expected Next (agents)"),
+        }
+        assert!(runner.accumulator.enabled_providers.contains("github"));
+    }
+
+    #[test]
+    fn agents_pick_with_no_provider_finishes() {
+        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let _ = runner.step_splash_confirmed();
+        // Untick every provider.
+        let _ = runner.step_choice_picked(vec![]);
+        // Tick claude (index 0 of agents).
+        match runner.step_choice_picked(vec![0]) {
+            RunnerStep::Finish(out) => {
+                assert!(out.enabled_providers.is_empty());
+                assert!(out.enabled_agents.contains("claude"));
+            }
+            other => panic!("expected Finish, got {:?}", matches!(other, RunnerStep::Finish(_))),
+        }
+    }
+
+    #[test]
+    fn back_from_providers_returns_to_splash() {
+        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let _ = runner.step_splash_confirmed();
+        match runner.step_choice_back() {
+            RunnerStep::Next(_) => {
+                assert!(matches!(runner.expecting, ExpectingStep::Splash));
+            }
+            _ => panic!("expected Next (splash)"),
+        }
+    }
+
+    #[test]
+    fn back_from_splash_cancels() {
+        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        // expecting starts at Splash.
+        assert!(matches!(runner.step_choice_back(), RunnerStep::Cancel));
+    }
+
+    #[test]
+    fn back_from_agents_returns_to_providers_with_selection() {
+        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let _ = runner.step_splash_confirmed();
+        let _ = runner.step_choice_picked(vec![0]); // pick GitHub
+        // Now expecting Agents. Back should rebuild Providers.
+        match runner.step_choice_back() {
+            RunnerStep::Next(_) => {
+                assert!(matches!(runner.expecting, ExpectingStep::Providers));
+            }
+            _ => panic!("expected Next (providers)"),
+        }
+        // GitHub stays selected in accumulator → next forward pass
+        // uses with_selected_by to re-tick it.
+        assert!(runner.accumulator.enabled_providers.contains("github"));
+    }
+
+    #[test]
+    fn filter_options_for_known_providers() {
+        let gh = filter_options("github");
+        assert!(gh.iter().any(|f| f.key == "pr.author"));
+        assert!(gh.iter().any(|f| f.key == "pr.reviewer"));
+        assert!(gh.iter().any(|f| f.key == "issue.author"));
+        assert!(
+            !gh.iter().any(|f| f.key == "issue.reviewer"),
+            "issues have no reviewer role"
+        );
+        assert!(filter_options("linear").iter().any(|f| f.key == "role.subscriber"));
+        assert!(filter_options("nonexistent").is_empty());
     }
 }

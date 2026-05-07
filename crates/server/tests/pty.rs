@@ -5,7 +5,7 @@
 //! are NOT pure, so we keep them in `tests/` so they don't run on
 //! every `cargo check --lib`.
 
-use pilot_v2_server::pty::{DaemonPty, OutputChunk, PtyError};
+use pilot_server::pty::{DaemonPty, OutputChunk, PtyError};
 use portable_pty::PtySize;
 use std::time::Duration;
 use tokio::sync::broadcast;

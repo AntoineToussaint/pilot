@@ -7,11 +7,11 @@
 //! spawns a pair of tokio tasks that translate between the framed wire
 //! and the local channels.
 
+use crate::transport;
 use crate::{Client, Command, Connection, Event, MAX_FRAME_BYTES};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 #[derive(Debug, thiserror::Error)]
@@ -60,11 +60,15 @@ where
     Ok(Some(bincode::deserialize(&buf)?))
 }
 
-/// Connect to a daemon listening on a Unix socket (possibly tunneled by
-/// SSH). Returns a `Client` whose send/recv map to frames on the wire.
+/// Connect to a daemon listening at `path` (possibly tunneled by SSH
+/// when the path is forwarded through `ssh -L`). Returns a `Client`
+/// whose send/recv map to frames on the wire. Transport is delegated
+/// to `transport::connect` — Unix domain socket today, named pipe /
+/// TCP later.
 pub async fn connect(path: &Path) -> std::io::Result<Client> {
-    let stream = UnixStream::connect(path).await?;
-    let (rd, wr) = stream.into_split();
+    let (rd, wr) = transport::connect(path)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<Event>();
 

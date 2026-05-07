@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use pilot_core::{TaskId, WorkspaceKey};
+use pilot_core::WorkspaceKey;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -9,47 +9,24 @@ pub enum StoreError {
     NotFound(String),
 }
 
-/// A persisted session record — full task data + read/unread state.
-#[derive(Debug, Clone)]
-pub struct SessionRecord {
-    pub task_id: String,
-    pub seen_count: i64,
-    pub last_viewed_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    /// Full serialized session data (JSON). Includes task, activity, etc.
-    pub session_json: Option<String>,
-    /// Arbitrary metadata (for future use).
-    pub metadata: Option<String>,
-}
-
-/// A persisted workspace record — full v2 workspace data (PR + linked
-/// issues + worktree path + activity + read state) serialized as JSON.
-/// Lives alongside `SessionRecord` so v1 stays untouched: anything
-/// reading sessions still gets sessions, and workspaces are a new
-/// surface keyed by `WorkspaceKey`.
+/// A persisted workspace record — full workspace data (PR + linked
+/// issues + worktree path + activity + read state) serialized as JSON,
+/// keyed by `WorkspaceKey`.
 #[derive(Debug, Clone)]
 pub struct WorkspaceRecord {
     pub key: String,
     pub created_at: DateTime<Utc>,
-    /// JSON of `pilot_core::Workspace`. Always populated for v2-written
-    /// rows; `None` only for legacy / partially-migrated entries.
+    /// JSON of `pilot_core::Workspace`.
     pub workspace_json: Option<String>,
 }
 
 /// Abstract storage trait. Implement for SQLite, Postgres, file, etc.
 ///
-/// The kv methods (`get_kv` / `set_kv` / `delete_kv`) are for v2's
+/// The kv methods (`get_kv` / `set_kv` / `delete_kv`) are for
 /// daemon-side configuration: setup outcomes, ad-hoc preferences,
-/// future workspace settings. v1 doesn't use them; default impls
-/// behave as a never-stored kv (None / Ok) so existing v1 stores
-/// don't need code changes.
+/// future workspace settings. Default impls behave as a never-stored
+/// kv (None / Ok) so simple stores don't need to implement them.
 pub trait Store: Send + Sync {
-    fn get_session(&self, task_id: &TaskId) -> Result<Option<SessionRecord>, StoreError>;
-    fn save_session(&self, record: &SessionRecord) -> Result<(), StoreError>;
-    fn mark_read(&self, task_id: &TaskId, seen_count: i64) -> Result<(), StoreError>;
-    fn list_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
-    fn delete_session(&self, task_id: &TaskId) -> Result<(), StoreError>;
-
     /// Read a string value previously set with `set_kv`. Returns
     /// `Ok(None)` for both "never set" and the default impl, so
     /// callers should treat None as "use defaults".
@@ -68,11 +45,11 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
-    // ── v2 Workspaces ───────────────────────────────────────────────
+    // ── Workspaces ──────────────────────────────────────────────────
     //
     // Defaults piggy-back on the kv table (`workspace:<key>` → JSON).
-    // Concrete stores can override for native indexes; v1 stores get
-    // workspace methods for free without code changes.
+    // Concrete stores can override for native indexes; simple kv-only
+    // stores get workspace methods for free without overrides.
 
     fn get_workspace(
         &self,

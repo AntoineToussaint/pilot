@@ -122,14 +122,34 @@ impl TmuxBackend {
 
     /// Run `tmux -L <socket> -f <config> ...args`. Captures stdout +
     /// stderr; returns a BackendError on non-zero exit.
-    fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
-        let out = Command::new("tmux")
+    ///
+    /// **Async**: `tokio::process::Command` rather than the sync std
+    /// version. The backend's trait methods are wrapped in async
+    /// futures, and a sync `output()` here would block the entire
+    /// tokio runtime for the duration of every tmux invocation —
+    /// which can be 100ms+ during server startup. Every other task
+    /// (TUI render, IPC pumps, polling) would freeze in lockstep.
+    async fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
+        // Self-heal the conf file: another pilot instance running on
+        // the same machine could have hit `Drop` and removed it (we
+        // share `std::env::temp_dir()/pilot-tmux/pilot.conf` across
+        // instances). Re-writing every call is cheap (a few hundred
+        // bytes) and beats a confusing "No such file" error on the
+        // user's first spawn.
+        if !self.config_path.exists() {
+            if let Some(parent) = self.config_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&self.config_path, TMUX_TRANSPARENT_CONF);
+        }
+        let out = tokio::process::Command::new("tmux")
             .arg("-L")
             .arg(&self.socket)
             .arg("-f")
             .arg(&self.config_path)
             .args(args)
             .output()
+            .await
             .map_err(|e| BackendError::Other(format!("tmux invoke: {e}")))?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -173,17 +193,20 @@ impl TmuxBackend {
 
 impl Drop for TmuxBackend {
     fn drop(&mut self) {
-        // Best-effort: kill ALL sessions on this private socket so we
-        // don't leave orphaned tmux servers behind. If the user wanted
-        // persistence across pilot-server restart they'd be using a
-        // different socket / external tmux. For the in-process
-        // backend lifetime this is the right behavior.
-        let _ = Command::new("tmux")
-            .arg("-L")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .output();
-        let _ = std::fs::remove_file(&self.config_path);
+        // We deliberately do NOT kill the tmux server or remove the
+        // conf file here. Two reasons:
+        //
+        // 1. Sessions persist across pilot restarts — that's the
+        //    whole point of the tmux backend (claude/codex sessions
+        //    survive a `q q`/relaunch). Killing the server defeats it.
+        // 2. Multiple pilot instances on the same host share the
+        //    socket + conf. A Drop-on-exit by one instance would yank
+        //    the conf out from under a still-running sibling, which
+        //    is the bug that surfaced as "No such file or directory"
+        //    on the user's terminal spawns.
+        //
+        // Stale tmux servers + conf files in $TMPDIR are cheap; the
+        // OS reaps them at reboot.
     }
 }
 
@@ -232,7 +255,7 @@ impl SessionBackend for TmuxBackend {
             cmd_args.extend(argv.iter().cloned());
 
             let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-            self.tmux(&arg_refs)?;
+            self.tmux(&arg_refs).await?;
 
             // Now open the attaching client. If this fails the tmux
             // session is orphaned; tear it down so we don't leak.
@@ -245,7 +268,7 @@ impl SessionBackend for TmuxBackend {
             let slot = match self.open_client(&key, size) {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = self.tmux(&["kill-session", "-t", &key]);
+                    let _ = self.tmux(&["kill-session", "-t", &key]).await;
                     return Err(e);
                 }
             };
@@ -298,7 +321,9 @@ impl SessionBackend for TmuxBackend {
             .map_err(|e| BackendError::Other(e.to_string()))?;
             // Best-effort window resize. Failing this is fine — the
             // PTY-level resize already triggered tmux internally.
-            let _ = self.tmux(&["refresh-client", "-t", key, "-C", &format!("{cols},{rows}")]);
+            let _ = self
+                .tmux(&["refresh-client", "-t", key, "-C", &format!("{cols},{rows}")])
+                .await;
             Ok(())
         })
     }
@@ -317,7 +342,7 @@ impl SessionBackend for TmuxBackend {
             // already gone tmux exits non-zero — we ignore that. Real
             // failures (tmux not on PATH) will already have surfaced
             // at spawn time.
-            let _ = self.tmux(&["kill-session", "-t", key]);
+            let _ = self.tmux(&["kill-session", "-t", key]).await;
             Ok(())
         })
     }
@@ -334,14 +359,16 @@ impl SessionBackend for TmuxBackend {
             let mut keys: Vec<String> = self.sessions.lock().await.keys().cloned().collect();
             // `tmux list-sessions -F '#{session_name}'` — prints one
             // name per line. Empty stdout / no-server errors mean
-            // "no sessions"; we treat them as Ok([]).
-            let out = Command::new("tmux")
+            // "no sessions"; we treat them as Ok([]). Async to avoid
+            // blocking the runtime on a slow tmux server start.
+            let out = tokio::process::Command::new("tmux")
                 .arg("-L")
                 .arg(&self.socket)
                 .arg("-f")
                 .arg(&self.config_path)
                 .args(["list-sessions", "-F", "#{session_name}"])
                 .output()
+                .await
                 .map_err(|e| BackendError::Other(format!("tmux list: {e}")))?;
             if out.status.success() {
                 for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -433,5 +460,44 @@ impl SessionBackend for TmuxBackend {
             };
             pty.wait_exit().await
         })
+    }
+
+    fn freeze<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Detach every client from this tmux session. Inner
+            // processes (claude, shell, …) keep running paused on
+            // their next read since nothing's reading their stdin;
+            // we'll re-attach in `resume`. Best-effort: silently
+            // succeed if tmux complains (no clients to detach is a
+            // success state for our purpose).
+            let _ = tokio::process::Command::new("tmux")
+                .arg("-L")
+                .arg(&self.socket)
+                .arg("detach-client")
+                .arg("-s")
+                .arg(key)
+                .arg("-a")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .await;
+            Ok(())
+        })
+    }
+
+    fn resume<'a>(
+        &'a self,
+        _key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        // Re-attach happens implicitly on the next subscribe — pilot
+        // already has the per-client `attach-session` flow wired in
+        // `subscribe`. So `resume` is a deliberate no-op: the caller
+        // either re-subscribes (live client) or leaves the session
+        // detached for later attach.
+        Box::pin(async { Ok(()) })
     }
 }

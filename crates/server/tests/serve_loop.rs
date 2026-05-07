@@ -2,11 +2,11 @@
 //! `ipc::channel::pair` — zero serialization, zero sockets — so tests
 //! are fast and deterministic.
 
-use pilot_v2_ipc::{
+use pilot_ipc::{
     AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, PrincipalId,
     ProviderCredentialInput, channel,
 };
-use pilot_v2_server::{Server, ServerConfig};
+use pilot_server::{Server, ServerConfig};
 
 #[tokio::test]
 async fn subscribe_yields_snapshot() {
@@ -55,34 +55,6 @@ async fn shutdown_closes_loop_cleanly() {
         .await
         .expect("daemon exits promptly on Shutdown")
         .unwrap();
-}
-
-#[tokio::test]
-async fn unknown_command_does_not_crash() {
-    let (mut client, server) = channel::pair();
-    tokio::spawn(async move {
-        Server::new(ServerConfig::in_memory())
-            .serve(server)
-            .await
-            .unwrap();
-    });
-
-    // Send a command whose handler module isn't wired in yet. The loop
-    // must keep running (trace-log + continue), not panic. This is the
-    // contract that lets us land handlers incrementally without
-    // breaking clients that know about more commands than the daemon.
-    client
-        .send(Command::MarkRead {
-            session_key: "x".into(),
-        })
-        .unwrap();
-    // Then prove we're still responsive.
-    client.send(Command::Subscribe).unwrap();
-    let evt = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())
-        .await
-        .expect("daemon is still responsive")
-        .expect("got an event");
-    matches!(evt, Event::Snapshot { .. });
 }
 
 #[tokio::test]

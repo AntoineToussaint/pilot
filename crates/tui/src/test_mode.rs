@@ -89,9 +89,14 @@ fn seed_skip_setup(store: &dyn Store) -> anyhow::Result<()> {
 /// so the sidebar boots with something selectable and `s` spawns a
 /// shell rooted at the test repo.
 fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
+    // Use `source: "github"` + a `/pull/` URL so `Workspace::classify`
+    // treats this as a real PR — otherwise the task lands in
+    // `TaskSlot::Unknown`, the workspace ends up with no
+    // `primary_task()`, and the right pane renders the empty-header
+    // placeholder. We want `--test` to look like a real workspace.
     let task = Task {
         id: TaskId {
-            source: "test".into(),
+            source: "github".into(),
             key: "test/repo#1".into(),
         },
         title: "Test workspace".into(),
@@ -107,7 +112,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         review: ReviewStatus::None,
         checks: vec![],
         unread_count: 0,
-        url: "https://example.com/test".into(),
+        url: "https://github.com/test/repo/pull/1".into(),
         repo: Some("test/repo".into()),
         branch: Some("main".into()),
         base_branch: Some("main".into()),
@@ -128,9 +133,9 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
     };
     let mut workspace = Workspace::from_task(task, Utc::now());
     // Seed a Session so `--test` boots with a usable folder under
-    // the workspace. v2 hierarchy: a workspace with no sessions has
-    // no on-disk presence; --test wants something the user can
-    // immediately spawn a shell in.
+    // the workspace. A workspace with no sessions has no on-disk
+    // presence; --test wants something the user can immediately
+    // spawn a shell in.
     let now = Utc::now();
     workspace.add_session(WorkspaceSession::new(
         workspace.key.clone(),

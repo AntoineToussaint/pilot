@@ -44,11 +44,40 @@ pub enum Category {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolState {
-    /// Binary present (or env var set). `detail` describes what we
-    /// found — e.g. "claude 1.0.42" or "GH_TOKEN".
+    /// Binary present (or env var set) and verified. `detail`
+    /// describes what we found — e.g. "@username", "claude 1.0.42".
     Found { detail: String },
-    /// Tool is not installed / not configured.
-    Missing,
+    /// Tool isn't usable. `kind` distinguishes a missing CLI binary
+    /// from a present-but-unauthenticated CLI from a present-but-
+    /// invalid token, etc. `hint` is what the user should run.
+    Missing { kind: MissingKind, hint: String },
+}
+
+/// Why a tool isn't usable. Drives both the message ("CLI not
+/// detected" vs "not authenticated") and the install hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingKind {
+    /// CLI binary not on PATH.
+    CliNotInstalled,
+    /// CLI installed but no token / auth not run.
+    NotAuthenticated,
+    /// Token / API key present but rejected by the API.
+    TokenInvalid,
+    /// Required env var not set.
+    EnvVarMissing,
+}
+
+impl MissingKind {
+    /// Short, user-facing state. Deliberately doesn't include the
+    /// command — the user knows how to authenticate their tools.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CliNotInstalled => "CLI not detected",
+            Self::NotAuthenticated => "CLI found, please authenticate",
+            Self::TokenInvalid => "auth invalid",
+            Self::EnvVarMissing => "not authenticated",
+        }
+    }
 }
 
 impl ToolState {
@@ -115,8 +144,32 @@ async fn detect_binary(
         state,
         install_hint,
     };
+
+    // Two-stage probe:
+    //
+    // 1. PATH lookup — fast, blocks for ms. Just answers "is this
+    //    binary executable from this shell?". `which` returns
+    //    `Err(NotFound)` cleanly when missing; anything else means
+    //    we'll call the binary in stage 2.
+    //
+    // 2. `--version` for the detail string. Allowed to take up to
+    //    8s because Claude Code in particular loads a lot of JS at
+    //    startup; the previous 2s timeout reported it as "CLI not
+    //    detected" on slower machines / cold starts.
+    let path_lookup = tokio::task::spawn_blocking(move || which::which(bin)).await;
+    let path = match path_lookup {
+        Ok(Ok(p)) => p,
+        _ => {
+            return mk(ToolState::Missing {
+                kind: MissingKind::CliNotInstalled,
+                hint: install_hint.to_string(),
+            });
+        }
+    };
+
+    // Binary exists. Now ask its version.
     let probe = async {
-        tokio::process::Command::new(bin)
+        tokio::process::Command::new(&path)
             .arg("--version")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -124,13 +177,24 @@ async fn detect_binary(
             .output()
             .await
     };
-    match tokio::time::timeout(Duration::from_secs(2), probe).await {
+    match tokio::time::timeout(Duration::from_secs(8), probe).await {
         Ok(Ok(output)) if output.status.success() => {
             let raw = String::from_utf8_lossy(&output.stdout);
             let detail = raw.lines().next().unwrap_or(bin).trim().to_string();
             mk(ToolState::Found { detail })
         }
-        _ => mk(ToolState::Missing),
+        // Binary IS on PATH — `which` confirmed — but its --version
+        // misbehaved (timed out, non-zero exit). Still report it as
+        // Found so the user can use it; just no version string.
+        _ => {
+            tracing::warn!(
+                "{bin} exists at {} but --version failed; reporting as Found anyway",
+                path.display()
+            );
+            mk(ToolState::Found {
+                detail: "version unknown".into(),
+            })
+        }
     }
 }
 
@@ -140,34 +204,96 @@ async fn detect_github() -> ToolStatus {
         display_name: "GitHub",
         category: Category::Provider,
         state,
-        install_hint: "brew install gh && gh auth login",
+        install_hint: "gh auth login",
     };
+
+    // Step 1: is the `gh` CLI on PATH at all? Knowing the binary is
+    // missing tells the user to install — different problem from
+    // "installed but no token."
+    let gh_present = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("gh")
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
 
     let chain = CredentialChain::new()
         .with(EnvProvider::new("GH_TOKEN"))
         .with(EnvProvider::new("GITHUB_TOKEN"))
         .with(CommandProvider::new("gh", &["auth", "token"]));
 
-    match tokio::time::timeout(Duration::from_secs(3), chain.resolve("github")).await {
-        Ok(Ok(cred)) => mk(ToolState::Found {
-            detail: cred.source,
+    let cred = match tokio::time::timeout(Duration::from_secs(3), chain.resolve("github")).await {
+        Ok(Ok(c)) => c,
+        _ => {
+            // No token. Distinguish "no CLI" from "CLI but not auth'd".
+            if !gh_present
+                && std::env::var("GH_TOKEN").is_err()
+                && std::env::var("GITHUB_TOKEN").is_err()
+            {
+                return mk(ToolState::Missing {
+                    kind: MissingKind::CliNotInstalled,
+                    hint: "brew install gh".into(),
+                });
+            }
+            return mk(ToolState::Missing {
+                kind: MissingKind::NotAuthenticated,
+                hint: "gh auth login".into(),
+            });
+        }
+    };
+
+    // Token resolved — verify it actually works by hitting the user
+    // endpoint. A live username is more reassuring (and more
+    // actionable) than just "I have a string."
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        pilot_gh::GhClient::from_credential(cred),
+    )
+    .await
+    {
+        Ok(Ok(client)) => mk(ToolState::Found {
+            detail: format!("@{}", client.authenticated_user()),
         }),
-        _ => mk(ToolState::Missing),
+        // Token present but rejected — distinct from "no token". The
+        // user needs to rotate the credential, not run `gh auth login`
+        // (which might just regenerate the same dead token from the
+        // device flow if their account is in a weird state).
+        Ok(Err(_)) | Err(_) => mk(ToolState::Missing {
+            kind: MissingKind::TokenInvalid,
+            hint: "rotate token: gh auth refresh".into(),
+        }),
     }
 }
 
 async fn detect_linear() -> ToolStatus {
-    let state = match std::env::var("LINEAR_API_KEY") {
-        Ok(v) if !v.is_empty() => ToolState::Found {
-            detail: "LINEAR_API_KEY".into(),
-        },
-        _ => ToolState::Missing,
-    };
-    ToolStatus {
+    let mk = |state| ToolStatus {
         id: "linear",
         display_name: "Linear",
         category: Category::Provider,
         state,
         install_hint: "export LINEAR_API_KEY=lin_api_…",
+    };
+
+    if !matches!(std::env::var("LINEAR_API_KEY"), Ok(v) if !v.is_empty()) {
+        return mk(ToolState::Missing {
+            kind: MissingKind::EnvVarMissing,
+            hint: "export LINEAR_API_KEY=lin_api_…".into(),
+        });
+    }
+
+    match pilot_linear::LinearClient::from_env() {
+        Ok(_) => mk(ToolState::Found {
+            detail: "LINEAR_API_KEY set".into(),
+        }),
+        Err(_) => mk(ToolState::Missing {
+            kind: MissingKind::TokenInvalid,
+            hint: "check LINEAR_API_KEY value".into(),
+        }),
     }
 }

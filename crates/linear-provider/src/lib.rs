@@ -34,6 +34,41 @@ pub enum LinearError {
     Graphql(String),
 }
 
+impl From<LinearError> for ProviderError {
+    fn from(err: LinearError) -> Self {
+        const SOURCE: &str = "linear";
+        match &err {
+            LinearError::MissingKey => ProviderError::auth(SOURCE, err.to_string()),
+            LinearError::Http(_) => {
+                let s = err.to_string().to_lowercase();
+                if s.contains("401") || s.contains("403") || s.contains("unauthorized") {
+                    ProviderError::auth(SOURCE, err.to_string())
+                } else if s.contains("timeout")
+                    || s.contains("connection")
+                    || s.contains("network")
+                    || s.contains("502")
+                    || s.contains("503")
+                    || s.contains("504")
+                {
+                    ProviderError::retryable(SOURCE, err.to_string())
+                } else {
+                    ProviderError::permanent(SOURCE, err.to_string())
+                }
+            }
+            LinearError::Graphql(_) => {
+                let s = err.to_string().to_lowercase();
+                if s.contains("rate limit") || s.contains("temporarily") {
+                    ProviderError::retryable(SOURCE, err.to_string())
+                } else if s.contains("authentication") || s.contains("unauthorized") {
+                    ProviderError::auth(SOURCE, err.to_string())
+                } else {
+                    ProviderError::permanent(SOURCE, err.to_string())
+                }
+            }
+        }
+    }
+}
+
 /// Client for Linear's GraphQL API.
 #[derive(Clone)]
 pub struct LinearClient {
@@ -147,9 +182,7 @@ impl TaskProvider for LinearClient {
     }
 
     async fn fetch_tasks(&self) -> Result<Vec<Task>, ProviderError> {
-        self.fetch_all()
-            .await
-            .map_err(|e| ProviderError::Api(e.to_string()))
+        self.fetch_all().await.map_err(Into::into)
     }
 
     fn username(&self) -> Option<&str> {

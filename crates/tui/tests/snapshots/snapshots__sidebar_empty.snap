@@ -1,9 +1,9 @@
 ---
 source: crates/tui/tests/snapshots.rs
+assertion_line: 115
 expression: rendered
 ---
-┌ INBOX (0) ───────────────────────────┐
-│                                      │
-│                                      │
-│                                      │
-└──────────────────────────────────────┘
+ PILOT  0  [7d]
+ / filter (needs:reply ci:failed …)
+
+ ────────────────────────────────────

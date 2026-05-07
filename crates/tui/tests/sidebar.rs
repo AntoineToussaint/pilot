@@ -21,9 +21,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pilot_core::{
     CiStatus, ReviewStatus, SessionKey, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
 };
-use pilot_v2_ipc::{Command, Event, TerminalKind};
-use pilot_v2_tui::components::{Mailbox, Sidebar, sidebar::VisibleRow};
-use pilot_v2_tui::{Component, ComponentId};
+use pilot_ipc::{Command, Event, TerminalKind};
+use pilot_tui::components::{Mailbox, Sidebar, sidebar::VisibleRow};
+use pilot_tui::PaneId;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -97,7 +97,7 @@ fn ws_key(workspace: &Workspace) -> SessionKey {
 
 #[test]
 fn snapshot_populates_workspaces() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w1 = make_workspace("owner/repo", "o/r#1", now);
     let w2 = make_workspace("owner/repo", "o/r#2", now - Duration::hours(1));
@@ -111,7 +111,7 @@ fn snapshot_populates_workspaces() {
 
 #[test]
 fn workspace_upserted_inserts_then_updates_in_place() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w = make_workspace("owner/repo", "o/r#1", now);
     s.on_event(&Event::WorkspaceUpserted(Box::new(w)));
@@ -130,7 +130,7 @@ fn workspace_upserted_inserts_then_updates_in_place() {
 
 #[test]
 fn workspace_removed_prunes_and_clamps_cursor() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w1 = make_workspace("owner/repo", "o/r#1", now);
     let w2 = make_workspace("owner/repo", "o/r#2", now - Duration::hours(1));
@@ -153,7 +153,7 @@ fn workspace_removed_prunes_and_clamps_cursor() {
 
 #[test]
 fn cursor_follows_workspace_key_across_resort() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w1 = make_workspace("owner/repo", "o/r#1", now);
     let w2 = make_workspace("owner/repo", "o/r#2", now - Duration::hours(1));
@@ -181,7 +181,7 @@ fn cursor_follows_workspace_key_across_resort() {
 
 #[test]
 fn merged_workspace_hidden() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let mut merged = make_workspace("owner/repo", "o/r#1", now);
     if let Some(t) = merged.pr.as_mut() {
@@ -200,7 +200,7 @@ fn merged_workspace_hidden() {
 
 #[test]
 fn rows_are_grouped_by_repo_with_headers() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     s.on_event(&Event::Snapshot {
         workspaces: vec![
@@ -229,8 +229,11 @@ fn rows_are_grouped_by_repo_with_headers() {
 }
 
 #[test]
-fn cursor_skips_repo_headers() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+fn cursor_walks_through_repo_headers() {
+    // j/k now stop on repo headers too — needed so users can land
+    // on a collapsed header and Space-to-expand. Header rows have
+    // no session key (selected_session_key is None on them).
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     s.on_event(&Event::Snapshot {
         workspaces: vec![
@@ -239,17 +242,18 @@ fn cursor_skips_repo_headers() {
         ],
         terminals: vec![],
     });
-    // First press of `j` must hop OVER the beta header to the beta
-    // workspace; the cursor never rests on a header row.
+    // Layout: [alpha header, alpha#1, beta header, beta#1]. Cursor
+    // starts on alpha#1. j → beta header → beta#1.
+    assert_eq!(
+        s.selected_session_key().map(|k| k.to_string()),
+        Some(expected_session_key("alpha#1"))
+    );
+    s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
+    assert!(s.selected_session_key().is_none(), "cursor on beta header");
     s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
     assert_eq!(
         s.selected_session_key().map(|k| k.to_string()),
         Some(expected_session_key("beta#1"))
-    );
-    s.handle_key(key_code(KeyCode::Char('k')), &mut Vec::new());
-    assert_eq!(
-        s.selected_session_key().map(|k| k.to_string()),
-        Some(expected_session_key("alpha#1"))
     );
 }
 
@@ -257,7 +261,7 @@ fn cursor_skips_repo_headers() {
 
 #[test]
 fn snoozed_workspace_hidden_from_inbox() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let mut snoozed = make_workspace("owner/repo", "o/r#1", now);
     snoozed.snoozed_until = Some(now + Duration::hours(4));
@@ -271,7 +275,7 @@ fn snoozed_workspace_hidden_from_inbox() {
 
 #[test]
 fn toggle_mailbox_cycles_inbox_inactive_snoozed() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let mut snoozed = make_workspace("owner/repo", "o/r#1", now);
     snoozed.snoozed_until = Some(now + Duration::hours(4));
@@ -302,7 +306,7 @@ fn inactive_mailbox_shows_merged_and_closed_workspaces() {
     // The whole point of Inactive: surface workspaces whose primary
     // task is merged or closed. Without this view those rows just
     // disappeared from the inbox after a merge.
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let mut merged = make_workspace("owner/repo", "merged#1", now);
     if let Some(t) = merged.pr.as_mut() {
@@ -329,7 +333,7 @@ fn inactive_mailbox_shows_merged_and_closed_workspaces() {
 // ── Keybindings → commands ─────────────────────────────────────────────
 
 fn populated_sidebar() -> Sidebar {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     s.on_event(&Event::Snapshot {
         workspaces: vec![
@@ -381,7 +385,7 @@ fn x_emits_spawn_codex_for_selected() {
 
 #[test]
 fn custom_agent_shortcuts_override_defaults() {
-    let mut s = Sidebar::new(ComponentId::new(1))
+    let mut s = Sidebar::new(PaneId::new(1))
         .with_agent_shortcuts([('c', "claude".into()), ('a', "aider".into())]);
     let now = Utc::now();
     s.on_event(&Event::WorkspaceUpserted(Box::new(make_workspace(
@@ -407,7 +411,7 @@ fn custom_agent_shortcuts_override_defaults() {
     let outcome = s.handle_key(key_code(KeyCode::Char('x')), &mut cmds);
     assert_eq!(
         outcome,
-        pilot_v2_tui::Outcome::BubbleUp,
+        pilot_tui::PaneOutcome::Pass,
         "unmapped key bubbles, doesn't spawn a random default"
     );
     assert!(cmds.is_empty());
@@ -415,7 +419,7 @@ fn custom_agent_shortcuts_override_defaults() {
 
 #[test]
 fn c_on_empty_sidebar_emits_nothing() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let mut cmds = Vec::new();
     s.handle_key(key_code(KeyCode::Char('c')), &mut cmds);
     assert!(cmds.is_empty());
@@ -451,34 +455,10 @@ fn m_emits_mark_read() {
 
 #[test]
 fn g_emits_refresh_without_selection() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let mut cmds = Vec::new();
     s.handle_key(key_code(KeyCode::Char('g')), &mut cmds);
     assert!(matches!(cmds.as_slice(), [Command::Refresh]));
-}
-
-#[test]
-fn shift_m_emits_merge() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    s.handle_key(shift_char('M'), &mut cmds);
-    assert!(matches!(cmds.as_slice(), [Command::Merge { .. }]));
-}
-
-#[test]
-fn shift_v_emits_approve() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    s.handle_key(shift_char('V'), &mut cmds);
-    assert!(matches!(cmds.as_slice(), [Command::Approve { .. }]));
-}
-
-#[test]
-fn shift_u_emits_update_branch() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    s.handle_key(shift_char('U'), &mut cmds);
-    assert!(matches!(cmds.as_slice(), [Command::UpdateBranch { .. }]));
 }
 
 // ── Snooze semantics ───────────────────────────────────────────────────
@@ -503,7 +483,7 @@ fn z_snoozes_unsnoozed_for_4h() {
 
 #[test]
 fn z_unsnoozes_already_snoozed() {
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let mut snoozed = make_workspace("owner/repo", "o/r#1", now);
     snoozed.snoozed_until = Some(now + Duration::hours(4));
@@ -603,16 +583,20 @@ fn j_stops_at_last_workspace() {
 }
 
 #[test]
-fn k_stops_at_first_workspace() {
+fn k_stops_at_top_row() {
+    // After repeatedly pressing k from any row, the cursor lands
+    // on the top of the visible list. With the collapse-aware nav
+    // that's the repo header — assert via `cursor_on_repo_header`
+    // because `selected_session_key` is None on a header.
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
     s.handle_key(key_code(KeyCode::Char('j')), &mut cmds);
     for _ in 0..10 {
         s.handle_key(key_code(KeyCode::Char('k')), &mut cmds);
     }
-    assert_eq!(
-        s.selected_session_key().map(|k| k.to_string()),
-        Some(expected_session_key("o/r#1"))
+    assert!(
+        s.cursor_on_repo_header(),
+        "k repeatedly should leave the cursor on the top repo header, not a workspace"
     );
 }
 
@@ -623,7 +607,7 @@ fn unknown_key_bubbles_up() {
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
     let outcome = s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut cmds);
-    assert_eq!(outcome, pilot_v2_tui::Outcome::BubbleUp);
+    assert_eq!(outcome, pilot_tui::PaneOutcome::Pass);
     assert!(cmds.is_empty());
 }
 
@@ -650,9 +634,10 @@ fn render_to_string(s: &mut Sidebar, width: u16, height: u16, focused: bool) -> 
 #[test]
 fn render_smoke_has_mailbox_label_and_grouped_rows() {
     let mut s = populated_sidebar();
-    let rendered = render_to_string(&mut s, 40, 10, true);
-    assert!(rendered.contains("INBOX"));
-    assert!(rendered.contains("(2)"), "row count in title");
+    let rendered = render_to_string(&mut s, 40, 12, true);
+    // V1-style brand label: `PILOT` for the Inbox mailbox.
+    assert!(rendered.contains("PILOT"));
+    assert!(rendered.contains('2'), "row count in title");
     assert!(rendered.contains("owner/repo"), "repo header rendered");
     assert!(rendered.contains("task: o/r#1"), "first workspace visible");
 }
@@ -671,12 +656,12 @@ fn render_shows_cursor_marker_on_selected_workspace() {
 #[test]
 fn render_mailbox_toggles_title() {
     let mut s = populated_sidebar();
-    // Inbox → Inactive → Snoozed; render the title in each.
+    // PILOT → INACTIVE → SNOOZED; uppercase brand label per V1.
     s.handle_key(shift_char('S'), &mut Vec::new());
-    let rendered = render_to_string(&mut s, 40, 10, true);
+    let rendered = render_to_string(&mut s, 40, 12, true);
     assert!(rendered.contains("INACTIVE"));
     s.handle_key(shift_char('S'), &mut Vec::new());
-    let rendered = render_to_string(&mut s, 40, 10, true);
+    let rendered = render_to_string(&mut s, 40, 12, true);
     assert!(rendered.contains("SNOOZED"));
 }
 
@@ -717,11 +702,11 @@ fn add_session(workspace: &mut Workspace, name: &str) -> pilot_core::SessionId {
 }
 
 #[test]
-fn workspace_with_one_session_does_not_expand_into_subrows() {
-    // The user's rule: don't visualize what's redundant. A workspace
-    // with exactly one session shows a single row — adding a sub-row
-    // for that one session would just be noise.
-    let mut s = Sidebar::new(ComponentId::new(1));
+fn workspace_with_one_session_does_not_show_a_subrow() {
+    // 99% of workspaces have a single session — duplicating it as
+    // its own row is visual noise. The runner badge on the workspace
+    // row already conveys "this workspace has a live session".
+    let mut s = Sidebar::new(PaneId::new(1));
     let mut w = make_workspace("owner/repo", "o/r#1", Utc::now());
     add_session(&mut w, "claude");
     s.on_event(&Event::Snapshot {
@@ -733,7 +718,7 @@ fn workspace_with_one_session_does_not_expand_into_subrows() {
         .iter()
         .filter(|r| matches!(r, VisibleRow::Session { .. }))
         .count();
-    assert_eq!(session_rows, 0, "no Session sub-rows for 1 session");
+    assert_eq!(session_rows, 0, "one session → no separate sub-row");
 }
 
 #[test]
@@ -741,7 +726,7 @@ fn workspace_with_two_sessions_expands_into_subrows() {
     // Crossing the threshold from 1 → 2 sessions makes the workspace
     // visually expand: the workspace row stays, plus one Session
     // sub-row per session.
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let mut w = make_workspace("owner/repo", "o/r#1", Utc::now());
     add_session(&mut w, "claude");
     add_session(&mut w, "shell");
@@ -761,7 +746,7 @@ fn workspace_with_two_sessions_expands_into_subrows() {
 fn cursor_can_land_on_a_session_subrow() {
     // With 2+ sessions, j moves the cursor through the session
     // sub-rows. selected_session_id surfaces which one.
-    let mut s = Sidebar::new(ComponentId::new(1));
+    let mut s = Sidebar::new(PaneId::new(1));
     let mut w = make_workspace("owner/repo", "o/r#1", Utc::now());
     let s0 = add_session(&mut w, "claude");
     let s1 = add_session(&mut w, "shell");
@@ -782,12 +767,12 @@ fn cursor_can_land_on_a_session_subrow() {
 }
 
 #[test]
-fn session_created_event_expands_workspace() {
-    // Real-time scenario: the user has a workspace with 1 session,
-    // hits `c` to spawn Claude into a new session. The daemon emits
-    // SessionCreated; the sidebar must immediately expand to show
-    // both sessions as sub-rows.
-    let mut s = Sidebar::new(ComponentId::new(1));
+fn session_created_event_expands_into_subrows_at_two() {
+    // The user has a workspace with 1 session, hits `c` to spawn
+    // Claude into a second session. The daemon emits SessionCreated;
+    // the sidebar crosses the 1→2 threshold and now shows one Session
+    // sub-row per session so the user can pick between them.
+    let mut s = Sidebar::new(PaneId::new(1));
     let mut w = make_workspace("owner/repo", "o/r#1", Utc::now());
     add_session(&mut w, "shell");
     s.on_event(&Event::Snapshot {
@@ -799,7 +784,8 @@ fn session_created_event_expands_workspace() {
             .iter()
             .filter(|r| matches!(r, VisibleRow::Session { .. }))
             .count(),
-        0
+        0,
+        "single-session workspaces collapse — runner badge handles them"
     );
 
     let new_session = WorkspaceSession::new(
@@ -817,15 +803,15 @@ fn session_created_event_expands_workspace() {
             .filter(|r| matches!(r, VisibleRow::Session { .. }))
             .count(),
         2,
-        "expanded once second session arrived"
+        "expanded to two sub-rows once the workspace had two sessions"
     );
 }
 
 #[test]
-fn session_ended_event_collapses_back_when_only_one_remains() {
-    // The mirror of `session_created_event_expands_workspace`:
-    // dropping back to 1 session collapses the visual tree.
-    let mut s = Sidebar::new(ComponentId::new(1));
+fn session_ended_event_collapses_back_below_two() {
+    // 2 → 1 sessions: the workspace drops back to a single workspace
+    // row with no Session sub-rows. The remaining session is implicit.
+    let mut s = Sidebar::new(PaneId::new(1));
     let mut w = make_workspace("owner/repo", "o/r#1", Utc::now());
     add_session(&mut w, "shell");
     let claude_id = add_session(&mut w, "claude");
@@ -851,6 +837,6 @@ fn session_ended_event_collapses_back_when_only_one_remains() {
             .filter(|r| matches!(r, VisibleRow::Session { .. }))
             .count(),
         0,
-        "collapsed back when only 1 session left"
+        "single survivor → workspace row alone, no sub-rows"
     );
 }

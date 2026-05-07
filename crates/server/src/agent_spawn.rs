@@ -20,7 +20,7 @@
 
 use crate::pty::{DaemonPty, PtyError};
 use pilot_core::SessionKey;
-use pilot_v2_llm_proxy::{ProxyConfig, ProxyError, ProxyRecord, ProxyServer};
+use pilot_llm_proxy::{ProxyConfig, ProxyError, ProxyRecord, ProxyServer};
 use portable_pty::PtySize;
 use std::collections::HashMap;
 use std::path::PathBuf;

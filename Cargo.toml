@@ -15,12 +15,59 @@ members = [
     "crates/linear-provider",
     "crates/llm-proxy",
     "crates/tui",
+    # Vendored from https://github.com/Uzaaft/libghostty-rs (commit
+    # f27655a). Includes pilot's local Zig-version + xcframework
+    # patches that haven't shipped upstream yet. Vendored so a fresh
+    # clone of pilot builds standalone — no sibling-clone dance.
+    "crates/libghostty-vt",
+    "crates/libghostty-vt-sys",
 ]
 
+# ── cargo-dist (release plumbing) ───────────────────────────────────────
+#
+# `dist` reads this section to scaffold GitHub Releases, a Homebrew
+# formula, and a curl-able `install.sh`. Triggered by pushing a tag
+# matching the `tag-namespace` shape (e.g. `v0.1.0`). Bump
+# `[workspace.package].version` first, then `git tag v0.1.0 && git
+# push --tags` to fire the release workflow generated under
+# `.github/workflows/release.yml`.
+#
+# The CI workflow needs Zig installed before `cargo build` runs — see
+# the `pre-build` step in the generated release workflow.
+
+[workspace.metadata.dist]
+# Use the latest stable cargo-dist on every CI run.
+cargo-dist-version = "0.28.0"
+# Generic CI generator (GitHub Actions specifically).
+ci = ["github"]
+# What kinds of installer to publish alongside the prebuilt binaries.
+# `shell` = `curl ... | sh` script for Linux/macOS.
+# `homebrew` = a tap-pushed Homebrew formula.
+installers = ["shell", "homebrew"]
+# Tap repo to push the Homebrew formula to. Must exist + give the
+# release workflow write access via a deploy key or PAT.
+tap = "AntoineToussaint/homebrew-pilot"
+# Build matrix. Add `x86_64-pc-windows-msvc` once the Windows port lands.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# Extra runner setup steps. libghostty-vt's build.rs invokes
+# `zig build` during compilation — every CI runner needs Zig 0.15.2+
+# on PATH. cargo-dist surfaces these to the generated workflow.
+github-build-setup = "../release-setup.yml"
+# Publish all pushes to GitHub Releases (including pre-releases).
+pr-run-mode = "plan"
+
 [workspace.package]
-version = "0.2.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/AntoineToussaint/pilot"
+readme = "README.md"
 
 [workspace.dependencies]
 # ── Shared library crates ──────────────────────────────────────────────
@@ -33,10 +80,10 @@ pilot-git-ops     = { path = "crates/git-ops" }
 pilot-gh          = { path = "crates/gh-provider" }
 pilot-tui-term    = { path = "crates/tui-term" }
 
-# ── v2 crates ──────────────────────────────────────────────────────────
-pilot-v2-ipc       = { path = "crates/ipc" }
-pilot-v2-agents    = { path = "crates/agents" }
-pilot-v2-llm-proxy = { path = "crates/llm-proxy" }
+# ── Daemon-side crates ─────────────────────────────────────────────────
+pilot-ipc       = { path = "crates/ipc" }
+pilot-agents    = { path = "crates/agents" }
+pilot-llm-proxy = { path = "crates/llm-proxy" }
 
 # ── Third-party ────────────────────────────────────────────────────────
 tokio              = { version = "1", features = ["full"] }
@@ -51,9 +98,17 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossterm          = { version = "0.29", features = ["event-stream"] }
 ratatui            = "0.30"
+tuirealm           = "4.1"
 tui-markdown       = "0.3"
 chrono             = { version = "0.4", features = ["serde"] }
 portable-pty       = "0.8"
 rusqlite           = { version = "0.32", features = ["bundled"] }
 parking_lot        = "0.12"
 octocrab           = "0.44"
+
+# Vendored libghostty-rs — see `crates/libghostty-vt` and
+# `crates/libghostty-vt-sys`. Both build a Zig-compiled C library
+# under the hood (the build.rs fetches ghostty's source on first
+# compile).
+libghostty-vt     = { path = "crates/libghostty-vt" }
+libghostty-vt-sys = { path = "crates/libghostty-vt-sys" }

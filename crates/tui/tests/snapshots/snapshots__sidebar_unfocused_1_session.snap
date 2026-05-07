@@ -1,11 +1,10 @@
 ---
 source: crates/tui/tests/snapshots.rs
-assertion_line: 108
 expression: rendered
 ---
-┌ INBOX (1) ───────────────────────────┐
-│owner/repo                            │
-│  ▸ task: o/r#1                       │
-│                                      │
-│                                      │
-└──────────────────────────────────────┘
+ PILOT  1  [7d]
+ / filter (needs:reply ci:failed …)
+
+ ────────────────────────────────────
+
+ ▾  owner/repo  1

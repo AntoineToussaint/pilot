@@ -3,10 +3,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pilot_core::SessionKey;
-use pilot_v2_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
-use pilot_v2_tui::components::TerminalStack;
-use pilot_v2_tui::components::terminal_stack::{RECENT_OUTPUT_CAP, strip_ansi};
-use pilot_v2_tui::{Component, ComponentId, Outcome};
+use pilot_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
+use pilot_tui::components::TerminalStack;
+use pilot_tui::components::terminal_stack::{RECENT_OUTPUT_CAP, strip_ansi};
+use pilot_tui::{PaneId, PaneOutcome};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -37,14 +37,14 @@ fn spawned(id: u64, session: &str, kind: TerminalKind) -> Event {
 
 #[test]
 fn spawn_event_creates_slot() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
     assert_eq!(t.terminal_count(), 1);
 }
 
 #[test]
 fn terminals_filtered_by_active_session() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
     t.on_event(&spawned(2, "o/r#2", TerminalKind::Shell));
 
@@ -62,7 +62,7 @@ fn terminals_filtered_by_active_session() {
 
 #[test]
 fn output_event_appends_to_recent_buffer() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     t.on_event(&Event::TerminalOutput {
@@ -76,7 +76,7 @@ fn output_event_appends_to_recent_buffer() {
 
 #[test]
 fn output_for_unknown_terminal_is_dropped() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     // No spawn — output arrives for a terminal we don't know about.
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(999),
@@ -91,7 +91,7 @@ fn output_preserves_raw_escapes_for_inspection() {
     // active_content() is the raw recent-bytes buffer used for tests
     // and pattern detection — the libghostty-vt parser is what
     // turns these into a rendered cell grid at draw time.
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let raw = b"\x1b[31mred\x1b[0m text".to_vec();
@@ -112,7 +112,7 @@ fn exit_event_closes_the_terminal_window() {
     // terminal window goes away — same model as every other terminal
     // emulator. Keeping a "dead" tab around was confusing and made
     // the user manually clean up.
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.on_event(&Event::TerminalExited {
         terminal_id: TerminalId(1),
@@ -123,7 +123,7 @@ fn exit_event_closes_the_terminal_window() {
 
 #[test]
 fn recent_buffer_is_capped() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let chunk = vec![b'A'; 4096];
@@ -147,7 +147,7 @@ fn recent_buffer_is_capped() {
 
 #[test]
 fn workspace_removed_prunes_all_its_terminals() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
     t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
     t.on_event(&spawned(3, "o/r#2", TerminalKind::Shell));
@@ -159,7 +159,7 @@ fn workspace_removed_prunes_all_its_terminals() {
 
 #[test]
 fn snapshot_replaces_all_terminals() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     // Snapshot arrives with different set — prior gets wiped.
     t.on_event(&Event::Snapshot {
@@ -184,13 +184,13 @@ fn snapshot_replaces_all_terminals() {
 
 #[test]
 fn tab_idx_starts_at_zero() {
-    let t = TerminalStack::new(ComponentId::new(1));
+    let t = TerminalStack::new(PaneId::new(1));
     assert_eq!(t.active_tab_idx(), 0);
 }
 
 #[test]
 fn cycle_tab_forward_wraps() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     for i in 1..=3 {
         t.on_event(&spawned(i, "o/r#1", TerminalKind::Shell));
     }
@@ -205,7 +205,7 @@ fn cycle_tab_forward_wraps() {
 
 #[test]
 fn cycle_tab_backward_wraps() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     for i in 1..=3 {
         t.on_event(&spawned(i, "o/r#1", TerminalKind::Shell));
     }
@@ -216,7 +216,7 @@ fn cycle_tab_backward_wraps() {
 
 #[test]
 fn set_active_session_resets_tab_idx() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.on_event(&spawned(2, "o/r#1", TerminalKind::Agent("claude".into())));
     t.on_event(&spawned(3, "o/r#2", TerminalKind::Shell));
@@ -233,13 +233,13 @@ fn set_active_session_resets_tab_idx() {
 
 #[test]
 fn char_key_emits_write_to_active_terminal() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(42, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
 
     let mut cmds = Vec::new();
     let outcome = t.handle_key(ch('a'), &mut cmds);
-    assert_eq!(outcome, Outcome::Consumed);
+    assert_eq!(outcome, PaneOutcome::Consumed);
     assert_eq!(cmds.len(), 1);
     match &cmds[0] {
         Command::Write { terminal_id, bytes } => {
@@ -252,7 +252,7 @@ fn char_key_emits_write_to_active_terminal() {
 
 #[test]
 fn enter_emits_cr_to_terminal() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let mut cmds = Vec::new();
@@ -265,7 +265,7 @@ fn enter_emits_cr_to_terminal() {
 
 #[test]
 fn shift_enter_emits_alt_enter() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let mut cmds = Vec::new();
@@ -281,7 +281,7 @@ fn shift_enter_emits_alt_enter() {
 
 #[test]
 fn ctrl_letter_emits_control_byte() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let mut cmds = Vec::new();
@@ -296,14 +296,14 @@ fn ctrl_letter_emits_control_byte() {
 fn ctrl_bracket_flows_to_agent_too() {
     // The terminal escape moved from `Ctrl-]` to a configurable
     // typed sequence handled at the app dispatcher level (default
-    // `]]]`). The terminal stack itself no longer owns ANY escape
+    // `]]`). The terminal stack itself no longer owns ANY escape
     // shortcut — every key flows to the agent.
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let mut cmds = Vec::new();
     let outcome = t.handle_key(ctrl(']'), &mut cmds);
-    assert_eq!(outcome, Outcome::Consumed);
+    assert_eq!(outcome, PaneOutcome::Consumed);
     // Ctrl-] encodes as 0x1d.
     assert!(matches!(
         cmds.first(),
@@ -315,13 +315,13 @@ fn ctrl_bracket_flows_to_agent_too() {
 fn ctrl_o_flows_to_agent() {
     // The terminal stack has no escape shortcut at all — every
     // keystroke flows to the agent. Pilot's escape latch (default
-    // `]]]`) lives at the app dispatcher level.
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    // `]]`) lives at the app dispatcher level.
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let mut cmds = Vec::new();
     let outcome = t.handle_key(ctrl('o'), &mut cmds);
-    assert_eq!(outcome, Outcome::Consumed);
+    assert_eq!(outcome, PaneOutcome::Consumed);
     // Ctrl-O encodes as 0x0f.
     assert!(matches!(
         cmds.first(),
@@ -334,12 +334,12 @@ fn tab_flows_to_agent_for_autocomplete() {
     // Tab is essential inside a shell / Claude prompt for completion.
     // The terminal stack must NOT swallow it as a focus-cycle key —
     // that's a job for the app-level handler, gated on focus.
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
     let mut cmds = Vec::new();
     let outcome = t.handle_key(code(KeyCode::Tab), &mut cmds);
-    assert_eq!(outcome, Outcome::Consumed);
+    assert_eq!(outcome, PaneOutcome::Consumed);
     // Should produce a Write with a literal \t byte.
     assert!(matches!(
         cmds.first(),
@@ -349,12 +349,12 @@ fn tab_flows_to_agent_for_autocomplete() {
 
 #[test]
 fn keys_without_active_terminal_bubble_up() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     // No spawned terminals for the active session.
     t.set_active_session(Some(sk("o/r#1")));
     let mut cmds = Vec::new();
     let outcome = t.handle_key(ch('x'), &mut cmds);
-    assert_eq!(outcome, Outcome::BubbleUp);
+    assert_eq!(outcome, PaneOutcome::Pass);
     assert!(cmds.is_empty());
 }
 
@@ -415,7 +415,7 @@ fn render_to_string(t: &mut TerminalStack, w: u16, h: u16, focused: bool) -> Str
 
 #[test]
 fn render_empty_shows_placeholder() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     let out = render_to_string(&mut t, 60, 10, true);
     assert!(
         out.contains("no terminals"),
@@ -425,7 +425,7 @@ fn render_empty_shows_placeholder() {
 
 #[test]
 fn render_shows_tab_bar_and_content() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
     t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
@@ -446,7 +446,7 @@ fn render_shows_tab_bar_and_content() {
 
 #[test]
 fn render_tab_bar_updates_after_cycle() {
-    let mut t = TerminalStack::new(ComponentId::new(1));
+    let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
     t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
     t.set_active_session(Some(sk("o/r#1")));
@@ -469,4 +469,225 @@ fn render_tab_bar_updates_after_cycle() {
     let out_after = render_to_string(&mut t, 60, 10, true);
     assert!(out_after.contains("SHELL_OUTPUT"));
     assert!(!out_after.contains("AGENT_OUTPUT"));
+}
+
+// ── Singleton lookup + focus ─────────────────────────────────────────
+//
+// The "one Claude per session" invariant lives at the App layer (it
+// intercepts duplicate spawns and routes them to focus_terminal).
+// These tests cover the primitives the App leans on.
+
+#[test]
+fn find_runner_returns_existing_singleton_in_same_session() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let found = t.find_runner(&sk("o/r#1"), &TerminalKind::Agent("claude".into()));
+    assert_eq!(found, Some(TerminalId(1)));
+}
+
+#[test]
+fn find_runner_distinguishes_agents_by_id() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let claude = t.find_runner(&sk("o/r#1"), &TerminalKind::Agent("claude".into()));
+    let codex = t.find_runner(&sk("o/r#1"), &TerminalKind::Agent("codex".into()));
+    assert_eq!(claude, Some(TerminalId(1)));
+    assert_eq!(codex, None, "codex isn't claude");
+}
+
+#[test]
+fn find_runner_returns_none_for_shell() {
+    // Shells are explicitly multi: every `s` press spawns a fresh
+    // one, no singleton lookup ever returns an existing slot.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert!(t.find_runner(&sk("o/r#1"), &TerminalKind::Shell).is_none());
+}
+
+#[test]
+fn find_runner_scopes_to_session() {
+    // Claude in session A is invisible to a lookup in session B —
+    // sessions are independent worktrees, so the singleton constraint
+    // doesn't cross sessions.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert_eq!(
+        t.find_runner(&sk("o/r#2"), &TerminalKind::Agent("claude".into())),
+        None,
+        "claude in #1 doesn't satisfy a #2 lookup"
+    );
+}
+
+#[test]
+fn focus_terminal_activates_target_tab_and_expands() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Agent("codex".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+    // Now collapse and focus the second tab.
+    t.set_collapsed(true);
+    assert!(t.is_collapsed());
+
+    let switched = t.focus_terminal(TerminalId(2));
+    assert!(switched);
+    assert_eq!(t.active_terminal_id(), Some(TerminalId(2)));
+    assert!(!t.is_collapsed(), "focusing a tab expands the section");
+}
+
+#[test]
+fn focus_terminal_returns_false_for_invisible_target() {
+    // Target belongs to a different session → not in `visible_terminals`
+    // → focus_terminal can't switch to it.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(2, "o/r#2", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert!(!t.focus_terminal(TerminalId(2)));
+    assert_eq!(t.active_terminal_id(), Some(TerminalId(1)));
+}
+
+// ── Tile-manager wiring ───────────────────────────────────────────────
+//
+// The renderer + Ctrl-w prefix drive the SessionLayout state. These
+// tests cover the state-machine path: arming the prefix, splitting,
+// focus moves, close. Render-shape tests live alongside (visual checks
+// require a TestBackend which we already use elsewhere).
+
+use pilot_core::{SessionLayout, TileTree};
+
+fn ws_key(s: &str) -> SessionKey {
+    s.into()
+}
+
+#[test]
+fn ctrl_w_armed_then_pipe_emits_shell_spawn() {
+    // `Ctrl-w |` should arm a pending vertical split and emit a
+    // Shell spawn. The new terminal's id arrives later via
+    // TerminalSpawned and triggers `commit_pending_split`.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('w'), &mut cmds);
+    assert!(cmds.is_empty(), "Ctrl-w on its own only arms");
+    t.handle_key(ch('|'), &mut cmds);
+
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Command::Spawn { kind: TerminalKind::Shell, .. }
+        )),
+        "split commits a Shell spawn so the new tile has a runner"
+    );
+}
+
+#[test]
+fn terminal_spawned_after_split_promotes_to_splits_layout() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_layout(SessionLayout::Tabs { active: 0 });
+
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('w'), &mut cmds);
+    t.handle_key(ch('|'), &mut cmds);
+    // Stage 2: daemon would respond with TerminalSpawned for the new shell.
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+
+    match t.layout() {
+        SessionLayout::Splits { tree, focused } => {
+            // Tree is HSplit(Leaf(1), Leaf(2)) — old leaf on the
+            // left, new shell on the right.
+            assert_eq!(tree.leaves(), vec![1, 2]);
+            // Focus lands on the new leaf so the user types into the
+            // freshly-spawned shell.
+            assert_eq!(focused, &vec![1u8]);
+        }
+        SessionLayout::Tabs { .. } => panic!("expected Splits after split, got Tabs"),
+    }
+}
+
+#[test]
+fn ctrl_w_l_moves_focus_right() {
+    // Pre-build a 2-leaf HSplit, focus on the left.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.set_layout(SessionLayout::Splits {
+        tree: TileTree::HSplit {
+            left: Box::new(TileTree::Leaf { terminal_id: 1 }),
+            right: Box::new(TileTree::Leaf { terminal_id: 2 }),
+            ratio: 50,
+        },
+        focused: vec![0],
+    });
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('w'), &mut cmds);
+    t.handle_key(ch('l'), &mut cmds);
+    if let SessionLayout::Splits { focused, .. } = t.layout() {
+        assert_eq!(focused, &vec![1u8], "Ctrl-w l moved focus to right tile");
+    }
+    // Persist via SetSessionLayout.
+    assert!(
+        cmds.iter().any(|c| matches!(c, Command::SetSessionLayout { .. })),
+        "focus moves persist"
+    );
+}
+
+#[test]
+fn ctrl_w_q_closes_focused_tile_and_collapses() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.set_layout(SessionLayout::Splits {
+        tree: TileTree::HSplit {
+            left: Box::new(TileTree::Leaf { terminal_id: 1 }),
+            right: Box::new(TileTree::Leaf { terminal_id: 2 }),
+            ratio: 50,
+        },
+        focused: vec![1],
+    });
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('w'), &mut cmds);
+    t.handle_key(ch('q'), &mut cmds);
+    // Layout collapsed back to Tabs since only one leaf remained.
+    assert!(
+        matches!(t.layout(), SessionLayout::Tabs { .. }),
+        "single-leaf collapse downgrades to Tabs"
+    );
+    // Daemon-side close emitted for the killed tile.
+    assert!(
+        cmds.iter().any(|c| matches!(c, Command::Close { .. })),
+        "close kills the runner's PTY"
+    );
+}
+
+#[test]
+fn ctrl_w_arms_consumes_only_the_prefix() {
+    // After Ctrl-w fires once, a normal keystroke should NOT be a
+    // tile action — it should fall through to the PTY.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+
+    let mut cmds = Vec::new();
+    // Press a regular key. No prefix → routes to PTY.
+    t.handle_key(ch('x'), &mut cmds);
+    assert!(
+        cmds.iter().any(|c| matches!(c, Command::Write { .. })),
+        "untouched keys go to the active terminal"
+    );
 }

@@ -9,7 +9,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use pilot_v2_llm_proxy::{ApiProvider, ProxyConfig, ProxyServer, SESSION_TAG_HEADER};
+use pilot_llm_proxy::{ApiProvider, ProxyConfig, ProxyServer, SESSION_TAG_HEADER};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -6,9 +6,11 @@
 mod client;
 mod graphql;
 mod poller;
+pub mod rate_budget;
 
 pub use client::GhClient;
 pub use poller::GhPoller;
+pub use rate_budget::{AcquireError, RateBudget, RemoteRateLimit, Snapshot as RateSnapshot};
 
 use pilot_core::{ProviderError, Scope, ScopeSource};
 use std::future::Future;
@@ -40,12 +42,7 @@ impl ScopeSource for GhScopes {
     fn list_scopes<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Scope>, ProviderError>> + Send + 'a>> {
-        Box::pin(async move {
-            self.client
-                .list_scopes()
-                .await
-                .map_err(|e| ProviderError::Api(e.to_string()))
-        })
+        Box::pin(async move { self.client.list_scopes().await.map_err(Into::into) })
     }
 
     fn list_children<'a>(
@@ -56,7 +53,7 @@ impl ScopeSource for GhScopes {
             self.client
                 .list_repos_in_org(parent_id)
                 .await
-                .map_err(|e| ProviderError::Api(e.to_string()))
+                .map_err(Into::into)
         })
     }
 }

@@ -6,7 +6,7 @@
 //! one of these assertions blows up. Far better than finding out when
 //! a v0.2 client can't talk to a v0.3 daemon.
 
-use pilot_v2_ipc::{
+use pilot_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
     AgentState, AgentUsage, Command, Event, PrincipalId, ProviderCredentialInput,
     ProviderCredentialMetadata, TerminalId, TerminalKind, TerminalSnapshot,
@@ -167,15 +167,6 @@ fn all_commands() -> Vec<Command> {
             until: chrono::Utc::now() + chrono::Duration::hours(4),
         },
         Command::Unsnooze {
-            session_key: key.clone(),
-        },
-        Command::Merge {
-            session_key: key.clone(),
-        },
-        Command::Approve {
-            session_key: key.clone(),
-        },
-        Command::UpdateBranch {
             session_key: key.clone(),
         },
         Command::Refresh,
@@ -343,6 +334,8 @@ fn all_events() -> Vec<Event> {
         Event::ProviderError {
             source: "github".into(),
             message: "rate limited".into(),
+            detail: String::new(),
+            kind: String::new(),
         },
         Event::Notification {
             title: "hi".into(),
@@ -399,7 +392,7 @@ fn event_bincode_round_trip() {
 /// touching the filesystem or kernel sockets.
 #[tokio::test]
 async fn socket_framing_round_trip() {
-    use pilot_v2_ipc::socket::{read_frame, write_frame};
+    use pilot_ipc::socket::{read_frame, write_frame};
 
     let (mut a, mut b) = duplex(64 * 1024);
 
@@ -424,8 +417,8 @@ async fn socket_framing_round_trip() {
 /// allocating a huge buffer. Simulates a malicious or corrupted peer.
 #[tokio::test]
 async fn socket_rejects_oversized_frames() {
-    use pilot_v2_ipc::MAX_FRAME_BYTES;
-    use pilot_v2_ipc::socket::read_frame;
+    use pilot_ipc::MAX_FRAME_BYTES;
+    use pilot_ipc::socket::read_frame;
     use tokio::io::AsyncWriteExt;
 
     let (mut a, mut b) = duplex(64);
@@ -439,7 +432,7 @@ async fn socket_rejects_oversized_frames() {
 
     let result: Result<Option<Command>, _> = read_frame(&mut b).await;
     assert!(
-        matches!(result, Err(pilot_v2_ipc::socket::FrameError::TooLarge(n)) if n == bad_len),
+        matches!(result, Err(pilot_ipc::socket::FrameError::TooLarge(n)) if n == bad_len),
         "expected TooLarge, got {result:?}"
     );
 }
@@ -449,7 +442,7 @@ async fn socket_rejects_oversized_frames() {
 /// from a transport fault.
 #[tokio::test]
 async fn socket_clean_eof_is_none() {
-    use pilot_v2_ipc::socket::read_frame;
+    use pilot_ipc::socket::read_frame;
 
     let (a, mut b) = duplex(64);
     drop(a);
@@ -464,7 +457,7 @@ async fn socket_clean_eof_is_none() {
 /// edge cases in the framing arithmetic.
 #[tokio::test]
 async fn socket_zero_byte_payload_works() {
-    use pilot_v2_ipc::socket::{read_frame, write_frame};
+    use pilot_ipc::socket::{read_frame, write_frame};
     let (mut a, mut b) = duplex(64);
     let msg = Command::Write {
         terminal_id: TerminalId(1),
@@ -481,7 +474,7 @@ async fn socket_zero_byte_payload_works() {
 /// Terminal output carries both.
 #[tokio::test]
 async fn socket_binary_terminal_output_round_trip() {
-    use pilot_v2_ipc::socket::{read_frame, write_frame};
+    use pilot_ipc::socket::{read_frame, write_frame};
     let (mut a, mut b) = duplex(64 * 1024);
 
     let nasty: Vec<u8> = (0..=255).collect();

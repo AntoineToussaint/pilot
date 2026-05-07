@@ -1,11 +1,15 @@
 [package]
-name = "pilot-v2-tui"
+name = "pilot-tui"
+description = "A reactive PR inbox in your terminal."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
 
 [lib]
-name = "pilot_v2_tui"
+name = "pilot_tui"
 path = "src/lib.rs"
 
 [[bin]]
@@ -24,11 +28,13 @@ pilot-auth       = { workspace = true }
 pilot-config     = { workspace = true }
 pilot-store      = { workspace = true }
 pilot-gh         = { workspace = true }
+pilot-linear     = { path = "../linear-provider" }
 pilot-tui-term   = { workspace = true }
-libghostty-vt    = { path = "../../../libghostty-rs/crates/libghostty-vt" }
-pilot-v2-ipc     = { workspace = true }
-pilot-v2-agents  = { workspace = true }
-pilot-v2-server  = { path = "../server" }
+tuirealm         = { workspace = true }
+libghostty-vt    = { workspace = true }
+pilot-ipc     = { workspace = true }
+pilot-agents  = { workspace = true }
+pilot-server  = { path = "../server" }
 
 tokio            = { workspace = true }
 anyhow           = { workspace = true }
@@ -40,5 +46,9 @@ ratatui          = { workspace = true }
 chrono           = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
+serde_yaml       = { workspace = true }
 futures-util     = "0.3"
 tempfile         = "3"
+which            = "6"
+uuid             = { version = "1", features = ["v4"] }
+libc             = "0.2"

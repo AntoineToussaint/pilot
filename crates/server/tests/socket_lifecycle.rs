@@ -3,10 +3,10 @@
 //! the Subscribe → Snapshot contract works end-to-end — just like
 //! the in-process `channel::pair` path, but over a real Unix socket.
 
-use pilot_v2_ipc::{Command, Event, socket};
-use pilot_v2_server::ServerConfig;
-use pilot_v2_server::lifecycle;
-use pilot_v2_server::socket_service::SocketService;
+use pilot_ipc::{Command, Event, socket};
+use pilot_server::ServerConfig;
+use pilot_server::lifecycle;
+use pilot_server::socket_service::SocketService;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;

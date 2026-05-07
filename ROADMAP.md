@@ -1,6 +1,7 @@
-# Pilot v2 Roadmap
+# Pilot Roadmap
 
-This roadmap tracks the server/client split work needed to support:
+This roadmap tracks execution status against the architecture in
+`DESIGN.md`. The server/client split underpins:
 
 - the current Rust TUI client with native terminal emulation;
 - structured Claude Code `stream-json` runs for non-terminal clients;
@@ -208,7 +209,7 @@ Open questions:
 - Whether the first production credential store is SQLite + local
   encryption key, macOS Keychain, or a pluggable trait with SQLite
   dev-mode first.
-- Whether shared/team workspaces are in scope for v2, or if the initial
+- Whether shared/team workspaces are in scope for v2.0, or if the initial
   daemon is multi-user but workspaces remain private per principal.
 - Token refresh: OAuth providers need refresh jobs; PAT-style tokens
   only need validation and revocation.

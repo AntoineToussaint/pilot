@@ -1,6 +1,6 @@
-use pilot_v2_agents::{Agent, SpawnCtx};
-use pilot_v2_ipc::{AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, channel};
-use pilot_v2_server::{Server, ServerConfig};
+use pilot_agents::{Agent, SpawnCtx};
+use pilot_ipc::{AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, channel};
+use pilot_server::{Server, ServerConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -161,7 +161,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
     assert!(saw_turn_finished);
 }
 
-async fn wait_for_started(client: &mut pilot_v2_ipc::Client) -> AgentRunId {
+async fn wait_for_started(client: &mut pilot_ipc::Client) -> AgentRunId {
     loop {
         match recv_agent_event(client).await {
             Event::AgentRunStarted {
@@ -180,7 +180,7 @@ async fn wait_for_started(client: &mut pilot_v2_ipc::Client) -> AgentRunId {
     }
 }
 
-async fn recv_agent_event(client: &mut pilot_v2_ipc::Client) -> Event {
+async fn recv_agent_event(client: &mut pilot_ipc::Client) -> Event {
     tokio::time::timeout(std::time::Duration::from_secs(10), client.recv())
         .await
         .expect("agent run event")

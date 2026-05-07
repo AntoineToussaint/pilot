@@ -1,9 +1,10 @@
-# pilot v2 — design
+# pilot — design
 
-Clean-slate rewrite of pilot's TUI layer. Lives in `v2/` as a separate
-workspace so v1 keeps running while this is built.
+This is the architectural reference for pilot. For execution status and
+phased deliverables see `ROADMAP.md`. For day-to-day conventions see
+`CLAUDE.md`.
 
-## North star: v2 is an OSS project people want to use
+## North star: an OSS project people want to use
 
 Every design decision is filtered through: *would a new contributor
 understand this in 30 minutes? Would a user try this after 5 minutes
@@ -47,27 +48,31 @@ of reading the README?* Concretely:
 ## Non-goals (v2.0)
 
 - Windows support.
-- Multi-user sharing of a daemon (single-user service only).
-- Plugin loader for agents (recompile to add).
+- Plugin loader for agents (recompile to add — `GenericCli` covers most
+  cases via YAML).
 - Visual theming config.
+
+Multi-user / multi-principal support is on the roadmap (see `ROADMAP.md` §6)
+but not in v2.0.
 
 ## Architecture
 
 ```
 ┌───────────────────────────┐
 │ pilot (TUI client)        │   Component tree + message bus.
-│ v2/crates/tui/            │   Holds its own libghostty-vt for render.
+│ crates/tui/               │   Holds its own libghostty-vt for render.
 └──────────────┬────────────┘
                │  Transport:
-               │  - Local: Unix socket at ~/.pilot/daemon.sock
-               │  - Remote: SSH tunnel to remote Unix socket
+               │  - In-process (default): tokio mpsc channel pair
+               │  - Local out-of-process: Unix socket at ~/.pilot/v2/daemon.sock
+               │  - Remote: SSH tunnel to a remote Unix socket
                │                (no TCP/TLS in v2.0 — SSH handles both)
                │  Framing: length-prefixed bincode
-               │  Wire types: v2/crates/ipc/
+               │  Wire types: crates/ipc/
 ┌──────────────▼────────────┐
 │ pilot-server              │   Owns: SessionManager, TaskProviders,
-│ v2/crates/daemon/         │     WorktreeManager, PTY TerminalManager,
-│                           │     AgentRuntime registry, Store.
+│ crates/server/            │     WorktreeManager, PTY TerminalManager,
+│                           │     AgentRuntime registry, Store, JSON API.
 └───────────────────────────┘
 ```
 
@@ -78,35 +83,32 @@ of reading the README?* Concretely:
 | Configurability | **Everything that could reasonably be configured, is.** Dashboard tile set + order, agent registry (name, spawn cmd, resume args, state patterns), keybindings per component, filter defaults, snooze presets. YAML, with sensible built-in defaults so empty config is fine. |
 | Client / daemon communication | **Abstracted behind a `Client` trait so local == in-process.** When client and daemon are in the same process (the common case) the "transport" is a pair of tokio mpsc channels — zero serialization, zero sockets. Only when actually remote does it serialize over a socket. TUI code doesn't branch on local vs remote. |
 | Session wrapper (tmux etc.) | **Abstracted via `SessionWrapper` trait.** `TmuxWrapper` is the default impl. Swappable so we can add `ScreenWrapper`, `ZellijWrapper`, or a no-wrapper "raw PTY" mode later without touching the daemon core. |
-| Remote access | **SSH-tunneled Unix socket.** Server binds `~/.pilot/daemon.sock`; remote clients connect through `ssh -L`. No TCP, no TLS cert management — SSH is the trust boundary. |
+| Remote access | **SSH-tunneled Unix socket.** Server binds `~/.pilot/v2/daemon.sock`; remote clients connect through `ssh -L`. No TCP, no TLS cert management — SSH is the trust boundary. |
 | Server lifetime | **Long-running service when out-of-process.** First client auto-starts the daemon subprocess; survives client disconnect; `pilot daemon stop` terminates. Same model as tmux server. For the common in-process case, daemon lives and dies with the TUI. |
-| Binary | **One binary.** `pilot` with subcommands: `pilot` (default: TUI + in-process daemon), `pilot daemon start/stop/status` (manage a standalone daemon), `pilot --connect <socket>` (remote TUI, don't start a local daemon). |
+| Binary | **One binary.** `pilot` with subcommands: `pilot` (default: TUI + in-process daemon), `pilot daemon start/stop/status` (manage a standalone daemon), `pilot server api [addr]` (foreground JSON HTTP API gateway), `pilot --connect <socket>` (remote TUI, don't start a local daemon). |
 
 ## Crate layout
 
 ```
-v2/
-├── DESIGN.md                       ← this file
-├── Cargo.toml                      ← workspace
-├── crates/
-│   ├── ipc/                        NEW  Wire types + framing + transport
-│   ├── daemon/                     NEW  Server binary
-│   ├── agents/                     NEW  Agent trait + impls
-│   └── tui/                        NEW  Client binary (the TUI)
-└── shared/                         Reused from v1 via path deps:
-    ├── core/                         source-agnostic types
-    ├── auth/                         credential chain
-    ├── events/                       (daemon-side) event bus
-    ├── store/                        SQLite backend
-    ├── config/                       YAML loader
-    ├── gh-provider/                  GitHub
-    ├── git-ops/                      worktrees
-    └── tui-term/                     PTY + ghostty
+crates/
+├── core/             source-agnostic types (Task, Session, SessionKey, …)
+├── auth/             credential chain
+├── events/           daemon-side event bus
+├── store/            SQLite backend
+├── config/           YAML loader
+├── git-ops/          worktrees (bare clones + per-task worktrees)
+├── tui-term/         PTY + ghostty-vt parser + widget
+├── gh-provider/      GitHub PRs + Issues
+├── linear-provider/  Linear issues via GraphQL
+├── ipc/              wire types + framing + transport (channel + socket)
+├── agents/           Agent trait + Claude/Codex/Cursor/GenericCli + SessionWrapper
+├── llm-proxy/        127.0.0.1 pass-through recording structured agent telemetry
+├── server/           PTY lifecycle, polling, agent runs, JSON API gateway
+└── tui/              the `pilot` binary — component tree + key/event dispatch
 ```
 
-Shared crates stay where they are (`../crates/`); v2 depends on them via
-path. This keeps the leaf libraries (`core`, `store`, etc.) single-source;
-only the app layer is rewritten.
+The four core libraries (`core`, `auth`, `events`, `store`) must not depend
+on each other. Provider crates depend only on `core` + `events` + `auth`.
 
 ## IPC protocol
 
@@ -165,8 +167,8 @@ enum Outcome {
 ```
 
 - **One focus chain**, root → leaf. Key dispatch walks innermost to
-  outermost; unhandled keys bubble. No `state.selected` vs
-  `panes.focused` vs `active_tab` split.
+  outermost; unhandled keys bubble. Focus is one id; every other position
+  is derived from it.
 - **Internal bus** between components (for cross-cutting concerns that
   don't go to the daemon): selection changes, layout events. Separate
   from the daemon event stream.
@@ -197,19 +199,19 @@ App
 
 ## Sources (`TaskProvider`)
 
-The same trait that exists in v1 `pilot-core` — reused unchanged. Each
-source returns a stream of `Task`s; pilot doesn't care whether a task
-is a GitHub PR, a GitHub issue, or a Linear ticket. All share the
-same row model, sidebar, status tags, search.
+`TaskProvider` lives in `pilot-core`. Each source returns a stream of
+`Task`s; pilot doesn't care whether a task is a GitHub PR, a GitHub issue,
+or a Linear ticket. All share the same row model, sidebar, status tags,
+search.
 
 ### Shipping in v2.0
 
-| Source | Crate | Status |
-|--------|-------|--------|
-| GitHub PRs | `gh-provider` (reused from v1) | parity |
-| GitHub Issues | `gh-provider` | NEW — single GraphQL query alongside PRs |
-| Linear | `crates/linear-provider` (NEW) | Week 3 |
-| GenericHttp | `crates/http-provider` (NEW) | Week 4 — poll any JSON endpoint, map fields via config |
+| Source | Crate | Notes |
+|--------|-------|-------|
+| GitHub PRs | `gh-provider` | octocrab polling |
+| GitHub Issues | `gh-provider` | single GraphQL query alongside PRs |
+| Linear | `linear-provider` | GraphQL, `LINEAR_API_KEY` env |
+| GenericHttp | `http-provider` (planned) | poll any JSON endpoint, map fields via config |
 
 ### Per-source behaviors that still matter
 
@@ -246,7 +248,7 @@ All existing tokens (`needs:reply`, `ci:failed`, `role:author`,
 
 Parsing PTY output to understand what an agent is doing is brittle
 (it worked well enough for "working vs asking", but we hit the ceiling
-fast on tool calls, token counts, cost). Instead, v2 interposes as an
+fast on tool calls, token counts, cost). Instead, pilot interposes as an
 **LLM API proxy**: the daemon runs a tiny HTTP server, injects
 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` into the agent's env, and
 captures structured metadata on every request/response.
@@ -434,80 +436,36 @@ Built-ins (shipped in `crates/agents/`):
 5. **IPC server.** Bind Unix socket, accept connections, route
    commands, multicast events.
 
-## Migration path
+## Open questions
 
-v1 (`crates/`) stays untouched and continues working. v2 development
-happens in `v2/crates/`. When v2 reaches parity:
-
-1. `pilot` CLI grows a `--v2` flag.
-2. Opt-in period (days/weeks) for dogfooding.
-3. Flip default; delete v1.
-
-The SQLite schema should stay compatible so users don't lose sessions
-across the switch. Hook IPC directory (`~/.pilot/ipc/`) stays the same.
-
-## Open questions (decide before week 3)
-
-- **Config format.** v1 uses YAML. Keep, or move to TOML (more
-  Rust-native)? Leaning: keep YAML, user shouldn't re-learn.
-- **Single-binary vs two.** Ship `pilot` with a subcommand `pilot
-  daemon` (single binary) or separate `pilot` + `pilot-server`?
-  Leaning: single binary. `pilot daemon start`, `pilot daemon stop`,
-  `pilot daemon status`; plain `pilot` auto-starts if needed.
+- **Config format.** YAML today; no plans to move. `pilot config dump`
+  prints the effective merged config.
 - **Dashboard tile layout.** Fixed grid (2×2) or stacked (1×N with user
-  reorder)? Leaning: stacked, user can drag/reorder later.
+  reorder)? Leaning stacked, user can drag/reorder later.
+- **Streaming responses in `llm-proxy`.** Hyper's streaming body types
+  work; we tee the bytes into a parser that assembles the record as SSE
+  frames arrive. OpenAI vs Anthropic wire formats differ — per-provider
+  adapter modules.
+- **Cost estimation.** Hard-coded price table by model in `prices.rs`,
+  updated manually. Acceptable because models change slowly.
 
 ## Testing discipline (non-negotiable)
 
-The class of bugs we shipped in v1 came from "I tested it worked once,
-edge case broke later." v2 rule: **every public function has a test;
-every component has a render snapshot; every bug fix lands with a
-regression test.**
+**Every public function has a test; every component has a render
+snapshot; every bug fix lands with a regression test.**
 
 | Layer | What gets tested |
 |-------|------------------|
 | `ipc` | Serde round-trip per Command/Event variant; framing on synthetic streams; property tests for arbitrary frame sizes + malformed bytes. |
 | `agents` | Registry lookup; each Agent's spawn/resume argv snapshotted; SessionWrapper behaviors (tmux mocked by intercepting Command). |
 | `llm-proxy` | Record serde round-trip; pricing rates for known models; Unknown returns None; redaction on headers + nested JSON; streaming SSE assembly from recorded fixtures. |
-| `daemon` | End-to-end via `channel::pair` — Subscribe → Snapshot; PTY spawn → output stream → exit; ring buffer wraparound; reconnect replay fidelity. |
+| `server` | End-to-end via `channel::pair` — Subscribe → Snapshot; PTY spawn → output stream → exit; ring buffer wraparound; reconnect replay fidelity. |
 | `tui` components | Pure key-routing tests (no render). Golden render snapshots via `insta` + ratatui `TestBackend`. Event-subscription dispatch tests. Focus chain invariants. |
 | providers | GraphQL fixtures checked into `tests/fixtures/`. Never hit live APIs in unit tests. One opt-in integration test per provider gated on env var. |
-| Cross-crate | Integration suite in `v2/tests/` exercising the full in-process stack (TUI → in-process daemon → mock provider → mock agent). |
+| Cross-crate | Integration suite exercising the full in-process stack (TUI → in-process daemon → mock provider → mock agent). |
 
 CI matrix: Linux + macOS, `cargo test --workspace` + `cargo clippy
 --workspace -- -D warnings` + `cargo fmt --check` on every PR.
 `cargo test --doc` enabled. Coverage tracked via `cargo llvm-cov` —
-target 80% on library crates (daemon/ipc/agents/llm-proxy/providers).
+target 80% on library crates (server/ipc/agents/llm-proxy/providers).
 TUI render tests count as coverage via the ratatui TestBackend.
-
-## Phase plan (rough — each week ships fully tested)
-
-Each phase is "not done" until CI is green, coverage hits the target,
-and every golden snapshot is reviewed.
-
-| Week | Deliverable | Key tests |
-|------|-------------|-----------|
-| 1 | `ipc` wire types + transport. `agents` trait + builtins. `llm-proxy` record types + pricing. `daemon` serve loop + PTY lifecycle + ring buffer. | Serde round-trip, framing, PTY spawn→exit, replay on reconnect. |
-| 2 | `tui`: Component trait + tree infra. Sidebar + RightPane + Overlays. Feature parity with v1 for browse-only flows. | Key routing, event dispatch, golden render snapshots, focus invariants. |
-| 3 | `llm-proxy` real hyper server (Anthropic + OpenAI). Server integration (ProxyCtx injection + records → Events). Dashboard tiles including Cost/Tokens. TerminalStack with multi-terminal. | SSE stream assembly from fixtures, redaction, proxy record attribution, tile ordering. |
-| 4 | GitHub Issues in `gh-provider`. Linear provider. SSH remote + daemon subcommands. Migration shim (v1 ↔ v2 SQLite). Flip default behind opt-in flag. | Fixture-based provider tests, daemon lifecycle idempotence, cross-version SQLite load. |
-
-## What stays from v1
-
-- `core` — Task, Session, StatusTag, TaskProvider trait.
-- `auth` — credential chain.
-- `store` — SQLite schema. Minor additions for per-component persistence.
-- `config` — YAML loader (extended with daemon/client sections).
-- `gh-provider`, `git-ops` — unchanged.
-- `tui-term` — unchanged (used by daemon AND client; client needs it
-  to replay PTY bytes locally).
-- `events` — in-daemon bus only; daemon → client goes through IPC.
-
-## What dies from v1
-
-- `crates/app/src/reduce.rs` — the pure reducer model is replaced by
-  per-component state and event subscription.
-- `crates/app/src/pane.rs` — replaced by Component tree.
-- `crates/app/src/state.rs` — no god-struct; state is component-local.
-- `crates/app/src/action.rs` / `command.rs` — replaced by `ipc::Command`.
-- `crates/app/src/keymap.rs` — each component ships its own keymap.

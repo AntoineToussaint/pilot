@@ -7,10 +7,9 @@
 
 use crate::lifecycle;
 use crate::{Server, ServerConfig};
-use pilot_v2_ipc::socket;
+use pilot_ipc::{socket, transport};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::net::UnixListener;
 use tokio::sync::Notify;
 
 #[derive(Debug, thiserror::Error)]
@@ -67,9 +66,19 @@ impl SocketService {
         // Clear any stale socket left by a prior crashed daemon.
         let _ = lifecycle::cleanup_stale_socket(&self.socket);
 
-        let listener = UnixListener::bind(&self.socket).map_err(|e| SocketServiceError::Bind {
-            path: self.socket.clone(),
-            source: e,
+        let listener = transport::Listener::bind(&self.socket).await.map_err(|e| {
+            match e {
+                transport::TransportError::Bind { source, .. } => {
+                    SocketServiceError::Bind {
+                        path: self.socket.clone(),
+                        source,
+                    }
+                }
+                other => SocketServiceError::Bind {
+                    path: self.socket.clone(),
+                    source: std::io::Error::other(other.to_string()),
+                },
+            }
         })?;
 
         lifecycle::write_pid_file(std::process::id(), &self.pid_file)
@@ -86,14 +95,13 @@ impl SocketService {
                     break;
                 }
                 accept = listener.accept() => {
-                    let (stream, _addr) = match accept {
+                    let (rd, wr) = match accept {
                         Ok(pair) => pair,
                         Err(e) => {
                             tracing::warn!("accept error: {e}");
                             continue;
                         }
                     };
-                    let (rd, wr) = stream.into_split();
                     let server = socket::serve(rd, wr);
                     let config = (self.config_factory)();
                     tokio::spawn(async move {

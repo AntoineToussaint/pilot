@@ -9,8 +9,8 @@ use crate::ServerConfig;
 use crate::agent_stream::{
     ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, spawn_claude_stream,
 };
-use pilot_v2_agents::SpawnCtx;
-use pilot_v2_ipc::{
+use pilot_agents::SpawnCtx;
+use pilot_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
     AgentUsage, Event,
 };
@@ -40,6 +40,8 @@ pub async fn handle_start_agent_run(
         let _ = config.bus.send(Event::ProviderError {
             source: "agent_run".into(),
             message: "only StreamJson agent runs are wired; use Spawn for terminal mode".into(),
+            detail: String::new(),
+            kind: String::new(),
         });
         return;
     }
@@ -48,6 +50,8 @@ pub async fn handle_start_agent_run(
         let _ = config.bus.send(Event::ProviderError {
             source: format!("agent_run:{agent}"),
             message: "no agent registered for this id".into(),
+            detail: String::new(),
+            kind: String::new(),
         });
         return;
     };
@@ -67,6 +71,8 @@ pub async fn handle_start_agent_run(
         let _ = config.bus.send(Event::ProviderError {
             source: format!("agent_run:{agent}"),
             message: "agent returned an empty argv".into(),
+            detail: String::new(),
+            kind: String::new(),
         });
         return;
     };
@@ -84,6 +90,8 @@ pub async fn handle_start_agent_run(
             let _ = config.bus.send(Event::ProviderError {
                 source: format!("agent_run:{agent}"),
                 message: format!("{e}"),
+            detail: String::new(),
+            kind: String::new(),
             });
             return;
         }
@@ -133,6 +141,8 @@ pub async fn handle_send_agent_input(
         let _ = config.bus.send(Event::ProviderError {
             source: "agent_run".into(),
             message: format!("unknown agent run {:?}", run_id),
+            detail: String::new(),
+            kind: String::new(),
         });
         return;
     };
@@ -140,6 +150,8 @@ pub async fn handle_send_agent_input(
         let _ = config.bus.send(Event::ProviderError {
             source: "agent_run".into(),
             message: format!("agent run {:?} input channel is closed", run_id),
+            detail: String::new(),
+            kind: String::new(),
         });
     }
 }
@@ -245,6 +257,8 @@ async fn drive_claude_stream(
                     let _ = bus.send(Event::ProviderError {
                         source: "agent_run:stdin".into(),
                         message: format!("{e}"),
+            detail: String::new(),
+            kind: String::new(),
                     });
                 }
             }
@@ -286,6 +300,8 @@ async fn drive_claude_stream(
                         let _ = bus.send(Event::ProviderError {
                             source: "agent_run:stdout".into(),
                             message: format!("{e}"),
+            detail: String::new(),
+            kind: String::new(),
                         });
                         break;
                     }

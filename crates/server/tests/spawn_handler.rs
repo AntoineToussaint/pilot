@@ -7,15 +7,15 @@
 //! genuine, not mocked.
 
 use pilot_store::MemoryStore;
-use pilot_v2_ipc::{Command, Event, TerminalKind, channel};
-use pilot_v2_server::backend::{SessionBackend, TmuxBackend};
-use pilot_v2_server::{Server, ServerConfig};
+use pilot_ipc::{Command, Event, TerminalKind, channel};
+use pilot_server::backend::{SessionBackend, TmuxBackend};
+use pilot_server::{Server, ServerConfig};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Drain events until we see one matching `pred` or hit the deadline.
 async fn wait_for<F: FnMut(&Event) -> bool>(
-    client: &mut pilot_v2_ipc::Client,
+    client: &mut pilot_ipc::Client,
     mut pred: F,
     timeout: Duration,
 ) -> Option<Event> {
@@ -34,7 +34,7 @@ async fn wait_for<F: FnMut(&Event) -> bool>(
     None
 }
 
-async fn run_daemon(config: ServerConfig) -> pilot_v2_ipc::Client {
+async fn run_daemon(config: ServerConfig) -> pilot_ipc::Client {
     let (client, server) = channel::pair();
     tokio::spawn(async move {
         let _ = Server::new(config).serve(server).await;
@@ -296,7 +296,7 @@ async fn recover_sessions_reattaches_survivors() {
     // doesn't get lost.
     let mut bus = config.bus.subscribe();
 
-    pilot_v2_server::spawn_handler::recover_sessions(&config).await;
+    pilot_server::spawn_handler::recover_sessions(&config).await;
 
     // Map now has the survivor under a fresh wire id.
     let map = config.terminals.lock().await;

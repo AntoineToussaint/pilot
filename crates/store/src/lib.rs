@@ -9,4 +9,4 @@ mod traits;
 
 pub use mock::MemoryStore;
 pub use sqlite::SqliteStore;
-pub use traits::{SessionRecord, Store, StoreError, WorkspaceRecord};
+pub use traits::{Store, StoreError, WorkspaceRecord};

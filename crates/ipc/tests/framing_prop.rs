@@ -1,7 +1,7 @@
 //! Property tests for framing. Generate arbitrary payloads and assert
 //! write → read returns them unchanged, regardless of payload shape.
 
-use pilot_v2_ipc::{Command, TerminalId, socket};
+use pilot_ipc::{Command, TerminalId, socket};
 use proptest::prelude::*;
 use tokio::io::duplex;
 
