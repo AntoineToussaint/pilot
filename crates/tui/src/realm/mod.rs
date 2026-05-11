@@ -40,6 +40,7 @@ pub mod keymap;
 pub(crate) mod layout;
 pub mod model;
 pub(crate) mod setup_ctx;
+pub(crate) mod status_ctx;
 pub mod user_event;
 
 pub use model::{Id, Model, Msg};

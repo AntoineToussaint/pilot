@@ -1014,8 +1014,8 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         .unwrap_or(false);
     let last_commenter = comments
         .iter()
-        .filter(|a| a.author != my_username)
-        .last()
+        .rev()
+        .find(|a| a.author != my_username)
         .map(|a| a.author.clone());
 
     Task {

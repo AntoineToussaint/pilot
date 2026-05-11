@@ -922,16 +922,15 @@ impl SetupRunner {
         Box::new(
             Choice::multi(
                 format!(
-                    "Narrow {parent_label} to specific repos (optional).\n\n\
-                     Tick one or more to subscribe to ONLY those repos. \
-                     Press Enter without ticking anything to keep the \
-                     ORG-level subscription (all {parent_label} repos).",
+                    "Pick the {parent_label} repos to subscribe to.\n\n\
+                     Space toggles a repo. Enter confirms.\n\
+                     Backspace goes back without changing the existing \
+                     subscription.",
                 ),
                 scopes,
             )
             .title(format!("Setup · {parent_label} repos"))
             .label(|s: &Scope| s.label.clone())
-            .allow_empty(true)
             .with_back(true),
         )
     }

@@ -400,13 +400,11 @@ fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
             let mut chunk = String::new();
             let mut chunk_w = 0;
             for ch in word.chars() {
-                if chunk_w + 1 > width.saturating_sub(*current_w) {
-                    if !chunk.is_empty() {
-                        current.push(Span::styled(std::mem::take(&mut chunk), style));
-                        out.push(Line::from(std::mem::take(current)));
-                        *current_w = 0;
-                        chunk_w = 0;
-                    }
+                if chunk_w + 1 > width.saturating_sub(*current_w) && !chunk.is_empty() {
+                    current.push(Span::styled(std::mem::take(&mut chunk), style));
+                    out.push(Line::from(std::mem::take(current)));
+                    *current_w = 0;
+                    chunk_w = 0;
                 }
                 chunk.push(ch);
                 chunk_w += 1;

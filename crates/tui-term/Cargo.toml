@@ -9,3 +9,6 @@ portable-pty = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 libghostty-vt = { workspace = true }
+
+[lints]
+workspace = true

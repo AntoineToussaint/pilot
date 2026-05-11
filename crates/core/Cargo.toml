@@ -8,3 +8,6 @@ chrono = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 thiserror = { workspace = true }
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[lints]
+workspace = true

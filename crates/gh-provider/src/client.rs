@@ -64,8 +64,8 @@ impl From<GhError> for pilot_core::ProviderError {
         // is retryable by definition (no PR/issue data was ever
         // returned, so a fresh attempt next tick is safe and likely
         // to succeed).
-        if let GhError::Api(api) = &err {
-            if matches!(
+        if let GhError::Api(api) = &err
+            && matches!(
                 api,
                 octocrab::Error::Hyper { .. }
                     | octocrab::Error::Service { .. }
@@ -74,9 +74,9 @@ impl From<GhError> for pilot_core::ProviderError {
                     | octocrab::Error::Json { .. }
                     | octocrab::Error::UriParse { .. }
                     | octocrab::Error::Uri { .. }
-            ) {
-                return pilot_core::ProviderError::retryable(SOURCE, detail);
-            }
+            )
+        {
+            return pilot_core::ProviderError::retryable(SOURCE, detail);
         }
 
         // Fallback string matching for everything else (GraphQL
@@ -199,8 +199,8 @@ impl GhClient {
             .ok();
         let Some(reset_at) = reset_at else { return };
         let observed = crate::rate_budget::RemoteRateLimit {
-            remaining: ratelimit.remaining as u32,
-            limit: ratelimit.limit as u32,
+            remaining: ratelimit.remaining,
+            limit: ratelimit.limit,
             reset_at,
             observed_at: std::time::Instant::now(),
         };

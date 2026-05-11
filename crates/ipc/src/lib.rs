@@ -603,6 +603,10 @@ impl Client {
         Self { tx, rx }
     }
 
+    // The Err variant carries a full Command (144 bytes); boxing
+    // just to placate clippy would burden every successful send for
+    // a path that only fires when the daemon has shut down.
+    #[allow(clippy::result_large_err)]
     pub fn send(&self, cmd: Command) -> Result<(), mpsc::error::SendError<Command>> {
         self.tx.send(cmd)
     }

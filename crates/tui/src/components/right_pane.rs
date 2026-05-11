@@ -591,7 +591,7 @@ fn teaser_text(body: &str, max_cells: usize) -> String {
     let stripped = raw
         .trim_start_matches('#')
         .trim_start_matches('>')
-        .trim_start_matches(|c: char| matches!(c, '-' | '*' | '+'))
+        .trim_start_matches(['-', '*', '+'])
         .trim();
     // Collapse runs of whitespace and drop simple inline emphasis
     // markers so the teaser stays plain text.

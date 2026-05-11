@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+
 members = [
     "crates/core",
     "crates/auth",
@@ -22,6 +23,16 @@ members = [
     "crates/libghostty-vt",
     "crates/libghostty-vt-sys",
 ]
+
+# Pilot's own crates opt into this lint config via `[lints]
+# workspace = true` in their Cargo.toml. The two vendored libghostty
+# crates do not, so `cargo clippy --workspace` only fails on issues
+# in pilot code — upstream noise stays upstream.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+# (defaults — tighten here if you want to enforce a style)
 
 # ── cargo-dist (release plumbing) ───────────────────────────────────────
 #

@@ -107,29 +107,6 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     None
 }
 
-#[cfg(test)]
-mod argv_tests {
-    use super::*;
-
-    fn args(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn take_flag_finds_and_removes() {
-        let mut a = args(&["--fresh", "--workspace", "foo"]);
-        assert!(take_flag(&mut a, "--fresh"));
-        assert_eq!(a, args(&["--workspace", "foo"]));
-    }
-
-    #[test]
-    fn take_flag_returns_false_when_absent() {
-        let mut a = args(&["--workspace", "foo"]);
-        assert!(!take_flag(&mut a, "--fresh"));
-        assert_eq!(a, args(&["--workspace", "foo"]));
-    }
-}
-
 /// `pilot --test` boots against a throwaway tempdir repo + one
 /// pre-seeded workspace. No setup screen, no provider polling, no
 /// disk writes. The fixture (which owns the TempDir) is held in
@@ -282,29 +259,35 @@ async fn run_embedded_realm(
         if !returning_sources.is_empty() {
             model.show_polling(returning_sources);
         }
-        // Hook: when setup finishes, persist + kick polling + mount
-        // the polling progress modal so the user sees the first
-        // fetch happen.
+        // Hook: every time setup finishes (first-run wizard AND
+        // partial flows like "Add a repo"), persist + (re)spawn
+        // polling so the new sources start being fetched. `Arc<dyn Fn>`
+        // because partial flows fire multiple times. Note: we don't
+        // abort the previous polling task — each call leaks a tokio
+        // task. Solo-dev acceptable; a follow-up could thread an
+        // `AbortHandle` through.
         let polling_cfg = polling_after_setup.clone();
-        let hook: Box<dyn FnOnce(pilot_tui::setup_flow::SetupOutcome) + Send> =
-            Box::new(move |outcome| {
-                let persisted =
-                    pilot_tui::setup_flow::outcome_to_persisted(&outcome);
-                pilot_tui::setup_flow::save_persisted(&*store_for_save, &persisted);
-                let bus = polling_cfg.bus.clone();
-                let cfg = polling_cfg.clone();
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("polling rt");
-                    rt.block_on(async move {
-                        let sources = polling::sources_for(&persisted, bus).await;
-                        polling::spawn(cfg, sources, POLL_INTERVAL);
-                        futures_util::future::pending::<()>().await;
-                    });
+        let store_for_save = std::sync::Arc::new(store_for_save);
+        let hook: std::sync::Arc<
+            dyn Fn(pilot_tui::setup_flow::SetupOutcome) + Send + Sync,
+        > = std::sync::Arc::new(move |outcome| {
+            let persisted =
+                pilot_tui::setup_flow::outcome_to_persisted(&outcome);
+            pilot_tui::setup_flow::save_persisted(&**store_for_save, &persisted);
+            let bus = polling_cfg.bus.clone();
+            let cfg = polling_cfg.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("polling rt");
+                rt.block_on(async move {
+                    let sources = polling::sources_for(&persisted, bus).await;
+                    polling::spawn(cfg, sources, POLL_INTERVAL);
+                    futures_util::future::pending::<()>().await;
                 });
             });
+        });
         model = model.with_setup_complete_hook(hook);
         if let Some(p) = preselect {
             model = model.with_preselect(p);
@@ -495,4 +478,27 @@ async fn server_api(addr_arg: Option<&String>) -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod argv_tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn take_flag_finds_and_removes() {
+        let mut a = args(&["--fresh", "--workspace", "foo"]);
+        assert!(take_flag(&mut a, "--fresh"));
+        assert_eq!(a, args(&["--workspace", "foo"]));
+    }
+
+    #[test]
+    fn take_flag_returns_false_when_absent() {
+        let mut a = args(&["--workspace", "foo"]);
+        assert!(!take_flag(&mut a, "--fresh"));
+        assert_eq!(a, args(&["--workspace", "foo"]));
+    }
 }

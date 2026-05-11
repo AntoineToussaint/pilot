@@ -463,6 +463,20 @@ impl Default for SessionLayout {
     }
 }
 
+/// Failure modes for `TileTree::remove_at`. Callers today don't
+/// branch on the variant — the enum exists so the function returns
+/// a proper error type instead of `Result<_, ()>`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RemoveAtError {
+    /// Caller asked to remove the root tile. We refuse because the
+    /// session needs at least one runner visible.
+    #[error("cannot remove the root tile")]
+    CannotRemoveRoot,
+    /// Path descends into a leaf or otherwise doesn't exist.
+    #[error("tile path not found")]
+    PathNotFound,
+}
+
 /// One node in the per-session tile tree. Leaves point to a runner
 /// by terminal id (numeric, daemon-allocated). Splits hold a 0-100
 /// `ratio` for the first child's share of the available space.
@@ -568,11 +582,11 @@ impl TileTree {
     /// the surviving sibling. Returns Ok with the new path of focus
     /// (the sibling's path) on success. Errors when the path points
     /// at the root (can't collapse the only tile) or doesn't exist.
-    pub fn remove_at(&mut self, path: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn remove_at(&mut self, path: &[u8]) -> Result<Vec<u8>, RemoveAtError> {
         if path.is_empty() {
             // Caller is trying to delete the only tile. Refuse — the
             // session needs at least one runner visible.
-            return Err(());
+            return Err(RemoveAtError::CannotRemoveRoot);
         }
         if path.len() == 1 {
             // Collapse the parent (which is `self`) into the sibling.
@@ -585,7 +599,7 @@ impl TileTree {
                         std::mem::replace(left.as_mut(), TileTree::Leaf { terminal_id: 0 })
                     }
                 }
-                TileTree::Leaf { .. } => return Err(()),
+                TileTree::Leaf { .. } => return Err(RemoveAtError::PathNotFound),
             };
             *self = new_root;
             // After collapse, focus lands at the new root (no path).
@@ -597,7 +611,7 @@ impl TileTree {
             TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
                 if head == 0 { left.as_mut() } else { right.as_mut() }
             }
-            TileTree::Leaf { .. } => return Err(()),
+            TileTree::Leaf { .. } => return Err(RemoveAtError::PathNotFound),
         };
         let mut sub_path = next.remove_at(rest)?;
         // Prefix the parent step so the returned focus path is full.

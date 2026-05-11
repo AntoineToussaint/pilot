@@ -184,3 +184,127 @@ pub(crate) fn pane_areas(
         .split(cols[1]);
     (cols[0], rows[0], rows[1])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area() -> Rect {
+        Rect::new(0, 0, 100, 50)
+    }
+
+    fn ctx() -> LayoutCtx {
+        let mut c = LayoutCtx::new();
+        c.last_area = area();
+        c
+    }
+
+    #[test]
+    fn defaults_are_in_range() {
+        let c = LayoutCtx::new();
+        assert_eq!(c.sidebar_pct, DEFAULT_SIDEBAR_PCT);
+        assert_eq!(c.right_top_pct, DEFAULT_RIGHT_TOP_PCT);
+        assert!(c.sidebar_pct >= SPLIT_MIN && c.sidebar_pct <= SPLIT_MAX);
+        assert!(c.right_top_pct >= SPLIT_MIN && c.right_top_pct <= SPLIT_MAX);
+        assert!(c.active_drag.is_none());
+    }
+
+    #[test]
+    fn apply_persisted_clamps_into_legal_range() {
+        let mut c = LayoutCtx::new();
+        // Below min → clamped up.
+        c.apply_persisted(Some(0), Some(0));
+        assert_eq!(c.sidebar_pct, SPLIT_MIN);
+        assert_eq!(c.right_top_pct, SPLIT_MIN);
+        // Above max → clamped down.
+        c.apply_persisted(Some(99), Some(99));
+        assert_eq!(c.sidebar_pct, SPLIT_MAX);
+        assert_eq!(c.right_top_pct, SPLIT_MAX);
+        // None leaves the existing value alone.
+        c.apply_persisted(None, None);
+        assert_eq!(c.sidebar_pct, SPLIT_MAX);
+    }
+
+    #[test]
+    fn nudge_widens_and_narrows_sidebar() {
+        let mut c = LayoutCtx::new();
+        let start = c.sidebar_pct;
+        // We don't assert the persisted side-effect — that's a YAML
+        // write that's tested elsewhere.
+        let _ = c.nudge_splits(SPLIT_STEP, 0);
+        assert_eq!(c.sidebar_pct, start + SPLIT_STEP as u16);
+        let _ = c.nudge_splits(-SPLIT_STEP, 0);
+        assert_eq!(c.sidebar_pct, start);
+    }
+
+    #[test]
+    fn nudge_returns_false_when_clamped_against_a_wall() {
+        let mut c = LayoutCtx::new();
+        c.sidebar_pct = SPLIT_MAX;
+        c.right_top_pct = SPLIT_MAX;
+        // Already at the ceiling on both axes — no change, no
+        // redraw, no YAML write.
+        assert!(!c.nudge_splits(SPLIT_STEP, SPLIT_STEP));
+    }
+
+    #[test]
+    fn hit_test_finds_the_vertical_splitter() {
+        let c = ctx();
+        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct);
+        // Hover one cell right of the sidebar's right edge → vertical splitter.
+        let v_x = sidebar.x + sidebar.width;
+        assert_eq!(
+            c.hit_test_splitter(v_x, 10, sidebar, right_top),
+            Some(DragTarget::SidebarRight)
+        );
+    }
+
+    #[test]
+    fn hit_test_finds_the_horizontal_splitter() {
+        let c = ctx();
+        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct);
+        let h_y = right_top.y + right_top.height;
+        assert_eq!(
+            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, right_top),
+            Some(DragTarget::ActivityTerminals)
+        );
+    }
+
+    #[test]
+    fn hit_test_misses_inside_a_pane() {
+        let c = ctx();
+        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct);
+        // Middle of the sidebar — not on any splitter.
+        assert_eq!(c.hit_test_splitter(2, 10, sidebar, right_top), None);
+    }
+
+    #[test]
+    fn update_drag_moves_sidebar_to_drop_column() {
+        let mut c = ctx();
+        // Drop at column 25 out of 100 → ~25% sidebar.
+        let changed = c.update_drag(DragTarget::SidebarRight, 25, 10);
+        assert!(changed);
+        assert_eq!(c.sidebar_pct, 25);
+    }
+
+    #[test]
+    fn update_drag_clamps_to_split_max() {
+        let mut c = ctx();
+        // Way past the right edge — clamps to SPLIT_MAX.
+        let changed = c.update_drag(DragTarget::SidebarRight, 95, 10);
+        assert!(changed);
+        assert_eq!(c.sidebar_pct, SPLIT_MAX);
+    }
+
+    #[test]
+    fn update_drag_returns_false_when_pct_unchanged() {
+        let mut c = ctx();
+        let start = c.sidebar_pct;
+        // Drop at the column already corresponding to the current pct.
+        let target_col = (start as u32 * c.last_area.width as u32 / 100) as u16;
+        let _ = c.update_drag(DragTarget::SidebarRight, target_col, 10);
+        // Second drag at the same column → no change → false.
+        let changed = c.update_drag(DragTarget::SidebarRight, target_col, 10);
+        assert!(!changed);
+    }
+}

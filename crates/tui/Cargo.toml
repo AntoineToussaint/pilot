@@ -52,3 +52,6 @@ tempfile         = "3"
 which            = "6"
 uuid             = { version = "1", features = ["v4"] }
 libc             = "0.2"
+
+[lints]
+workspace = true

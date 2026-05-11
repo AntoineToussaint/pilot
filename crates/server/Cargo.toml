@@ -37,3 +37,6 @@ http-body-util   = { version = "0.1", features = ["channel"] }
 [dev-dependencies]
 tokio          = { workspace = true, features = ["full", "test-util"] }
 tempfile       = "3"
+
+[lints]
+workspace = true

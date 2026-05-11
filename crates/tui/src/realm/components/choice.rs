@@ -25,7 +25,7 @@ use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
-use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,12 @@ pub struct Choice<T: Clone + 'static + Send> {
     can_refresh: bool,
     require_one: bool,
     show_empty_hint: bool,
+    /// Topmost visible body line. Updated lazily in `view` so the
+    /// cursor stays on-screen as j/k walk past either edge of
+    /// `body_area`. The list is too big for a non-scrolling modal
+    /// once item count exceeds ~20 rows (the modal cap is 24 high
+    /// before the prompt + help line trimming).
+    scroll: u16,
 }
 
 impl<T: Clone + 'static + Send> Choice<T> {
@@ -73,6 +79,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             can_refresh: false,
             require_one: true,
             show_empty_hint: false,
+            scroll: 0,
         }
     }
 
@@ -93,6 +100,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             can_refresh: false,
             require_one: true,
             show_empty_hint: false,
+            scroll: 0,
         }
     }
 
@@ -206,14 +214,24 @@ impl<T: Clone + 'static + Send> Choice<T> {
         ConfirmResult::Picked(picked)
     }
 
-    fn build_lines(&mut self, width: u16) -> Vec<Line<'static>> {
+    /// Returns the laid-out lines plus the line index of the cursor
+    /// row (so `view` can compute a scroll offset that keeps it on
+    /// screen). Header lines (prompt + section labels) shift the
+    /// item-index → line-index relationship, so we track it here.
+    fn build_lines(&mut self, width: u16) -> (Vec<Line<'static>>, u16) {
         let theme = crate::theme::current();
         let mut lines: Vec<Line> = Vec::with_capacity(self.items.len() + 4);
-        // Prompt
-        lines.push(Line::from(Span::styled(
-            self.prompt.clone(),
-            Style::default().fg(theme.text_dim),
-        )));
+        let mut cursor_line: u16 = 0;
+        // Prompt — split on '\n' so each prompt line is its own `Line`.
+        // Without this, ratatui's wrap reflows the embedded newlines
+        // into a single rendered row count that doesn't match what we
+        // tracked for the cursor, producing an off-by-N scroll bug
+        // (cursor lands one row below the body when scrolling near
+        // the bottom).
+        let prompt_style = Style::default().fg(theme.text_dim);
+        for segment in self.prompt.split('\n') {
+            lines.push(Line::from(Span::styled(segment.to_string(), prompt_style)));
+        }
         lines.push(Line::raw(""));
 
         // Section grouping — if a `section_for` exists, walk the
@@ -269,6 +287,9 @@ impl<T: Clone + 'static + Send> Choice<T> {
             } else {
                 line
             };
+            if is_cursor {
+                cursor_line = lines.len() as u16;
+            }
             lines.push(Line::from(Span::styled(truncated, style)));
         }
         // Empty hint
@@ -279,7 +300,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 Style::default().fg(theme.error),
             )));
         }
-        lines
+        (lines, cursor_line)
     }
 }
 
@@ -310,7 +331,7 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
 
-        let lines = self.build_lines(inner.width);
+        let (lines, cursor_line) = self.build_lines(inner.width);
         // Help footer
         let mut help_spans = vec![
             Span::styled("j/k", Style::default().fg(theme.accent).bold()),
@@ -358,8 +379,30 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
             width: inner.width,
             height: inner.height - 2,
         };
+        // Adjust the persistent scroll offset so the cursor row stays
+        // within `body_area`. Only nudges when the cursor walks past
+        // either edge — typing j/k inside the visible window leaves
+        // the offset alone, so the list doesn't drift unnecessarily.
+        let body_h = body_area.height;
+        if body_h > 0 {
+            if cursor_line < self.scroll {
+                self.scroll = cursor_line;
+            } else if cursor_line >= self.scroll + body_h {
+                self.scroll = cursor_line + 1 - body_h;
+            }
+            // Don't scroll past the last line — keeps blank rows
+            // from showing when the list is short.
+            let total = lines.len() as u16;
+            let max_scroll = total.saturating_sub(body_h);
+            if self.scroll > max_scroll {
+                self.scroll = max_scroll;
+            }
+        }
+        // No wrap — each Line is already truncated to `inner.width`
+        // in `build_lines`, so line index === terminal row. That's
+        // load-bearing for the scroll math above.
         frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Paragraph::new(lines).scroll((self.scroll, 0)),
             body_area,
         );
         frame.render_widget(Paragraph::new(Line::from(help_spans)), help_area);

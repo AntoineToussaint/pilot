@@ -118,7 +118,7 @@ async fn apply_mounts_idempotent_when_symlink_points_at_same_source() {
     let manager = wm(&base);
 
     manager
-        .apply_mounts(&wt, &[mount.clone()])
+        .apply_mounts(&wt, std::slice::from_ref(&mount))
         .await
         .expect("first");
     // Second call is a no-op — no error, symlink still correct.

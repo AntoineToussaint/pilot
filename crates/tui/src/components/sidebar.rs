@@ -472,9 +472,11 @@ impl Sidebar {
 
     /// Toggle the collapsed flag for the repo at or above the
     /// cursor. Used by `Space`. Resolution:
-    ///   - cursor on a `RepoHeader` → toggle that header.
-    ///   - cursor on a workspace / session → walk back to find the
-    ///     nearest header (the cursor's group) and toggle that.
+    ///
+    /// - cursor on a `RepoHeader` → toggle that header.
+    /// - cursor on a workspace / session → walk back to find the
+    ///   nearest header (the cursor's group) and toggle that.
+    ///
     /// On collapse, cursor snaps to the now-collapsed header so
     /// j/k from there land on adjacent headers cleanly.
     pub fn toggle_repo_at_cursor(&mut self) -> bool {

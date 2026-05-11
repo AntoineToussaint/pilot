@@ -180,20 +180,9 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<pilot_core::SessionKey>,
-    /// First-poll progress modal. Set by the on-setup-complete hook
-    /// (and the returning-user kickoff path) so users see "Pulling
-    /// from github + linear…" instead of an empty sidebar while the
-    /// initial poll cycle runs. Cleared on first `WorkspaceUpserted`,
-    /// timeout, or any-key dismiss.
-    polling: Option<crate::realm::components::polling::Polling>,
-    /// Last `tick_direct` instant — drives spinner cadence + timeout
-    /// checks at ~50ms granularity from the run loop.
-    polling_last_tick: std::time::Instant,
-    /// Most recent footer notice — error, warning, or info. Replaces
-    /// the modal-on-every-error UX. Retryable severities auto-fade
-    /// after `RETRYABLE_FADE`; permanent + auth stay until cleared
-    /// (key `e` or any key).
-    notice: Option<crate::realm::components::footer::Notice>,
+    /// Transient UI status (polling spinner + footer notice). See
+    /// `StatusCtx`.
+    status: StatusCtx,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -231,16 +220,9 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-/// How long retryable notices stay visible before fading. Permanent
-/// + auth notices ignore this — they stay until dismissed.
-const RETRYABLE_FADE: Duration = Duration::from_secs(5);
-/// How long info notices ("Spawning shell…", "Setup saved", etc.)
-/// stay visible if their triggering event never lands. Longer than
-/// retryable so a slow worktree creation doesn't fade mid-flight.
-const INFO_FADE: Duration = Duration::from_secs(15);
-
 use crate::realm::layout::{pane_areas, LayoutCtx, SPLIT_STEP};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
+use crate::realm::status_ctx::StatusCtx;
 
 /// How long the first `q` stays armed waiting for the second tap.
 const Q_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(800);
@@ -250,8 +232,13 @@ const Q_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(800);
 /// focus to the sidebar instead of forwarding to the PTY.
 const TERMINAL_ESCAPE_CHAR: char = ']';
 
-impl Model<CrosstermTerminalAdapter> {
-    pub fn new(client: Client) -> anyhow::Result<Self> {
+impl<T: TerminalAdapter> Model<T> {
+    /// Backend-independent constructor — both `new` (crossterm) and
+    /// `new_for_test` (TestTerminalAdapter) go through this so the
+    /// common Application setup + field initializers only live in
+    /// one place. Callers are responsible for prepping the terminal
+    /// (raw mode, alt screen, mouse capture) before passing it in.
+    fn build(terminal: T, client: Client) -> Self {
         // Build the modal-event channel + register a custom Port for
         // it. Crossterm input is read directly in the run loop —
         // there's no `crossterm_input_listener` here, so the listener
@@ -266,21 +253,7 @@ impl Model<CrosstermTerminalAdapter> {
                 )
                 .tick_interval(Duration::from_millis(50)),
         );
-        // Splash is mounted lazily by `start_setup_wizard`. Returning
-        // users (with a persisted setup) boot straight to the panes.
-
-        let mut terminal = CrosstermTerminalAdapter::new()?;
-        terminal.enable_raw_mode()?;
-        terminal.enter_alternate_screen()?;
-        // Mouse capture: clicks/drags drive splitter resize +
-        // click-to-focus. Native text selection still works in
-        // modern terminals via Shift-drag (terminal-side override).
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::EnableMouseCapture,
-        );
-
-        let mut model = Self {
+        Self {
             app,
             terminal,
             modal_stack: Vec::new(),
@@ -298,10 +271,26 @@ impl Model<CrosstermTerminalAdapter> {
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
-            polling: None,
-            polling_last_tick: std::time::Instant::now(),
-            notice: None,
-        };
+            status: StatusCtx::new(),
+        }
+    }
+}
+
+impl Model<CrosstermTerminalAdapter> {
+    pub fn new(client: Client) -> anyhow::Result<Self> {
+        let mut terminal = CrosstermTerminalAdapter::new()?;
+        terminal.enable_raw_mode()?;
+        terminal.enter_alternate_screen()?;
+        // Mouse capture: clicks/drags drive splitter resize +
+        // click-to-focus. Native text selection still works in
+        // modern terminals via Shift-drag (terminal-side override).
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::EnableMouseCapture,
+        );
+        // Splash is mounted lazily by `start_setup_wizard`. Returning
+        // users (with a persisted setup) boot straight to the panes.
+        let mut model = Self::build(terminal, client);
         // Subscribe up-front for both first-run and returning users.
         // First-run gets an empty snapshot before the wizard finishes
         // (no polling has run yet) so nothing flickers in behind the
@@ -310,8 +299,6 @@ impl Model<CrosstermTerminalAdapter> {
         model.set_focus_attr();
         Ok(model)
     }
-
-
 }
 
 /// Headless constructor: builds the same orchestrator state without
@@ -323,42 +310,9 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
         client: Client,
         size: tuirealm::ratatui::layout::Size,
     ) -> anyhow::Result<Self> {
-        let (modal_event_tx, modal_event_rx) = mpsc::channel();
-        let app: Application<Id, Msg, UserEvent> = Application::init(
-            EventListenerCfg::default()
-                .add_port(
-                    Box::new(ChannelPort { rx: modal_event_rx }),
-                    Duration::from_millis(10),
-                    16,
-                )
-                .tick_interval(Duration::from_millis(50)),
-        );
-
         let terminal = tuirealm::terminal::TestTerminalAdapter::new(size)
             .map_err(|e| anyhow::anyhow!("test adapter init: {e:?}"))?;
-
-        Ok(Self {
-            app,
-            terminal,
-            modal_stack: Vec::new(),
-            focus: PaneFocus::Sidebar,
-            sidebar: Sidebar::new(SIDEBAR_PID),
-            right: Right::new(RIGHT_PID),
-            terminals: Terminals::new(TERMINALS_PID),
-            client,
-            redraw: true,
-            quit: false,
-            setup: SetupCtx::new(),
-            modal_event_tx,
-            q_armed_at: None,
-            escape_armed_at: None,
-            preselect: None,
-            layout: LayoutCtx::new(),
-            pending_reply: None,
-            polling: None,
-            polling_last_tick: std::time::Instant::now(),
-            notice: None,
-        })
+        Ok(Self::build(terminal, client))
     }
 }
 
@@ -375,7 +329,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// the polling loop with the user's persisted selections.
     pub fn with_setup_complete_hook(
         mut self,
-        hook: Box<dyn FnOnce(crate::setup_flow::SetupOutcome) + Send>,
+        hook: std::sync::Arc<
+            dyn Fn(crate::setup_flow::SetupOutcome) + Send + Sync,
+        >,
     ) -> Self {
         self.setup.on_complete = Some(hook);
         self
@@ -430,10 +386,11 @@ impl<T: TerminalAdapter> Model<T> {
         self.setup.editors = editors;
     }
 
-    /// Apply `~/.pilot/config.yaml::attention` + `ui.collapsed_repos`
-    /// + `agent_shortcuts` to the sidebar at startup. Must be
-    /// called before the first daemon Subscribe so the saved
-    /// collapse state is in place when the Snapshot arrives.
+    /// Apply `~/.pilot/config.yaml::attention` +
+    /// `ui.collapsed_repos` + `agent_shortcuts` to the sidebar at
+    /// startup. Must be called before the first daemon Subscribe
+    /// so the saved collapse state is in place when the Snapshot
+    /// arrives.
     pub fn apply_sidebar_config(
         &mut self,
         attention: pilot_config::AttentionConfig,
@@ -466,7 +423,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         if self.setup.editors.is_empty() {
-            self.notice = Some(Notice::new(
+            self.status.notice = Some(Notice::new(
                 "no editor detected — add one under `editors:` in ~/.pilot/config.yaml",
                 NoticeSeverity::Info,
             ));
@@ -493,7 +450,7 @@ impl<T: TerminalAdapter> Model<T> {
                     kind: pilot_ipc::TerminalKind::Shell,
                     cwd: None,
                 });
-                self.notice = Some(Notice::new(
+                self.status.notice = Some(Notice::new(
                     format!(
                         "Provisioning worktree for {workspace_key} — opening in {} when ready…",
                         self.setup.editors[0].display
@@ -551,14 +508,14 @@ impl<T: TerminalAdapter> Model<T> {
                     worktree = %worktree.display(),
                     "launched editor"
                 );
-                self.notice = Some(Notice::new(
+                self.status.notice = Some(Notice::new(
                     format!("opened {} in {}", worktree.display(), editor.display),
                     NoticeSeverity::Info,
                 ));
             }
             Err(e) => {
                 tracing::warn!("editor launch failed: {e}");
-                self.notice = Some(Notice::new(
+                self.status.notice = Some(Notice::new(
                     format!("failed to launch {}: {e}", editor.display),
                     NoticeSeverity::Permanent,
                 ));
@@ -684,8 +641,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// on-setup-complete hook (and from the returning-user kickoff
     /// path) once polling has been kicked off on the daemon side.
     pub fn show_polling(&mut self, sources: Vec<String>) {
-        self.polling = Some(crate::realm::components::polling::Polling::new(sources));
-        self.polling_last_tick = std::time::Instant::now();
+        self.status.show_polling(sources);
         self.redraw = true;
     }
 
@@ -706,6 +662,7 @@ impl<T: TerminalAdapter> Model<T> {
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let polling_status: Option<(&'static str, String)> = self
+            .status
             .polling
             .as_ref()
             .map(|p| (p.spinner_glyph(), p.status_label()));
@@ -717,7 +674,7 @@ impl<T: TerminalAdapter> Model<T> {
             PaneFocus::Right => self.right.keymap(),
             PaneFocus::Terminals => self.terminals.keymap(),
         };
-        let notice = self.notice.clone();
+        let notice = self.status.notice.clone();
         let mut captured_area = Rect::default();
         let _ = self.terminal.draw(|f| {
             let area = f.area();
@@ -816,7 +773,7 @@ impl<T: TerminalAdapter> Model<T> {
                         use crate::realm::components::footer::{
                             Notice, NoticeSeverity,
                         };
-                        self.notice = Some(Notice::new(
+                        self.status.notice = Some(Notice::new(
                             format!(
                                 "Provisioning worktree for {workspace_key} — opening in {} when ready…",
                                 editor.display
@@ -943,7 +900,7 @@ impl<T: TerminalAdapter> Model<T> {
                     "retryable" => NoticeSeverity::Retryable,
                     _ => NoticeSeverity::Permanent,
                 };
-                self.notice = Some(Notice::new(
+                self.status.notice = Some(Notice::new(
                     format!("{source}: {message}"),
                     severity,
                 ));
@@ -982,7 +939,11 @@ impl<T: TerminalAdapter> Model<T> {
             RunnerStep::Finish(outcome) => {
                 let sources: Vec<String> =
                     outcome.enabled_providers.iter().cloned().collect();
-                if let Some(hook) = self.setup.on_complete.take() {
+                // Cache the new persisted state so subsequent partial
+                // flows (Settings → Add a repo) see the latest scopes.
+                self.setup.persisted =
+                    Some(crate::setup_flow::outcome_to_persisted(&outcome));
+                if let Some(hook) = self.setup.on_complete.as_ref() {
                     hook(outcome);
                 }
                 self.unmount_setup_modal();
@@ -1235,7 +1196,7 @@ impl<T: TerminalAdapter> Model<T> {
                     pilot_ipc::TerminalKind::Agent(a) => a.to_string(),
                     other => format!("{other:?}").to_lowercase(),
                 };
-                self.notice = Some(Notice::new(
+                self.status.notice = Some(Notice::new(
                     format!("Spawning {label}…"),
                     NoticeSeverity::Info,
                 ));
@@ -1628,7 +1589,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.sidebar.on_daemon_event(&event);
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
-        if let Some(p) = self.polling.as_mut() {
+        if let Some(p) = self.status.polling.as_mut() {
             p.feed_daemon_event(&event);
         }
         if is_snapshot && self.preselect.is_some() {
@@ -1641,11 +1602,7 @@ impl<T: TerminalAdapter> Model<T> {
             // the matching Spawn command was sent.
             self.focus = PaneFocus::Terminals;
             self.set_focus_attr();
-            if let Some(n) = &self.notice
-                && n.message.starts_with("Spawning")
-            {
-                self.notice = None;
-            }
+            self.status.clear_spawning_notice();
             self.sync_panes();
             // Editor-deferred-by-spawn: the user pressed `e` on a
             // workspace with no worktree; we asked the daemon to
@@ -1678,17 +1635,7 @@ impl<T: TerminalAdapter> Model<T> {
     ///   doesn't follow the user around forever.
     /// - Permanent / Auth: stay until dismissed (`e`).
     pub fn tick_notice(&mut self) {
-        use crate::realm::components::footer::NoticeSeverity;
-        let Some(n) = &self.notice else { return };
-        let timeout = match n.severity {
-            NoticeSeverity::Retryable => Some(RETRYABLE_FADE),
-            NoticeSeverity::Info => Some(INFO_FADE),
-            NoticeSeverity::Auth | NoticeSeverity::Permanent => None,
-        };
-        if let Some(t) = timeout
-            && n.set_at.elapsed() >= t
-        {
-            self.notice = None;
+        if self.status.tick_notice() {
             self.redraw = true;
         }
     }
@@ -1697,13 +1644,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// loop. Cheap; called every iteration. Returns Some(msg) when
     /// the polling modal wants to be torn down.
     pub fn polling_tick(&mut self) -> Option<Msg> {
-        const TICK_INTERVAL: Duration = Duration::from_millis(80);
-        if self.polling_last_tick.elapsed() < TICK_INTERVAL {
-            return None;
-        }
-        self.polling_last_tick = std::time::Instant::now();
-        let polling = self.polling.as_mut()?;
-        let msg = polling.tick_direct();
+        let msg = self.status.polling_tick();
         if msg.is_some() {
             self.redraw = true;
         }
@@ -1713,7 +1654,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Tear down the polling modal. Called when its tick / feed
     /// returns Some(msg) (saw workspace, timed out, etc.).
     fn dismiss_polling(&mut self) {
-        if self.polling.take().is_some() {
+        if self.status.dismiss_polling() {
             self.redraw = true;
         }
     }

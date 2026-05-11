@@ -28,3 +28,6 @@ bincode          = "1.3"
 # Mock upstream in tests reuses the same hyper/reqwest stack as the
 # server. Listed here so the lib stays slim at build time.
 tokio            = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

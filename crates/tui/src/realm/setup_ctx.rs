@@ -14,6 +14,12 @@ use crate::setup_flow::{SetupOutcome, SetupRunner};
 use pilot_core::{PersistedSetup, ScopeSource, SessionKey};
 use std::sync::Arc;
 
+/// Cached setup detection results — the `SetupReport` + the source
+/// list `SetupRunner::new` needs. Returned by `crate::setup::detect`
+/// and stashed so the wizard can be re-opened from `,` without
+/// re-running detection from scratch.
+pub(crate) type SetupInputs = (setup::SetupReport, Arc<Vec<Box<dyn ScopeSource>>>);
+
 /// One row in the Settings palette (`,` opens this).
 #[derive(Debug, Clone)]
 pub enum SettingsAction {
@@ -51,7 +57,7 @@ pub(crate) struct SetupCtx {
     /// `main::run_embedded_realm` so the wizard can be re-opened
     /// mid-session (key `,`) for adding repos / agents without
     /// re-detecting from scratch. Refresh inside the wizard via `r`.
-    pub inputs: Option<(setup::SetupReport, Arc<Vec<Box<dyn ScopeSource>>>)>,
+    pub inputs: Option<SetupInputs>,
     /// Last-known persisted setup. Cached at startup + after every
     /// successful wizard run. Used by partial flows from the Settings
     /// palette to pre-seed the SetupRunner with existing state so
@@ -78,10 +84,14 @@ pub(crate) struct SetupCtx {
     /// The Choice picker resolves to a template, at which point we
     /// move it to `pending_editor_launch`.
     pub pending_editor_workspace: Option<SessionKey>,
-    /// Hook invoked exactly once when setup finishes successfully.
-    /// `main.rs::run_embedded_realm` installs this so the polling
-    /// loop kicks off with the user's selections.
-    pub on_complete: Option<Box<dyn FnOnce(SetupOutcome) + Send>>,
+    /// Hook invoked every time setup finishes successfully (first-run
+    /// wizard AND partial flows from the Settings palette — "Add a
+    /// repo", "Edit filters", etc.). `main.rs::run_embedded_realm`
+    /// installs this so each Finish persists the YAML and (re)spawns
+    /// the polling loop. Held as `Arc<dyn Fn>` so it can fire many
+    /// times — earlier we used `FnOnce` and partial flows silently
+    /// dropped their accumulator.
+    pub on_complete: Option<Arc<dyn Fn(SetupOutcome) + Send + Sync>>,
 }
 
 impl SetupCtx {

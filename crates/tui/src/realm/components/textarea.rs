@@ -325,9 +325,7 @@ impl AppComponent<Msg, UserEvent> for Textarea {
             return Some(Msg::ModalDismissed);
         }
         // Submit keys (Ctrl-Enter / Ctrl-S).
-        if (ctrl && matches!(key.code, Key::Enter))
-            || (ctrl && matches!(key.code, Key::Char('s')))
-        {
+        if ctrl && matches!(key.code, Key::Enter | Key::Char('s')) {
             let trimmed = self.buffer.trim();
             if trimmed.is_empty() {
                 self.error = Some("can't submit empty input".into());

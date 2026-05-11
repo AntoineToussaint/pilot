@@ -713,7 +713,7 @@ impl TerminalStack {
                             Ok(new_focus) => {
                                 *focused = new_focus;
                             }
-                            Err(()) => {
+                            Err(_) => {
                                 // path was empty (the killed leaf was
                                 // the only tile) → drop back to the
                                 // tabs default so a future spawn opens

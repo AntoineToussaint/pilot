@@ -68,8 +68,8 @@ run-connect: ## Connect to a running daemon socket. Usage: make run-connect SOCK
 test: ## Run all tests.
 	@PATH="$(PINNED_PATH)" cargo test --workspace
 
-lint: ## Run clippy.
-	@PATH="$(PINNED_PATH)" cargo clippy --workspace
+lint: ## Run clippy with workspace lint config (vendored crates excluded).
+	@PATH="$(PINNED_PATH)" cargo clippy --workspace --tests
 
 clean: ## Clean cargo build artifacts (preserves vendor/).
 	@cargo clean

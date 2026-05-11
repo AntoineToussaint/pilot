@@ -18,8 +18,6 @@
 //! - [`wait_for_shutdown_signal`] — async wait for SIGTERM / SIGINT
 //!   (or Ctrl-Break on Windows). Resolves once.
 
-use std::future::Future;
-
 /// Redirect process stderr (fd 2) to the given open file. Best-effort
 /// — failures are silently ignored; the caller already has a fallback
 /// (the tracing layer also writes to the file directly).
@@ -78,23 +76,21 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// Async wait for a graceful-shutdown signal — SIGTERM or Ctrl-C on
 /// unix, Ctrl-Break on Windows. Resolves once. Used by
 /// `pilot server start`'s outer task to trigger a clean stop.
-pub fn wait_for_shutdown_signal() -> impl Future<Output = ()> + Send {
-    async {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut sigterm =
-                signal(SignalKind::terminate()).expect("install SIGTERM handler");
-            let ctrl_c = tokio::signal::ctrl_c();
-            tokio::select! {
-                _ = sigterm.recv() => {},
-                _ = ctrl_c => {},
-            }
+pub async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::select! {
+            _ = sigterm.recv() => {},
+            _ = ctrl_c => {},
         }
-        #[cfg(windows)]
-        {
-            // TODO(windows): tokio::signal::windows::{ctrl_c, ctrl_break}
-            let _ = tokio::signal::ctrl_c().await;
-        }
+    }
+    #[cfg(windows)]
+    {
+        // TODO(windows): tokio::signal::windows::{ctrl_c, ctrl_break}
+        let _ = tokio::signal::ctrl_c().await;
     }
 }

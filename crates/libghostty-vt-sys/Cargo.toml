@@ -26,3 +26,15 @@ heck = {version = "0.5", optional = true}
 name = "gen-bindings"
 path = "tools/gen_bindings.rs"
 required-features = ["bindgen-tool"]
+
+# Vendored upstream crate — don't enforce pilot's lint policy here.
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
+correctness = "allow"
+style = "allow"
+complexity = "allow"
+perf = "allow"
+suspicious = "allow"
