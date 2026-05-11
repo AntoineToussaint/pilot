@@ -103,6 +103,25 @@ impl Sidebar {
         self.inner.selected_workspace()
     }
 
+    /// Look up a workspace by key (independent of cursor).
+    pub fn workspace_by_key(
+        &self,
+        key: &pilot_core::SessionKey,
+    ) -> Option<&pilot_core::Workspace> {
+        self.inner.workspace_by_key(key)
+    }
+
+    /// Apply `~/.pilot/config.yaml` overrides to the inner pane in
+    /// place. Used by `Model::apply_sidebar_config` once at startup.
+    pub fn apply_inner_config(
+        &mut self,
+        attention: pilot_config::AttentionConfig,
+        collapsed_repos: std::collections::BTreeSet<String>,
+        agent_shortcuts: std::collections::HashMap<char, String>,
+    ) {
+        self.inner.apply_config(attention, collapsed_repos, agent_shortcuts);
+    }
+
     /// Move the cursor onto the workspace whose key matches.
     /// Returns true if found.
     pub fn focus_workspace_key(&mut self, key: &pilot_core::SessionKey) -> bool {

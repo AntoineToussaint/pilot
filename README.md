@@ -90,7 +90,6 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 | `q q` | Quit (double-tap within 800ms) |
 | `Ctrl-Shift-D` | Detach focused pane into a new pilot window |
 | `Shift-arrows` | Resize splitters |
-| `e` | Dismiss the active footer notice |
 
 **Sidebar** (workspace list):
 
@@ -106,7 +105,7 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 | `m` | Mark **all** of this workspace's activity as read (bulk) |
 | `r` | Reply (post a comment to the PR) |
 | `n` | New pre-PR workspace |
-| `E` | Open the worktree in your editor (Zed / VS Code / Cursor / …) |
+| `e` | Open the worktree in your editor (Zed / VS Code / Cursor / …) |
 | `Space` | Fold / unfold the parent repo group |
 | `/` | Search |
 | `Shift-X X` | Kill workspace (two-press) |

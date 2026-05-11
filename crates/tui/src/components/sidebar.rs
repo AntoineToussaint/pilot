@@ -141,6 +141,10 @@ pub struct Sidebar {
     /// one Claude + two shells running). Populated from `Event::Snapshot`
     /// and kept in sync via `TerminalSpawned` / `TerminalExited`.
     running_terminals: HashMap<TerminalId, (SessionKey, TerminalKind)>,
+    /// Threshold config for the per-repo "needs attention" counter.
+    /// Loaded from `~/.pilot/config.yaml::attention` at startup;
+    /// toggle individual signals there to customize.
+    attention: pilot_config::AttentionConfig,
 }
 
 impl Sidebar {
@@ -164,6 +168,24 @@ impl Sidebar {
             kill_pending: None,
             agent_shortcuts,
             running_terminals: HashMap::new(),
+            attention: pilot_config::AttentionConfig::default(),
+        }
+    }
+
+    /// Override the attention thresholds + initial collapse set
+    /// from `~/.pilot/config.yaml`. Call once after construction
+    /// (typically in main, between `Sidebar::new` and the first
+    /// daemon Subscribe).
+    pub fn apply_config(
+        &mut self,
+        attention: pilot_config::AttentionConfig,
+        collapsed_repos: BTreeSet<String>,
+        agent_shortcuts: HashMap<char, String>,
+    ) {
+        self.attention = attention;
+        self.collapsed_repos = collapsed_repos;
+        if !agent_shortcuts.is_empty() {
+            self.agent_shortcuts = agent_shortcuts;
         }
     }
 
@@ -231,6 +253,14 @@ impl Sidebar {
             // strand the cursor on a non-selectable row.
             _ => false,
         }
+    }
+
+    /// Look up a workspace by its session key. Used by paths that
+    /// need workspace data without disturbing the cursor (e.g. the
+    /// editor-deferred-by-spawn flow that has to find the
+    /// worktree of a specific workspace, not the focused one).
+    pub fn workspace_by_key(&self, key: &SessionKey) -> Option<&Workspace> {
+        self.workspaces.get(key)
     }
 
     /// Move the cursor onto the workspace row matching `key`. Returns
@@ -469,6 +499,15 @@ impl Sidebar {
             self.collapsed_repos.insert(repo.clone());
         }
         self.recompute_visible();
+        // Persist the new set to ~/.pilot/config.yaml::ui.collapsed_repos
+        // so the layout survives restart. Best-effort; an I/O
+        // error here just means next launch starts expanded.
+        let snapshot = self.collapsed_repos.clone();
+        if let Err(e) =
+            pilot_config::Config::save_with(|c| c.ui.collapsed_repos = snapshot)
+        {
+            tracing::warn!("save collapsed_repos failed: {e}");
+        }
         // Always park the cursor on the toggled header so
         // collapse + immediately re-expand works (Space twice in a
         // row toggles the same repo).
@@ -495,6 +534,23 @@ impl Sidebar {
     }
 
     fn recompute_visible(&mut self) {
+        self.recompute_visible_inner(true);
+    }
+
+    /// Variant for callers that have just *reset* `self.cursor` (e.g.
+    /// mailbox cycle, fresh snapshot). The reset clobbered whatever
+    /// row the user was on, so the regular "park me back on the same
+    /// header" preservation is wrong here — without this, cursor=0
+    /// lands on the OLD header row and gets re-parked on the matching
+    /// header in the new visible list, leaving the cursor stuck on a
+    /// non-selectable header instead of falling through to the first
+    /// workspace row.
+    fn reset_cursor_and_recompute(&mut self) {
+        self.cursor = 0;
+        self.recompute_visible_inner(false);
+    }
+
+    fn recompute_visible_inner(&mut self, preserve_header_park: bool) {
         let now = chrono::Utc::now();
         let mailbox = self.mailbox;
 
@@ -564,6 +620,17 @@ impl Sidebar {
 
         let prior_key = self.selected_session_key().cloned();
         let prior_session = self.selected_session_id();
+        // Snapshot prior repo header (if cursor was parked on one)
+        // so events arriving while we're on a header don't jump
+        // the cursor away.
+        let prior_header = if preserve_header_park {
+            match self.visible.get(self.cursor) {
+                Some(VisibleRow::RepoHeader(name)) => Some(name.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + 4);
         let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
         let mut current_repo: Option<String> = None;
@@ -579,7 +646,7 @@ impl Sidebar {
             // the collapse state.
             let summary = summaries.entry(repo.clone()).or_default();
             summary.active += 1;
-            if workspace_needs_attention(w) {
+            if workspace_needs_attention(w, &self.attention) {
                 summary.attention += 1;
             }
             // Skip workspace + session rows if the repo is collapsed.
@@ -603,6 +670,19 @@ impl Sidebar {
         }
         self.visible = visible;
         self.repo_summaries = summaries;
+
+        // Preserve cursor on a repo header across reorderings — j/k
+        // can land on headers (collapse target), and snapshots
+        // arriving while parked there shouldn't yank focus.
+        if let Some(name) = prior_header
+            && let Some(idx) = self
+                .visible
+                .iter()
+                .position(|r| matches!(r, VisibleRow::RepoHeader(n) if n == &name))
+        {
+            self.cursor = idx;
+            return;
+        }
 
         // Preserve cursor across reorderings. Match by (workspace
         // key, session id) tuple so a cursor sitting on a session
@@ -665,7 +745,7 @@ impl Sidebar {
             Binding { keys: "Tab", label: "next pane" },
             Binding { keys: "Enter", label: "open" },
             Binding { keys: "n", label: "new workspace" },
-            Binding { keys: "E", label: "open editor" },
+            Binding { keys: "e", label: "open editor" },
             Binding { keys: "Space", label: "fold repo" },
             Binding { keys: "s", label: "shell" },
             Binding { keys: "c", label: "claude" },
@@ -673,9 +753,6 @@ impl Sidebar {
             Binding { keys: "u", label: "cursor" },
             Binding { keys: "m", label: "mark all read" },
             Binding { keys: "/", label: "search" },
-            Binding { keys: "e", label: "last error" },
-            Binding { keys: "?", label: "help" },
-            Binding { keys: "q q", label: "quit" },
         ]
     }
 
@@ -838,8 +915,7 @@ impl Sidebar {
                 };
                 // New mailbox → reset cursor to top; old cursor key is
                 // almost certainly not visible in the other mailbox.
-                self.cursor = 0;
-                self.recompute_visible();
+                self.reset_cursor_and_recompute();
                 PaneOutcome::Consumed
             }
 
@@ -880,8 +956,7 @@ impl Sidebar {
                     self.running_terminals
                         .insert(t.terminal_id, (t.session_key.clone(), t.kind.clone()));
                 }
-                self.cursor = 0;
-                self.recompute_visible();
+                self.reset_cursor_and_recompute();
             }
             Event::TerminalSpawned {
                 terminal_id,
@@ -1425,41 +1500,38 @@ struct StatusPill {
 
 /// Does this workspace want the user's attention right now? Drives
 /// the "needs attention" counter on the collapsed repo header.
-///
-/// Returns true when ANY of:
-///   - unread activity (new comments, CI events, etc. since last viewed)
-///   - CI failure on the primary task
-///   - review pending (or changes-requested) on the primary task
-///   - any session has an agent in `Asking` state (waiting on prompt)
-///   - mentioned role on the primary task
-///
-/// Future: surface as a config so users can pick their own
-/// definition (e.g. "only count CI failures").
-fn workspace_needs_attention(w: &Workspace) -> bool {
-    if w.unread_count() > 0 {
+/// Each signal (unread / CI / review / agent-asking / mentioned)
+/// is independently toggleable via `~/.pilot/config.yaml::attention`.
+fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig) -> bool {
+    if cfg.unread && w.unread_count() > 0 {
         return true;
     }
-    if w.sessions
-        .iter()
-        .any(|s| matches!(s.state, pilot_core::SessionRunState::Asking))
+    if cfg.agent_asking
+        && w.sessions
+            .iter()
+            .any(|s| matches!(s.state, pilot_core::SessionRunState::Asking))
     {
         return true;
     }
     if let Some(t) = w.primary_task() {
-        if matches!(
-            t.ci,
-            pilot_core::CiStatus::Failure | pilot_core::CiStatus::Mixed
-        ) {
+        if cfg.ci_failing
+            && matches!(
+                t.ci,
+                pilot_core::CiStatus::Failure | pilot_core::CiStatus::Mixed
+            )
+        {
             return true;
         }
-        if matches!(
-            t.review,
-            pilot_core::ReviewStatus::ChangesRequested
-                | pilot_core::ReviewStatus::Pending
-        ) {
+        if cfg.review_pending
+            && matches!(
+                t.review,
+                pilot_core::ReviewStatus::ChangesRequested
+                    | pilot_core::ReviewStatus::Pending
+            )
+        {
             return true;
         }
-        if matches!(t.role, pilot_core::TaskRole::Mentioned) {
+        if cfg.mentioned && matches!(t.role, pilot_core::TaskRole::Mentioned) {
             return true;
         }
     }

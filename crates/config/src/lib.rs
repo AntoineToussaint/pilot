@@ -20,6 +20,31 @@ pub enum ConfigError {
 #[serde(default)]
 #[derive(Default)]
 pub struct Config {
+    /// Wizard output: which providers + agents are enabled, the
+    /// per-provider role/type filters, the selected orgs/repos.
+    /// Populated by the first-run wizard and the in-session
+    /// Settings palette (`,`); editable by hand.
+    #[serde(default)]
+    pub setup: SetupSection,
+    /// Custom + override editor entries. Merged with builtins
+    /// (Zed/VS Code/Cursor/…) at startup. `id` matches builtins
+    /// to override; new ids extend.
+    #[serde(default)]
+    pub editors: Vec<EditorEntry>,
+    /// What counts as "needs attention" for the per-repo counter
+    /// in the sidebar header. Toggle individual signals off here.
+    #[serde(default)]
+    pub attention: AttentionConfig,
+    /// Single-char keybindings → agent ids. Defaults to
+    /// `c → claude, x → codex, u → cursor`. User can remap or add
+    /// custom CLIs (e.g. `a → aider`).
+    #[serde(default)]
+    pub agent_shortcuts: std::collections::BTreeMap<char, String>,
+    /// View preferences pilot writes back automatically: which
+    /// repos are collapsed in the sidebar, last splitter widths.
+    /// Edit by hand if you want to lock a layout.
+    #[serde(default)]
+    pub ui: UiSection,
     pub providers: ProvidersConfig,
     pub display: DisplayConfig,
     pub slack: SlackConfig,
@@ -28,6 +53,73 @@ pub struct Config {
     pub hooks: HooksConfig,
     pub worktree: WorktreeConfig,
     pub terminal: TerminalSection,
+}
+
+/// `setup:` block — wizard-driven user config. Mirrors
+/// `pilot_core::PersistedSetup` shape but in YAML form.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SetupSection {
+    /// Provider ids (`github`, `linear`) currently enabled.
+    pub providers: std::collections::BTreeSet<String>,
+    /// Agent ids (`claude`, `codex`, …) currently enabled.
+    pub agents: std::collections::BTreeSet<String>,
+    /// Per-provider role/type filter keys. e.g.
+    /// `github: [pr.author, pr.reviewer, issue.author]`.
+    pub filters: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Per-provider scope ids (orgs / repos).
+    pub scopes: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+/// One entry under `editors:`. Args support `{path}` for the
+/// worktree dir. See `pilot_tui::editors::EditorTemplate`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorEntry {
+    pub id: String,
+    #[serde(default)]
+    pub display: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+}
+
+/// `attention:` block — controls which signals contribute to the
+/// "needs attention" badge on a repo header. All default to true.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AttentionConfig {
+    pub unread: bool,
+    pub ci_failing: bool,
+    pub review_pending: bool,
+    pub agent_asking: bool,
+    pub mentioned: bool,
+}
+
+impl Default for AttentionConfig {
+    fn default() -> Self {
+        Self {
+            unread: true,
+            ci_failing: true,
+            review_pending: true,
+            agent_asking: true,
+            mentioned: true,
+        }
+    }
+}
+
+/// `ui:` block — user-facing view state pilot writes back so UI
+/// preferences survive restart.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct UiSection {
+    /// Repo names whose workspace rows should start collapsed.
+    pub collapsed_repos: std::collections::BTreeSet<String>,
+    /// Sidebar column width as a percentage of total. None = use
+    /// the default (40%).
+    pub sidebar_pct: Option<u16>,
+    /// Right-top (activity) row height as a percentage of the
+    /// right column. None = use the default (25%).
+    pub right_top_pct: Option<u16>,
 }
 
 /// Worktree-layout configuration — mount points, mostly. The daemon
@@ -205,6 +297,38 @@ impl Config {
         }
         std::fs::write(path, yaml)?;
         Ok(())
+    }
+
+    /// Atomic write to `~/.pilot/config.yaml`. tmp + rename so a
+    /// crashing pilot doesn't leave a half-written file. Used by
+    /// the in-process write-back paths (sidebar collapse,
+    /// `,` settings palette, splitter resize).
+    pub fn save(&self) -> Result<(), ConfigError> {
+        Self::save_to(self, &Self::default_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
+        let yaml = serde_yaml::to_string(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("yaml.tmp");
+        std::fs::write(&tmp, yaml)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Read-modify-write. Loads the YAML, lets `f` mutate it,
+    /// writes back. Most callers (sidebar collapse, splitter
+    /// resize) only touch one field — this avoids the boilerplate
+    /// of the load/save dance.
+    pub fn save_with<F>(f: F) -> Result<(), ConfigError>
+    where
+        F: FnOnce(&mut Self),
+    {
+        let mut cfg = Self::load()?;
+        f(&mut cfg);
+        cfg.save()
     }
 
     pub fn default_path() -> PathBuf {

@@ -90,41 +90,123 @@ pub fn persisted_to_outcome(p: PersistedSetup, report: SetupReport) -> SetupOutc
     }
 }
 
+/// Path to the user's YAML config. The setup wizard, `,` Settings
+/// palette, and any hand edits all converge here. Empty / missing
+/// → no persisted setup, wizard runs on first launch.
+fn config_yaml_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
+    std::path::PathBuf::from(home).join(".pilot/config.yaml")
+}
+
+/// Load the persisted setup from `~/.pilot/config.yaml::setup`.
+///
+/// Migration: an older release wrote setup state to the SQLite kv
+/// blob (`KV_KEY_SETUP`). We still check that as a fallback so
+/// existing users don't lose their wizard answers on upgrade — the
+/// next save will rewrite them to YAML and `polling::sources_for`
+/// will find them there going forward.
 pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
-    let raw = match store.get_kv(KV_KEY_SETUP) {
-        Ok(Some(s)) => s,
-        Ok(None) => return None,
+    if let Some(p) = load_from_yaml(&config_yaml_path()) {
+        return Some(p);
+    }
+    // Legacy kv fallback. Migrates by side-effect on the next save.
+    match store.get_kv(KV_KEY_SETUP) {
+        Ok(Some(raw)) if !raw.is_empty() => match serde_json::from_str::<PersistedSetup>(&raw) {
+            Ok(mut p) => {
+                p.migrate_legacy_keys();
+                tracing::info!("setup loaded from legacy kv blob; will migrate to YAML on next save");
+                Some(p)
+            }
+            Err(e) => {
+                tracing::warn!("legacy setup blob corrupt: {e}");
+                None
+            }
+        },
+        Ok(_) => None,
         Err(e) => {
-            tracing::warn!("setup config read failed: {e}");
-            return None;
-        }
-    };
-    match serde_json::from_str::<PersistedSetup>(&raw) {
-        Ok(mut p) => {
-            // Project legacy `role.*` + `type.*` keys onto the new
-            // per-type schema (`pr.*` / `issue.*`). Idempotent — no-op
-            // for already-migrated configs.
-            p.migrate_legacy_keys();
-            Some(p)
-        }
-        Err(e) => {
-            tracing::warn!("setup config corrupt in kv: {e}; treating as missing");
+            tracing::warn!("legacy setup read failed: {e}");
             None
         }
     }
 }
 
+fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cfg: pilot_config::Config = match serde_yaml::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("config.yaml parse failed: {e}");
+            return None;
+        }
+    };
+    let s = cfg.setup;
+    // The YAML schema keeps the same shape as PersistedSetup but
+    // expressed as plain BTrees (no JSON parsing). Convert.
+    if s.providers.is_empty() && s.agents.is_empty() {
+        // Treat fully-empty as "no persisted setup" — first-run.
+        return None;
+    }
+    let provider_filters = s
+        .filters
+        .into_iter()
+        .map(|(k, v)| (k, ProviderConfig { enabled_keys: v }))
+        .collect();
+    let mut p = PersistedSetup {
+        enabled_providers: s.providers,
+        enabled_agents: s.agents,
+        provider_filters,
+        selected_scopes: s.scopes,
+    };
+    p.migrate_legacy_keys();
+    Some(p)
+}
+
+/// Persist setup state by merging into `~/.pilot/config.yaml`.
+///
+/// Reads the existing file (if any), updates only the `setup:`
+/// section, writes back. Hand-edited sections (worktree mounts,
+/// hooks, custom editors, etc.) are preserved.
 pub fn save_persisted(store: &dyn Store, p: &PersistedSetup) {
-    let json = match serde_json::to_string(p) {
+    let path = config_yaml_path();
+    let mut cfg: pilot_config::Config = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_yaml::from_str(&raw).ok())
+        .unwrap_or_default();
+
+    cfg.setup.providers = p.enabled_providers.clone();
+    cfg.setup.agents = p.enabled_agents.clone();
+    cfg.setup.filters = p
+        .provider_filters
+        .iter()
+        .map(|(k, v)| (k.clone(), v.enabled_keys.clone()))
+        .collect();
+    cfg.setup.scopes = p.selected_scopes.clone();
+
+    let serialized = match serde_yaml::to_string(&cfg) {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!("setup config serialize failed: {e}");
+            tracing::warn!("config.yaml serialize failed: {e}");
             return;
         }
     };
-    if let Err(e) = store.set_kv(KV_KEY_SETUP, &json) {
-        tracing::warn!("setup config write failed: {e}");
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
+    // Atomic-ish write: tmp + rename.
+    let tmp = path.with_extension("yaml.tmp");
+    if let Err(e) = std::fs::write(&tmp, serialized) {
+        tracing::warn!("config.yaml write tmp failed: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        tracing::warn!("config.yaml rename failed: {e}");
+        return;
+    }
+
+    // Clean up the legacy kv blob so the YAML stays the only source
+    // of truth on subsequent loads.
+    let _ = store.set_kv(KV_KEY_SETUP, "");
 }
 
 // ── Choices ─────────────────────────────────────────────────────────────
@@ -958,6 +1040,74 @@ mod tests {
         assert!(o.enabled_providers.contains("github"));
         assert!(o.enabled_agents.contains("claude"));
         assert!(o.provider_filters.contains_key("github"));
+    }
+
+    #[test]
+    fn yaml_round_trip_preserves_setup_fields() {
+        // Write a PersistedSetup to the YAML schema and read it
+        // back via load_from_yaml. The round-trip should preserve
+        // every populated field.
+        use std::collections::{BTreeMap, BTreeSet};
+        let original = PersistedSetup {
+            enabled_providers: ["github", "linear"].iter().map(|s| s.to_string()).collect(),
+            enabled_agents: ["claude", "codex"].iter().map(|s| s.to_string()).collect(),
+            provider_filters: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "github".to_string(),
+                    ProviderConfig {
+                        enabled_keys: ["pr.author", "issue.author"]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
+                    },
+                );
+                m
+            },
+            selected_scopes: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "github".to_string(),
+                    ["tensorzero/tensorzero", "owner/repo"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<BTreeSet<_>>(),
+                );
+                m
+            },
+        };
+
+        // Build the equivalent Config + serialize.
+        let mut cfg = pilot_config::Config::default();
+        cfg.setup.providers = original.enabled_providers.clone();
+        cfg.setup.agents = original.enabled_agents.clone();
+        cfg.setup.filters = original
+            .provider_filters
+            .iter()
+            .map(|(k, v)| (k.clone(), v.enabled_keys.clone()))
+            .collect();
+        cfg.setup.scopes = original.selected_scopes.clone();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        cfg.save_to(&path).unwrap();
+
+        let loaded = load_from_yaml(&path).expect("non-empty yaml round-trips");
+        assert_eq!(loaded.enabled_providers, original.enabled_providers);
+        assert_eq!(loaded.enabled_agents, original.enabled_agents);
+        assert_eq!(loaded.provider_filters, original.provider_filters);
+        assert_eq!(loaded.selected_scopes, original.selected_scopes);
+    }
+
+    #[test]
+    fn yaml_empty_setup_treated_as_first_run() {
+        // An empty config.yaml (or one with only non-setup sections)
+        // should return None — the first-run wizard then kicks.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let cfg = pilot_config::Config::default();
+        cfg.save_to(&path).unwrap();
+        assert!(load_from_yaml(&path).is_none());
     }
 
     #[test]

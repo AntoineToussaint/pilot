@@ -319,13 +319,35 @@ async fn run_embedded_realm(
         if let Some(p) = persisted_for_model {
             model.cache_persisted_setup(p);
         }
-        // Detect installed editors for the `E` shortcut. User
+        // Detect installed editors for the `e` shortcut. User
         // overrides come from `~/.pilot/config.yaml::editors`; the
         // builtins ship as defaults.
         let editors =
             pilot_tui::editors::discover_at_startup(load_user_editors());
         tracing::info!("detected {} editor(s)", editors.len());
         model.cache_editors(editors);
+        // Apply ~/.pilot/config.yaml::{attention, ui, agent_shortcuts}
+        // → sidebar + Model. Single load; subsequent reads happen
+        // on-demand via Config::save_with for the writable parts.
+        let user_config = pilot_config::Config::load()
+            .unwrap_or_else(|e| {
+                tracing::warn!("config.yaml load: {e}; using defaults");
+                pilot_config::Config::default()
+            });
+        let agent_shortcuts: std::collections::HashMap<char, String> = user_config
+            .agent_shortcuts
+            .clone()
+            .into_iter()
+            .collect();
+        model.apply_sidebar_config(
+            user_config.attention.clone(),
+            user_config.ui.collapsed_repos.clone(),
+            agent_shortcuts,
+        );
+        model = model.with_splits(
+            user_config.ui.sidebar_pct,
+            user_config.ui.right_top_pct,
+        );
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);
         }
@@ -363,26 +385,22 @@ fn persisted_setup(
 /// Read the optional `editors:` list from `~/.pilot/config.yaml`.
 /// Errors / missing file → empty vec (the builtins still apply).
 fn load_user_editors() -> Vec<pilot_tui::editors::UserEditorEntry> {
-    let path = match std::env::var_os("HOME") {
-        Some(home) => std::path::PathBuf::from(home).join(".pilot/config.yaml"),
-        None => return Vec::new(),
-    };
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    #[derive(serde::Deserialize)]
-    struct Wrapper {
-        #[serde(default)]
-        editors: Vec<pilot_tui::editors::UserEditorEntry>,
-    }
-    match serde_yaml::from_str::<Wrapper>(&raw) {
-        Ok(w) => w.editors,
+    let cfg = match pilot_config::Config::load() {
+        Ok(c) => c,
         Err(e) => {
-            tracing::warn!("config.yaml editors parse failed: {e}");
-            Vec::new()
+            tracing::warn!("config.yaml load failed: {e}");
+            return Vec::new();
         }
-    }
+    };
+    cfg.editors
+        .into_iter()
+        .map(|e| pilot_tui::editors::UserEditorEntry {
+            id: e.id,
+            display: e.display,
+            command: e.command,
+            args: e.args,
+        })
+        .collect()
 }
 
 async fn server_subcommand(args: &[String]) -> anyhow::Result<()> {

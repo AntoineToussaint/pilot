@@ -178,6 +178,18 @@ pub struct Model<T: TerminalAdapter> {
     /// Items behind the active editor picker (when `E` finds 2+
     /// editors). Same shape as `settings_actions`.
     editor_choices: Vec<crate::editors::EditorTemplate>,
+    /// Editor launch deferred behind a session-spawn. Populated when
+    /// the user pressed `E` on a workspace with no worktree yet:
+    /// the orchestrator emits `Command::Spawn(Shell)` to provision
+    /// one, and `handle_daemon_event` fires the launch when the
+    /// matching `TerminalSpawned` arrives.
+    pending_editor_launch:
+        Option<(pilot_core::SessionKey, crate::editors::EditorTemplate)>,
+    /// Workspace waiting for an editor pick — set when `E` was
+    /// pressed on a worktreeless workspace AND multiple editors
+    /// were detected. The Choice picker resolves to a template,
+    /// at which point we move it to `pending_editor_launch`.
+    pending_editor_workspace: Option<pilot_core::SessionKey>,
     /// Hook invoked exactly once when setup finishes successfully.
     /// `main.rs::run_embedded_realm` installs this so the polling
     /// loop kicks off with the user's selections.
@@ -383,6 +395,8 @@ impl Model<CrosstermTerminalAdapter> {
             settings_actions: Vec::new(),
             editors: Vec::new(),
             editor_choices: Vec::new(),
+            pending_editor_launch: None,
+            pending_editor_workspace: None,
             on_setup_complete: None,
             modal_event_tx,
             q_armed_at: None,
@@ -449,6 +463,8 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
             settings_actions: Vec::new(),
             editors: Vec::new(),
             editor_choices: Vec::new(),
+            pending_editor_launch: None,
+            pending_editor_workspace: None,
             on_setup_complete: None,
             modal_event_tx,
             q_armed_at: None,
@@ -534,46 +550,97 @@ impl<T: TerminalAdapter> Model<T> {
         self.editors = editors;
     }
 
+    /// Apply `~/.pilot/config.yaml::attention` + `ui.collapsed_repos`
+    /// + `agent_shortcuts` to the sidebar at startup. Must be
+    /// called before the first daemon Subscribe so the saved
+    /// collapse state is in place when the Snapshot arrives.
+    pub fn apply_sidebar_config(
+        &mut self,
+        attention: pilot_config::AttentionConfig,
+        collapsed_repos: std::collections::BTreeSet<String>,
+        agent_shortcuts: std::collections::HashMap<char, String>,
+    ) {
+        self.sidebar
+            .apply_inner_config(attention, collapsed_repos, agent_shortcuts);
+    }
+
+    /// Override the initial sidebar / right-top split percentages
+    /// from `~/.pilot/config.yaml::ui`. Each value is clamped to
+    /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
+    pub fn with_splits(mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) -> Self {
+        if let Some(s) = sidebar_pct {
+            self.sidebar_pct = clamp_pct(s as i16);
+        }
+        if let Some(t) = right_top_pct {
+            self.right_top_pct = clamp_pct(t as i16);
+        }
+        self
+    }
+
     /// Open the focused workspace's worktree in an editor. Bound to
     /// `E` from the sidebar. 1 detected editor → launch directly;
     /// 2+ → mount a Choice picker; 0 → footer notice with hint.
+    /// If the workspace has no session yet (no worktree on disk),
+    /// spawn a shell first — the daemon creates the worktree as a
+    /// side-effect, and the editor launches once `TerminalSpawned`
+    /// arrives.
     pub fn open_editor(&mut self) {
         use crate::realm::components::footer::{Notice, NoticeSeverity};
 
         let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
             return;
         };
-        // Resolve worktree path: take the workspace's first session.
-        // Empty workspaces have no worktree on disk yet — surface
-        // that as a notice.
-        let worktree = self
-            .sidebar
-            .selected_workspace()
-            .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()));
-        let Some(worktree) = worktree else {
+        if self.editors.is_empty() {
             self.notice = Some(Notice::new(
-                format!("{workspace_key}: no worktree yet — spawn a session first (s/c/x/u)"),
+                "no editor detected — add one under `editors:` in ~/.pilot/config.yaml",
                 NoticeSeverity::Info,
             ));
             self.redraw = true;
             return;
-        };
-
-        match self.editors.len() {
-            0 => {
+        }
+        let worktree = self
+            .sidebar
+            .selected_workspace()
+            .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()));
+        // If there's no worktree yet, queue the editor launch and
+        // ask the daemon to provision a session — `handle_daemon_event`
+        // fires the editor on the matching `TerminalSpawned`.
+        let Some(worktree) = worktree else {
+            // Pick the editor up front (or remember the picker is
+            // pending). Single editor → queue + spawn immediately.
+            // Multiple → show the picker first, queue when picked.
+            if self.editors.len() == 1 {
+                self.pending_editor_launch =
+                    Some((workspace_key.clone(), self.editors[0].clone()));
+                let _ = self.client.send(IpcCommand::Spawn {
+                    session_key: workspace_key.clone(),
+                    session_id: None,
+                    kind: pilot_ipc::TerminalKind::Shell,
+                    cwd: None,
+                });
                 self.notice = Some(Notice::new(
-                    "no editor detected — add one under `editors:` in ~/.pilot/config.yaml",
+                    format!(
+                        "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+                        self.editors[0].display
+                    ),
                     NoticeSeverity::Info,
                 ));
                 self.redraw = true;
+            } else {
+                // Multi-editor: defer editor pick + record that the
+                // dispatch needs to spawn first.
+                self.pending_editor_workspace = Some(workspace_key);
+                self.mount_editor_picker();
             }
+            return;
+        };
+
+        match self.editors.len() {
             1 => {
                 let editor = self.editors[0].clone();
                 self.launch_editor(&editor, &worktree);
             }
-            _ => {
-                self.mount_editor_picker();
-            }
+            _ => self.mount_editor_picker(),
         }
     }
 
@@ -848,18 +915,48 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Msg::ChoicePicked(picks) => {
-                // Editor picker (Id::Editor) — pick → launch.
+                // Editor picker (Id::Editor) — pick → launch (or
+                // defer behind a session-spawn when the workspace
+                // has no worktree yet).
                 if matches!(self.modal_stack.last(), Some(Id::Editor)) {
                     let editor = picks
                         .first()
                         .and_then(|i| self.editor_choices.get(*i).cloned());
+                    self.editor_choices.clear();
+                    self.pop_modal();
+                    let Some(editor) = editor else { return };
+                    // Was this open-editor deferred behind a worktree
+                    // creation? If so, queue + spawn shell.
+                    if let Some(workspace_key) =
+                        self.pending_editor_workspace.take()
+                    {
+                        self.pending_editor_launch =
+                            Some((workspace_key.clone(), editor.clone()));
+                        let _ = self.client.send(IpcCommand::Spawn {
+                            session_key: workspace_key.clone(),
+                            session_id: None,
+                            kind: pilot_ipc::TerminalKind::Shell,
+                            cwd: None,
+                        });
+                        use crate::realm::components::footer::{
+                            Notice, NoticeSeverity,
+                        };
+                        self.notice = Some(Notice::new(
+                            format!(
+                                "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+                                editor.display
+                            ),
+                            NoticeSeverity::Info,
+                        ));
+                        self.redraw = true;
+                        return;
+                    }
+                    // Worktree already on disk — launch directly.
                     let worktree = self
                         .sidebar
                         .selected_workspace()
                         .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()));
-                    self.editor_choices.clear();
-                    self.pop_modal();
-                    if let (Some(editor), Some(worktree)) = (editor, worktree) {
+                    if let Some(worktree) = worktree {
                         self.launch_editor(&editor, &worktree);
                     }
                 }
@@ -1156,14 +1253,12 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
-            // `E` from the sidebar: open the focused workspace's
+            // `e` from the sidebar: open the focused workspace's
             // worktree in an editor (Zed / VS Code / Cursor / …).
             // Detection happens at startup; users add custom editors
             // in `~/.pilot/config.yaml::editors`.
-            Key::Char('E')
-                if (key.modifiers.is_empty()
-                    || key.modifiers == KeyModifiers::SHIFT)
-                    && self.focus == PaneFocus::Sidebar =>
+            Key::Char('e')
+                if key.modifiers.is_empty() && self.focus == PaneFocus::Sidebar =>
             {
                 self.q_armed_at = None;
                 self.open_editor();
@@ -1191,21 +1286,6 @@ impl<T: TerminalAdapter> Model<T> {
                 self.q_armed_at = None;
                 self.open_settings();
                 return;
-            }
-            // `e`: clear the most recent footer notice. Lets users
-            // dismiss sticky auth/permanent errors after they've
-            // read them. Disabled inside terminals (the shell may
-            // bind `e`).
-            Key::Char('e')
-                if key.modifiers.is_empty() && self.focus != PaneFocus::Terminals =>
-            {
-                self.q_armed_at = None;
-                if self.notice.take().is_some() {
-                    self.redraw = true;
-                    return;
-                }
-                // No notice to clear → fall through so panes can use
-                // `e` for their own bindings.
             }
             _ => {
                 // Any other key disarms.
@@ -1458,6 +1538,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             MouseEventKind::Up(button) => {
                 let was_drag = self.active_drag.take().is_some();
+                if was_drag {
+                    // Persist the final split percentages — drag
+                    // events fire dozens per second, so we deferred
+                    // the write until release.
+                    self.persist_splits();
+                }
                 if !was_drag
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
@@ -1613,14 +1699,29 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Adjust the split percentages. `dx > 0` widens the sidebar;
     /// `dy > 0` grows the activity row at the terminal stack's
-    /// expense. Clamps both axes to `[SPLIT_MIN, SPLIT_MAX]`.
+    /// expense. Clamps both axes to `[SPLIT_MIN, SPLIT_MAX]`. Saves
+    /// the new values to `~/.pilot/config.yaml::ui` so the layout
+    /// survives restart.
     fn nudge_splits(&mut self, dx: i16, dy: i16) {
         let new_sidebar = clamp_pct(self.sidebar_pct as i16 + dx);
         let new_top = clamp_pct(self.right_top_pct as i16 + dy);
         if new_sidebar != self.sidebar_pct || new_top != self.right_top_pct {
             self.sidebar_pct = new_sidebar;
             self.right_top_pct = new_top;
+            self.persist_splits();
             self.redraw = true;
+        }
+    }
+
+    /// Best-effort save of the current split percentages.
+    fn persist_splits(&self) {
+        let s = self.sidebar_pct;
+        let t = self.right_top_pct;
+        if let Err(e) = pilot_config::Config::save_with(|c| {
+            c.ui.sidebar_pct = Some(s);
+            c.ui.right_top_pct = Some(t);
+        }) {
+            tracing::warn!("save splits failed: {e}");
         }
     }
 
@@ -1767,8 +1868,26 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.notice = None;
             }
+            self.sync_panes();
+            // Editor-deferred-by-spawn: the user pressed `e` on a
+            // workspace with no worktree; we asked the daemon to
+            // spawn a shell so a worktree got provisioned. Look
+            // up the queued target's worktree from the sidebar's
+            // workspace map (NOT `selected_workspace()`) so the
+            // launch fires even if the user has since navigated
+            // to a different workspace.
+            if let Some((target_key, editor)) = self.pending_editor_launch.clone()
+                && let Some(worktree) = self
+                    .sidebar
+                    .workspace_by_key(&target_key)
+                    .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()))
+            {
+                self.pending_editor_launch = None;
+                self.launch_editor(&editor, &worktree);
+            }
+        } else {
+            self.sync_panes();
         }
-        self.sync_panes();
         self.redraw = true;
     }
 
