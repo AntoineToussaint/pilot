@@ -465,6 +465,25 @@ pub async fn default_sources(
 /// Run one poll tick: every source is called once and its tasks are
 /// upserted. Errors from one source don't stop the others.
 pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) {
+    let mut state = TickState::default();
+    tick_with_state(config, sources, &mut state).await;
+}
+
+/// Per-loop state that the long-lived `spawn` task threads through
+/// `tick` so we can debounce: re-broadcasting the same provider
+/// error every 60s spams the TUI with identical hint-bar churn. We
+/// only re-broadcast when the error message (or success/failure
+/// classification) actually changes for a given source.
+#[derive(Default)]
+pub struct TickState {
+    last_error: std::collections::HashMap<String, String>,
+}
+
+pub async fn tick_with_state(
+    config: &ServerConfig,
+    sources: &[Box<dyn TaskSource>],
+    state: &mut TickState,
+) {
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
@@ -473,6 +492,10 @@ pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) {
                 for task in tasks {
                     upsert(config, task).await;
                 }
+                // Clear the debounce slot — the next failure should
+                // broadcast even if it carries the same message as a
+                // previous run.
+                state.last_error.remove(source.name());
                 // Always emit `PollCompleted`, even on 0 tasks, so
                 // the TUI can distinguish "polling hasn't run yet"
                 // from "polling found nothing matching your filter".
@@ -482,9 +505,6 @@ pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) {
                 });
             }
             Err(e) => {
-                // Log the full diagnostic always (file is private,
-                // dev tooling can tail it). The TUI status bar gets
-                // the terse `user_message` so it stays one row.
                 if e.is_retryable() {
                     tracing::warn!(diagnostic = %e.diagnostic(), "poll failed (retryable)");
                 } else if e.is_auth() {
@@ -499,12 +519,21 @@ pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) {
                 } else {
                     "permanent"
                 };
-                let _ = config.bus.send(Event::ProviderError {
-                    source: e.source().to_string(),
-                    message: e.user_message(),
-                    detail: e.diagnostic(),
-                    kind: kind.to_string(),
-                });
+                // Debounce: only emit a ProviderError if the message
+                // changed since the last failure for this source.
+                // Same rate-limit error every minute → one event,
+                // not 60/hour.
+                let msg = e.user_message();
+                let prev = state.last_error.get(source.name());
+                if prev.map(String::as_str) != Some(msg.as_str()) {
+                    state.last_error.insert(source.name().to_string(), msg.clone());
+                    let _ = config.bus.send(Event::ProviderError {
+                        source: e.source().to_string(),
+                        message: msg,
+                        detail: e.diagnostic(),
+                        kind: kind.to_string(),
+                    });
+                }
             }
         }
     }
@@ -524,12 +553,13 @@ pub fn spawn(
             return;
         }
         let mut ticker = tokio::time::interval(interval);
+        let mut state = TickState::default();
         // First tick fires immediately; subsequent ticks honor `interval`.
         ticker.tick().await;
-        tick(&config, &sources).await;
+        tick_with_state(&config, &sources, &mut state).await;
         loop {
             ticker.tick().await;
-            tick(&config, &sources).await;
+            tick_with_state(&config, &sources, &mut state).await;
         }
     })
 }
@@ -576,7 +606,13 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
         workspace_json: json,
     };
     if let Err(e) = config.store.save_workspace(&record) {
-        tracing::warn!("save_workspace failed: {e}");
+        // Bumped to error: a store write failure means the workspace
+        // we just broadcast won't survive a restart. Caller side
+        // can't currently see this, but at least the log is loud.
+        tracing::error!(
+            workspace_key = %record.key,
+            "save_workspace failed: {e}"
+        );
     }
     let _ = config
         .bus
@@ -629,7 +665,13 @@ pub fn create_empty_workspace(config: &ServerConfig, name: &str) -> WorkspaceKey
         workspace_json: serde_json::to_string(&workspace).ok(),
     };
     if let Err(e) = config.store.save_workspace(&record) {
-        tracing::warn!("save_workspace failed: {e}");
+        // Bumped to error: a store write failure means the workspace
+        // we just broadcast won't survive a restart. Caller side
+        // can't currently see this, but at least the log is loud.
+        tracing::error!(
+            workspace_key = %record.key,
+            "save_workspace failed: {e}"
+        );
     }
     let _ = config
         .bus
@@ -668,7 +710,13 @@ pub fn set_snooze(
         workspace_json: serde_json::to_string(&workspace).ok(),
     };
     if let Err(e) = config.store.save_workspace(&record) {
-        tracing::warn!("save_workspace failed: {e}");
+        // Bumped to error: a store write failure means the workspace
+        // we just broadcast won't survive a restart. Caller side
+        // can't currently see this, but at least the log is loud.
+        tracing::error!(
+            workspace_key = %record.key,
+            "save_workspace failed: {e}"
+        );
     }
     let _ = config
         .bus
@@ -778,7 +826,13 @@ pub fn set_session_layout(
         workspace_json: serde_json::to_string(&workspace).ok(),
     };
     if let Err(e) = config.store.save_workspace(&record) {
-        tracing::warn!("save_workspace failed: {e}");
+        // Bumped to error: a store write failure means the workspace
+        // we just broadcast won't survive a restart. Caller side
+        // can't currently see this, but at least the log is loud.
+        tracing::error!(
+            workspace_key = %record.key,
+            "save_workspace failed: {e}"
+        );
     }
     let _ = config
         .bus
@@ -837,7 +891,13 @@ fn apply_activity_mark(
         workspace_json: serde_json::to_string(&workspace).ok(),
     };
     if let Err(e) = config.store.save_workspace(&record) {
-        tracing::warn!("save_workspace failed: {e}");
+        // Bumped to error: a store write failure means the workspace
+        // we just broadcast won't survive a restart. Caller side
+        // can't currently see this, but at least the log is loud.
+        tracing::error!(
+            workspace_key = %record.key,
+            "save_workspace failed: {e}"
+        );
     }
     let _ = config
         .bus
@@ -879,7 +939,13 @@ pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
         workspace_json: serde_json::to_string(&workspace).ok(),
     };
     if let Err(e) = config.store.save_workspace(&record) {
-        tracing::warn!("save_workspace failed: {e}");
+        // Bumped to error: a store write failure means the workspace
+        // we just broadcast won't survive a restart. Caller side
+        // can't currently see this, but at least the log is loud.
+        tracing::error!(
+            workspace_key = %record.key,
+            "save_workspace failed: {e}"
+        );
     }
     let _ = config
         .bus

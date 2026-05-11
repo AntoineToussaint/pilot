@@ -401,6 +401,19 @@ impl<T: TerminalAdapter> Model<T> {
             .apply_inner_config(attention, collapsed_repos, agent_shortcuts);
     }
 
+    /// Send a command to the daemon, logging failures. Wraps the raw
+    /// `client.send` so a dead channel (daemon restarted, socket
+    /// closed) leaves a breadcrumb in `/tmp/pilot.log` instead of
+    /// silently vanishing. Most call sites genuinely don't care if
+    /// the send fails (Subscribe is idempotent, terminal-Write loses
+    /// keystrokes on a dead channel anyway) — but a silent log helps
+    /// debug "I pressed X and nothing happened" after the fact.
+    fn send_cmd(&self, cmd: IpcCommand) {
+        if let Err(e) = self.client.send(cmd) {
+            tracing::warn!("ipc send failed: {e}");
+        }
+    }
+
     /// Override the initial sidebar / right-top split percentages
     /// from `~/.pilot/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
@@ -444,7 +457,7 @@ impl<T: TerminalAdapter> Model<T> {
             if self.setup.editors.len() == 1 {
                 self.setup.pending_editor_launch =
                     Some((workspace_key.clone(), self.setup.editors[0].clone()));
-                let _ = self.client.send(IpcCommand::Spawn {
+                self.send_cmd(IpcCommand::Spawn {
                     session_key: workspace_key.clone(),
                     session_id: None,
                     kind: pilot_ipc::TerminalKind::Shell,
@@ -707,7 +720,7 @@ impl<T: TerminalAdapter> Model<T> {
         // typing into a freshly-shown terminal produces output that
         // falls off the bottom of the live grid.
         for cmd in self.terminals.drain_cmds() {
-            let _ = self.client.send(cmd);
+            self.send_cmd(cmd);
         }
     }
 
@@ -733,17 +746,17 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::SidebarCmds => {
                 for cmd in self.sidebar.drain_cmds() {
-                    let _ = self.client.send(cmd);
+                    self.send_cmd(cmd);
                 }
             }
             Msg::RightCmds => {
                 for cmd in self.right.drain_cmds() {
-                    let _ = self.client.send(cmd);
+                    self.send_cmd(cmd);
                 }
             }
             Msg::TerminalCmds => {
                 for cmd in self.terminals.drain_cmds() {
-                    let _ = self.client.send(cmd);
+                    self.send_cmd(cmd);
                 }
             }
             Msg::ChoicePicked(picks) => {
@@ -764,7 +777,7 @@ impl<T: TerminalAdapter> Model<T> {
                     {
                         self.setup.pending_editor_launch =
                             Some((workspace_key.clone(), editor.clone()));
-                        let _ = self.client.send(IpcCommand::Spawn {
+                        self.send_cmd(IpcCommand::Spawn {
                             session_key: workspace_key.clone(),
                             session_id: None,
                             kind: pilot_ipc::TerminalKind::Shell,
@@ -854,7 +867,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(session_key) = target
                     && !body.trim().is_empty()
                 {
-                    let _ = self.client.send(IpcCommand::PostReply {
+                    self.send_cmd(IpcCommand::PostReply {
                         session_key,
                         body,
                     });
@@ -947,7 +960,7 @@ impl<T: TerminalAdapter> Model<T> {
                     hook(outcome);
                 }
                 self.unmount_setup_modal();
-                let _ = self.client.send(IpcCommand::Subscribe);
+                self.send_cmd(IpcCommand::Subscribe);
                 self.set_focus_attr();
                 if !sources.is_empty() {
                     self.show_polling(sources);
@@ -955,7 +968,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             RunnerStep::Cancel => {
                 self.unmount_setup_modal();
-                let _ = self.client.send(IpcCommand::Subscribe);
+                self.send_cmd(IpcCommand::Subscribe);
                 self.set_focus_attr();
             }
             RunnerStep::Stay => {
@@ -1163,7 +1176,7 @@ impl<T: TerminalAdapter> Model<T> {
             );
             self.terminals.handle_key_direct(held, &mut held_cmds);
             for cmd in held_cmds {
-                let _ = self.client.send(cmd);
+                self.send_cmd(cmd);
             }
         }
 
@@ -1203,7 +1216,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         for cmd in cmds {
-            let _ = self.client.send(cmd);
+            self.send_cmd(cmd);
         }
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
@@ -1325,7 +1338,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        let _ = self.client.send(IpcCommand::Write {
+                        self.send_cmd(IpcCommand::Write {
                             terminal_id,
                             bytes,
                         });
@@ -1408,7 +1421,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        let _ = self.client.send(IpcCommand::Write {
+                        self.send_cmd(IpcCommand::Write {
                             terminal_id,
                             bytes,
                         });
@@ -1444,7 +1457,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        let _ = self.client.send(IpcCommand::Write {
+                        self.send_cmd(IpcCommand::Write {
                             terminal_id,
                             bytes,
                         });

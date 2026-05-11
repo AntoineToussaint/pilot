@@ -518,18 +518,49 @@ impl SetupRunner {
                     .into_iter()
                     .filter_map(|i| items.get(i).cloned())
                     .collect();
-                if !picked.is_empty() {
-                    let ids: BTreeSet<String> = picked.iter().map(|s| s.id.clone()).collect();
-                    self.accumulator
-                        .selected_scopes
-                        .insert(provider_id.clone(), ids);
-                    for s in picked {
-                        self.pending_repo_pickers.push_back((
-                            provider_id.clone(),
-                            s.id.clone(),
-                            s.label.clone(),
-                        ));
+                // The picker shows ALL orgs (with pre-ticks for the
+                // user's existing subscriptions). The submission is
+                // "this is now the complete set of orgs subscribed"
+                // — but we must preserve any narrowed repo-level
+                // entries under picked orgs, and drop everything
+                // under un-picked orgs. The earlier bare
+                // `insert(provider, picked_ids)` clobbered all
+                // repo-level entries silently — users would add an
+                // org and lose every prior narrowed subscription.
+                let picked_orgs: BTreeSet<String> =
+                    picked.iter().map(|s| s.id.clone()).collect();
+                let prefixes: Vec<String> =
+                    picked_orgs.iter().map(|o| format!("{o}/")).collect();
+                let existing = self
+                    .accumulator
+                    .selected_scopes
+                    .entry(provider_id.clone())
+                    .or_default();
+                // Keep entries belonging to picked orgs (the org
+                // itself, or any repo under it). Drop everything
+                // else — that's how un-ticking an org cleans up.
+                existing.retain(|id| {
+                    picked_orgs.contains(id)
+                        || prefixes.iter().any(|p| id.starts_with(p))
+                });
+                // For each newly-picked org with no narrowed repos
+                // yet, add the org-level subscription so the repo
+                // picker can later narrow it.
+                for org_id in &picked_orgs {
+                    let prefix = format!("{org_id}/");
+                    let has_child = existing.iter().any(|id| id.starts_with(&prefix));
+                    if !has_child {
+                        existing.insert(org_id.clone());
                     }
+                }
+                // Queue the repo picker for each picked org so the
+                // user can optionally narrow.
+                for s in &picked {
+                    self.pending_repo_pickers.push_back((
+                        provider_id.clone(),
+                        s.id.clone(),
+                        s.label.clone(),
+                    ));
                 }
                 self.next_scope_step()
             }
@@ -662,7 +693,11 @@ impl SetupRunner {
                         RunnerStep::Next(info)
                     }
                     LoadOutcome::Items(scopes) => {
-                        let modal = self.build_repo_pick_modal(&parent_label, scopes);
+                        let modal = self.build_repo_pick_modal(
+                            &provider_id,
+                            &parent_label,
+                            scopes,
+                        );
                         self.expecting = ExpectingStep::RepoPickFor(provider_id, parent_id);
                         RunnerStep::Next(modal)
                     }
@@ -881,12 +916,32 @@ impl SetupRunner {
         scopes: Vec<Scope>,
     ) -> Box<dyn AppComponent<Msg, UserEvent>> {
         self.current_choice = Some(CurrentChoice::ScopePick(scopes.clone()));
+        // Pre-tick orgs the user already subscribed to. `selected_scopes`
+        // mixes two id flavors: an org-level id like `github:tensorzero`
+        // (whole-org subscription) and repo-level ids like
+        // `github:tensorzero/tensorzero` (narrowed). An org is "already
+        // selected" if EITHER its own id is in the set OR any repo
+        // under it is. Without the prefix check, an org you've narrowed
+        // to specific repos would show up unchecked, and confirming the
+        // picker would silently drop all those repos.
+        let already: std::collections::BTreeSet<String> = self
+            .accumulator
+            .selected_scopes
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_default();
         Box::new(
             Choice::multi(format!("{provider_id} · pick orgs (none = all)"), scopes)
                 .title("Setup · scopes")
                 .label(|s: &Scope| match &s.parent {
                     Some(p) => format!("{p} / {}", s.label),
                     None => s.label.clone(),
+                })
+                .with_selected_by(move |s: &Scope| {
+                    let org_id = &s.id;
+                    let prefix = format!("{org_id}/");
+                    already.contains(org_id)
+                        || already.iter().any(|id| id.starts_with(&prefix))
                 })
                 .allow_empty(true)
                 .with_back(true),
@@ -915,10 +970,21 @@ impl SetupRunner {
 
     fn build_repo_pick_modal(
         &mut self,
+        provider_id: &str,
         parent_label: &str,
         scopes: Vec<Scope>,
     ) -> Box<dyn AppComponent<Msg, UserEvent>> {
         self.current_choice = Some(CurrentChoice::RepoPick(scopes.clone()));
+        // Find this provider's existing repo subscriptions and
+        // pre-tick the ones we recognize. Pre-seeding matters most
+        // for Settings → "Add / remove repos" — opening the picker
+        // and seeing zero ticks looks like all your repos vanished.
+        let already: std::collections::BTreeSet<String> = self
+            .accumulator
+            .selected_scopes
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_default();
         Box::new(
             Choice::multi(
                 format!(
@@ -931,6 +997,7 @@ impl SetupRunner {
             )
             .title(format!("Setup · {parent_label} repos"))
             .label(|s: &Scope| s.label.clone())
+            .with_selected_by(move |s: &Scope| already.contains(&s.id))
             .with_back(true),
         )
     }
@@ -1213,5 +1280,138 @@ mod tests {
         );
         assert!(filter_options("linear").iter().any(|f| f.key == "role.subscriber"));
         assert!(filter_options("nonexistent").is_empty());
+    }
+
+    /// Regression test for the "I added a repo via Settings and my
+    /// existing subscriptions vanished" bug. The orgs picker's
+    /// confirm path used to blindly overwrite
+    /// `selected_scopes[provider]` with the picked org ids, dropping
+    /// every prior narrowed repo entry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn editing_orgs_preserves_existing_narrowed_repos() {
+        use std::sync::Arc;
+
+        // Start state: user is subscribed to ONE specific tensorzero
+        // repo and to the whole `acme` org. We simulate the Settings
+        // → "Add a repo" flow by constructing a runner with this
+        // existing state in its accumulator, then driving the orgs
+        // picker confirm path.
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:tensorzero/tensorzero".into());
+        prior.insert("github:acme".into());
+        let mut outcome = SetupOutcome {
+            enabled_providers: ["github"].iter().map(|s| s.to_string()).collect(),
+            ..SetupOutcome::default_enabled(report())
+        };
+        outcome
+            .selected_scopes
+            .insert("github".into(), prior.clone());
+
+        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            sources,
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::ScopePickFor("github".into()),
+            current_choice: None,
+        };
+        // The picker offered three orgs; user kept tensorzero +
+        // acme ticked and added nanogateway. The CurrentChoice
+        // holds the items in the SAME order the picker rendered.
+        let items = vec![
+            Scope {
+                id: "github:tensorzero".into(),
+                label: "tensorzero".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+            Scope {
+                id: "github:acme".into(),
+                label: "acme".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+            Scope {
+                id: "github:nanogateway".into(),
+                label: "nanogateway".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+        ];
+        runner.current_choice = Some(CurrentChoice::ScopePick(items));
+
+        // Drive the confirm: indices 0, 1, 2 — i.e. all three picked.
+        let _step = runner.step_choice_picked(vec![0, 1, 2]);
+
+        let after = runner
+            .accumulator
+            .selected_scopes
+            .get("github")
+            .cloned()
+            .unwrap_or_default();
+        // The narrowed tensorzero repo MUST still be there.
+        assert!(
+            after.contains("github:tensorzero/tensorzero"),
+            "narrowed repo subscription dropped after partial flow: {after:?}"
+        );
+        // The acme whole-org entry stays.
+        assert!(after.contains("github:acme"));
+        // nanogateway joins as a whole-org subscription (no narrowed
+        // children yet).
+        assert!(after.contains("github:nanogateway"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn editing_orgs_removes_un_ticked_org_and_its_repos() {
+        // If the user *unticks* an org in the picker, every entry
+        // under it (whole-org or narrowed repos) should disappear.
+        use std::sync::Arc;
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:doomed".into());
+        prior.insert("github:doomed/repo-a".into());
+        prior.insert("github:keepme/repo-x".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            sources,
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::ScopePickFor("github".into()),
+            current_choice: None,
+        };
+        // Picker shows both orgs; user keeps only `keepme`.
+        let items = vec![
+            Scope {
+                id: "github:doomed".into(),
+                label: "doomed".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+            Scope {
+                id: "github:keepme".into(),
+                label: "keepme".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+        ];
+        runner.current_choice = Some(CurrentChoice::ScopePick(items));
+
+        let _step = runner.step_choice_picked(vec![1]);
+
+        let after = runner
+            .accumulator
+            .selected_scopes
+            .get("github")
+            .cloned()
+            .unwrap_or_default();
+        assert!(!after.contains("github:doomed"));
+        assert!(!after.contains("github:doomed/repo-a"));
+        assert!(after.contains("github:keepme/repo-x"));
     }
 }

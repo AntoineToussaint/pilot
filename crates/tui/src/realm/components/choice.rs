@@ -59,6 +59,10 @@ pub struct Choice<T: Clone + 'static + Send> {
     /// once item count exceeds ~20 rows (the modal cap is 24 high
     /// before the prompt + help line trimming).
     scroll: u16,
+    /// Last-rendered body height. Cached so PageUp/PageDown can
+    /// jump a full screen at a time. Set during `view`; defaults
+    /// to a reasonable fallback before the first render.
+    body_height: u16,
 }
 
 impl<T: Clone + 'static + Send> Choice<T> {
@@ -80,6 +84,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             require_one: true,
             show_empty_hint: false,
             scroll: 0,
+            body_height: 10,
         }
     }
 
@@ -101,6 +106,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             require_one: true,
             show_empty_hint: false,
             scroll: 0,
+            body_height: 10,
         }
     }
 
@@ -185,7 +191,49 @@ impl<T: Clone + 'static + Send> Choice<T> {
         }
         let last = self.items.len() as isize - 1;
         let cur = self.cursor as isize;
-        self.cursor = (cur + delta).clamp(0, last) as usize;
+        let target = (cur + delta).clamp(0, last) as usize;
+        self.cursor = target;
+        // After the move, if we landed on a non-selectable row,
+        // hop in the same direction until we hit a selectable one
+        // (or run off the edge — in which case fall back to the
+        // first selectable row anywhere). Stops j/k from getting
+        // stuck on inert section/header rows when those exist.
+        if !self.is_selectable(self.cursor) {
+            let dir: isize = if delta >= 0 { 1 } else { -1 };
+            let mut i = self.cursor as isize;
+            while i + dir >= 0 && i + dir <= last {
+                i += dir;
+                if self.is_selectable(i as usize) {
+                    self.cursor = i as usize;
+                    return;
+                }
+            }
+            // No selectable in that direction — fall back to first
+            // selectable anywhere.
+            if let Some(idx) = (0..=last as usize).find(|i| self.is_selectable(*i)) {
+                self.cursor = idx;
+            }
+        }
+    }
+
+    /// Snap to the first selectable item.
+    fn cursor_to_first(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        if let Some(idx) = (0..self.items.len()).find(|i| self.is_selectable(*i)) {
+            self.cursor = idx;
+        }
+    }
+
+    /// Snap to the last selectable item.
+    fn cursor_to_last(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        if let Some(idx) = (0..self.items.len()).rev().find(|i| self.is_selectable(*i)) {
+            self.cursor = idx;
+        }
     }
 
     fn confirm_picks(&mut self) -> ConfirmResult {
@@ -245,8 +293,18 @@ impl<T: Clone + 'static + Send> Choice<T> {
                     if last_section.is_some() {
                         lines.push(Line::raw(""));
                     }
+                    // Truncate the same way item rows are — wrap is
+                    // off, so an overlong section label would print
+                    // off the modal's right edge otherwise.
+                    let section_truncated = if section.chars().count() > width as usize {
+                        let mut s: String = section.chars().take(width as usize - 1).collect();
+                        s.push('…');
+                        s
+                    } else {
+                        section.to_string()
+                    };
                     lines.push(Line::from(Span::styled(
-                        section.to_string(),
+                        section_truncated,
                         Style::default()
                             .fg(theme.warn)
                             .add_modifier(Modifier::BOLD),
@@ -384,6 +442,9 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         // either edge — typing j/k inside the visible window leaves
         // the offset alone, so the list doesn't drift unnecessarily.
         let body_h = body_area.height;
+        // Cache for PageUp/PageDown jump size. `body_area` isn't
+        // visible in `on()` so we stash it here.
+        self.body_height = body_h.max(1);
         if body_h > 0 {
             if cursor_line < self.scroll {
                 self.scroll = cursor_line;
@@ -440,6 +501,38 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
                 self.show_empty_hint = false;
                 None
             }
+            Key::PageDown => {
+                self.move_cursor(self.body_height as isize);
+                self.show_empty_hint = false;
+                None
+            }
+            Key::PageUp => {
+                self.move_cursor(-(self.body_height as isize));
+                self.show_empty_hint = false;
+                None
+            }
+            // Ctrl-d / Ctrl-u — half-page jump, vim-style. Useful
+            // when keyboards don't have PageUp/PageDown surfaced.
+            Key::Char('d') if ctrl => {
+                self.move_cursor((self.body_height / 2).max(1) as isize);
+                self.show_empty_hint = false;
+                None
+            }
+            Key::Char('u') if ctrl => {
+                self.move_cursor(-((self.body_height / 2).max(1) as isize));
+                self.show_empty_hint = false;
+                None
+            }
+            Key::Home | Key::Char('g') => {
+                self.cursor_to_first();
+                self.show_empty_hint = false;
+                None
+            }
+            Key::End | Key::Char('G') => {
+                self.cursor_to_last();
+                self.show_empty_hint = false;
+                None
+            }
             Key::Char(' ') if self.mode == Mode::Multi => {
                 if !self.items.is_empty() && self.is_selectable(self.cursor) {
                     self.selected[self.cursor] = !self.selected[self.cursor];
@@ -456,5 +549,110 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
             },
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tiny payload — exercising `Choice` only needs cloneable items
+    /// with stable equality for assertions.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    struct Item(&'static str);
+
+    fn ten() -> Choice<Item> {
+        let items: Vec<Item> = (0..10).map(|i| Item(Box::leak(format!("i{i}").into_boxed_str()))).collect();
+        Choice::single("pick", items)
+    }
+
+    #[test]
+    fn move_cursor_clamps_to_range() {
+        let mut c = ten();
+        c.move_cursor(-5);
+        assert_eq!(c.cursor, 0);
+        c.move_cursor(100);
+        assert_eq!(c.cursor, 9);
+    }
+
+    #[test]
+    fn move_cursor_skips_non_selectable_forward() {
+        let items: Vec<Item> = vec!["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(Item)
+            .collect();
+        // Mark indices 1 and 2 non-selectable.
+        let mut c = Choice::single("p", items).selectable(|i: &Item| {
+            !matches!(i.0, "b" | "c")
+        });
+        c.cursor = 0;
+        c.move_cursor(1);
+        // Should hop past b/c and land on d (index 3).
+        assert_eq!(c.cursor, 3);
+    }
+
+    #[test]
+    fn move_cursor_skips_non_selectable_backward() {
+        let items: Vec<Item> = vec!["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(Item)
+            .collect();
+        let mut c = Choice::single("p", items).selectable(|i: &Item| {
+            !matches!(i.0, "b" | "c")
+        });
+        c.cursor = 3;
+        c.move_cursor(-1);
+        // Should hop past c/b and land on a (index 0).
+        assert_eq!(c.cursor, 0);
+    }
+
+    #[test]
+    fn cursor_to_first_and_last_respect_selectability() {
+        let items: Vec<Item> = vec!["a", "b", "c", "d"]
+            .into_iter()
+            .map(Item)
+            .collect();
+        // First selectable is 'b'; last selectable is 'c'.
+        let mut c = Choice::single("p", items).selectable(|i: &Item| {
+            matches!(i.0, "b" | "c")
+        });
+        c.cursor_to_last();
+        assert_eq!(c.cursor, 2);
+        c.cursor_to_first();
+        assert_eq!(c.cursor, 1);
+    }
+
+    #[test]
+    fn multi_confirm_requires_a_tick_by_default() {
+        let mut c = Choice::multi(
+            "p",
+            vec![Item("a"), Item("b")],
+        );
+        // Mode::Multi + require_one (default true) → empty picks → Stay.
+        match c.confirm_picks() {
+            ConfirmResult::Stay => {}
+            other => panic!("expected Stay, got {:?}", core::mem::discriminant(&other)),
+        }
+        assert!(c.show_empty_hint);
+    }
+
+    #[test]
+    fn multi_with_allow_empty_returns_picked_on_empty() {
+        let mut c = Choice::multi(
+            "p",
+            vec![Item("a"), Item("b")],
+        )
+        .allow_empty(true);
+        match c.confirm_picks() {
+            ConfirmResult::Picked(v) if v.is_empty() => {}
+            other => panic!("expected empty Picked, got {:?}", core::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn with_selected_by_pre_ticks() {
+        let items = vec![Item("a"), Item("b"), Item("c")];
+        let c = Choice::multi("p", items).with_selected_by(|i: &Item| i.0 == "b");
+        assert_eq!(c.selected, vec![false, true, false]);
     }
 }
