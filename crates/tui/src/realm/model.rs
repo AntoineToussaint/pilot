@@ -2137,13 +2137,27 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                         let _ = model
                             .modal_event_tx
                             .send(RealmEvent::Keyboard(realm_key));
-                        // Modals can mutate internal state (Choice's
-                        // cursor, Input's buffer) without producing a
-                        // `Msg`, so app.tick() returns an empty Vec
-                        // even though something changed. Force a
-                        // redraw so the next frame reflects the
-                        // mutation — j/k inside Choice was the
-                        // visible bug.
+                        // Drain the event we just pushed in *this*
+                        // iteration. ChannelPort is polled by the
+                        // listener thread every 10ms, so a
+                        // `tick(Once(ZERO))` at the top of the next
+                        // iteration races with the listener and often
+                        // returns empty — the modal's mutation
+                        // (Choice cursor, Input buffer) lands a frame
+                        // late, which the user sees as "down didn't
+                        // move; second down moved by one; up went
+                        // down; …". `TryFor(15ms)` gives the listener
+                        // a guaranteed window to pick up the event
+                        // and dispatch it before we render below.
+                        if let Ok(messages) =
+                            model.app.tick(PollStrategy::TryFor(Duration::from_millis(15)))
+                        {
+                            for msg in messages {
+                                model.update(msg);
+                            }
+                        }
+                        // Modals can mutate internal state without
+                        // producing a `Msg`, so force a redraw too.
                         model.redraw = true;
                     }
                 }
