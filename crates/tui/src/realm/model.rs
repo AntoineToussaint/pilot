@@ -35,7 +35,7 @@ use std::time::Duration;
 use tuirealm::application::{Application, PollStrategy};
 use tuirealm::event::{Event as RealmEvent, Key, KeyEvent as RealmKey, KeyModifiers};
 use tuirealm::listener::{EventListenerCfg, Poll, PortError, PortResult};
-use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, Borders};
 use tuirealm::terminal::{CrosstermTerminalAdapter, TerminalAdapter};
@@ -214,12 +214,9 @@ pub struct Model<T: TerminalAdapter> {
     preselect: Option<Preselect>,
     /// Width of the sidebar column as a percentage of total width.
     /// Adjustable via `Shift-Left`/`Shift-Right` (and mouse drag);
-    /// clamped to `SPLIT_RANGE`.
-    sidebar_pct: u16,
-    /// Height of the right-top (activity) row as a percentage of the
-    /// right column. Adjustable via `Shift-Up`/`Shift-Down`; clamped
-    /// to `SPLIT_RANGE`.
-    right_top_pct: u16,
+    /// Splits, last-viewport snapshot, and active drag — see
+    /// `LayoutCtx`.
+    layout: LayoutCtx,
     /// Workspace key the reply textarea (if mounted) is targeting.
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
@@ -238,24 +235,6 @@ pub struct Model<T: TerminalAdapter> {
     /// after `RETRYABLE_FADE`; permanent + auth stay until cleared
     /// (key `e` or any key).
     notice: Option<crate::realm::components::footer::Notice>,
-    /// Last viewport rect captured during `view()`. Mouse handling
-    /// uses this to decide which pane a click landed in (without
-    /// re-running the layout) and to translate splitter drag deltas
-    /// into percentage changes.
-    last_area: Rect,
-    /// Active drag, if any. The mouse-down location identified one
-    /// of the splitters; subsequent Drag events update the
-    /// corresponding `_pct` field until the mouse-up.
-    active_drag: Option<DragTarget>,
-}
-
-/// Which splitter the user is currently dragging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DragTarget {
-    /// The vertical line between sidebar and the right column.
-    SidebarRight,
-    /// The horizontal line between activity and terminal stack.
-    ActivityTerminals,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -328,17 +307,7 @@ const RETRYABLE_FADE: Duration = Duration::from_secs(5);
 /// retryable so a slow worktree creation doesn't fade mid-flight.
 const INFO_FADE: Duration = Duration::from_secs(15);
 
-/// Initial split percentages. Match the legacy defaults so users
-/// don't see a jumpy first frame after the migration.
-const DEFAULT_SIDEBAR_PCT: u16 = 40;
-const DEFAULT_RIGHT_TOP_PCT: u16 = 25;
-/// Min/max for either splitter (percentage). Keeps every pane
-/// usable — no zero-height activity feed, no sliver sidebar.
-const SPLIT_MIN: u16 = 15;
-const SPLIT_MAX: u16 = 80;
-/// Step size per Shift-arrow tap. Picked so 4-5 taps cover a useful
-/// range and a single tap is visibly more than a shimmer.
-const SPLIT_STEP: i16 = 3;
+use crate::realm::layout::{pane_areas, LayoutCtx, SPLIT_STEP};
 
 /// How long the first `q` stays armed waiting for the second tap.
 const Q_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(800);
@@ -402,14 +371,11 @@ impl Model<CrosstermTerminalAdapter> {
             q_armed_at: None,
             escape_armed_at: None,
             preselect: None,
-            sidebar_pct: DEFAULT_SIDEBAR_PCT,
-            right_top_pct: DEFAULT_RIGHT_TOP_PCT,
+            layout: LayoutCtx::new(),
             pending_reply: None,
             polling: None,
             polling_last_tick: std::time::Instant::now(),
             notice: None,
-            last_area: Rect::default(),
-            active_drag: None,
         };
         // Subscribe up-front for both first-run and returning users.
         // First-run gets an empty snapshot before the wizard finishes
@@ -470,14 +436,11 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
             q_armed_at: None,
             escape_armed_at: None,
             preselect: None,
-            sidebar_pct: DEFAULT_SIDEBAR_PCT,
-            right_top_pct: DEFAULT_RIGHT_TOP_PCT,
+            layout: LayoutCtx::new(),
             pending_reply: None,
             polling: None,
             polling_last_tick: std::time::Instant::now(),
             notice: None,
-            last_area: Rect::default(),
-            active_drag: None,
         })
     }
 }
@@ -568,12 +531,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// from `~/.pilot/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
     pub fn with_splits(mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) -> Self {
-        if let Some(s) = sidebar_pct {
-            self.sidebar_pct = clamp_pct(s as i16);
-        }
-        if let Some(t) = right_top_pct {
-            self.right_top_pct = clamp_pct(t as i16);
-        }
+        self.layout.apply_persisted(sidebar_pct, right_top_pct);
         self
     }
 
@@ -828,8 +786,8 @@ impl<T: TerminalAdapter> Model<T> {
         // Pull state out before the closure so the borrow checker is
         // happy — `terminal.draw` takes `&mut self.terminal` while we
         // also need `&mut self.app` etc. inside.
-        let sidebar_pct = self.sidebar_pct;
-        let right_top_pct = self.right_top_pct;
+        let sidebar_pct = self.layout.sidebar_pct;
+        let right_top_pct = self.layout.right_top_pct;
         let polling_status: Option<(&'static str, String)> = self
             .polling
             .as_ref()
@@ -868,7 +826,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.app.view(top, f, area);
             }
         });
-        self.last_area = captured_area;
+        self.layout.last_area = captured_area;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,
@@ -1224,7 +1182,9 @@ impl<T: TerminalAdapter> Model<T> {
                     Key::Down => (0, SPLIT_STEP),
                     _ => (0, 0),
                 };
-                self.nudge_splits(dx, dy);
+                if self.layout.nudge_splits(dx, dy) {
+                    self.redraw = true;
+                }
                 return;
             }
             // Ctrl-Shift-D: detach the focused pane into a new pilot
@@ -1388,7 +1348,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Sidebar / right / activity split percentages — exposed so tests
     /// can verify Shift-arrow + drag updates apply correctly.
     pub fn split_pcts(&self) -> (u16, u16) {
-        (self.sidebar_pct, self.right_top_pct)
+        (self.layout.sidebar_pct, self.layout.right_top_pct)
     }
 
     /// Top of the modal stack (or None if no modal is mounted). Used
@@ -1411,7 +1371,7 @@ impl<T: TerminalAdapter> Model<T> {
         m: crossterm::event::MouseEvent,
         area: Rect,
     ) {
-        self.last_area = area;
+        self.layout.last_area = area;
         self.handle_mouse(m);
     }
 
@@ -1440,13 +1400,13 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn handle_mouse(&mut self, m: crossterm::event::MouseEvent) {
         use crossterm::event::MouseEventKind;
 
-        if self.last_area.width == 0 || self.last_area.height == 0 {
+        if self.layout.last_area.width == 0 || self.layout.last_area.height == 0 {
             return;
         }
         let (sidebar_rect, right_top_rect, right_bottom_rect) = pane_areas(
-            self.last_area,
-            self.sidebar_pct,
-            self.right_top_pct,
+            self.layout.last_area,
+            self.layout.sidebar_pct,
+            self.layout.right_top_pct,
         );
 
         match m.kind {
@@ -1460,7 +1420,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
-                    && self.hit_test_splitter(
+                    && self.layout.hit_test_splitter(
                         m.column,
                         m.row,
                         sidebar_rect,
@@ -1495,13 +1455,13 @@ impl<T: TerminalAdapter> Model<T> {
                         return;
                     }
                 }
-                if let Some(target) = self.hit_test_splitter(
+                if let Some(target) = self.layout.hit_test_splitter(
                     m.column,
                     m.row,
                     sidebar_rect,
                     right_top_rect,
                 ) {
-                    self.active_drag = Some(target);
+                    self.layout.active_drag = Some(target);
                     return;
                 }
                 let target = if rect_contains(sidebar_rect, m.column, m.row) {
@@ -1532,17 +1492,19 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::Drag(_) => {
-                if let Some(target) = self.active_drag {
-                    self.update_drag(target, m.column, m.row);
+                if let Some(target) = self.layout.active_drag {
+                    if self.layout.update_drag(target, m.column, m.row) {
+                        self.redraw = true;
+                    }
                 }
             }
             MouseEventKind::Up(button) => {
-                let was_drag = self.active_drag.take().is_some();
+                let was_drag = self.layout.active_drag.take().is_some();
                 if was_drag {
                     // Persist the final split percentages — drag
                     // events fire dozens per second, so we deferred
                     // the write until release.
-                    self.persist_splits();
+                    self.layout.persist();
                 }
                 if !was_drag
                     && rect_contains(right_bottom_rect, m.column, m.row)
@@ -1621,107 +1583,6 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
             }
             _ => {}
-        }
-    }
-
-    /// Test whether `(col, row)` lands within tolerance of one of the
-    /// two splitter lines. Tolerance: ±1 cell so users don't have to
-    /// land pixel-perfect on the divider.
-    fn hit_test_splitter(
-        &self,
-        col: u16,
-        row: u16,
-        sidebar_rect: Rect,
-        right_top_rect: Rect,
-    ) -> Option<DragTarget> {
-        // Vertical splitter sits between sidebar and the right column.
-        let v_x = sidebar_rect.x + sidebar_rect.width;
-        if col + 1 >= v_x
-            && col <= v_x + 1
-            && row >= self.last_area.y
-            && row < self.last_area.y + self.last_area.height
-        {
-            return Some(DragTarget::SidebarRight);
-        }
-        // Horizontal splitter sits between right-top and right-bottom.
-        let h_y = right_top_rect.y + right_top_rect.height;
-        if row + 1 >= h_y
-            && row <= h_y + 1
-            && col >= right_top_rect.x
-            && col < right_top_rect.x + right_top_rect.width
-        {
-            return Some(DragTarget::ActivityTerminals);
-        }
-        None
-    }
-
-    /// Translate a drag's `(col, row)` into a new percentage for the
-    /// active splitter and apply it.
-    fn update_drag(&mut self, target: DragTarget, col: u16, row: u16) {
-        match target {
-            DragTarget::SidebarRight => {
-                if self.last_area.width == 0 {
-                    return;
-                }
-                let rel = col.saturating_sub(self.last_area.x) as i32;
-                let pct = (rel * 100 / self.last_area.width as i32).clamp(
-                    SPLIT_MIN as i32,
-                    SPLIT_MAX as i32,
-                ) as u16;
-                if pct != self.sidebar_pct {
-                    self.sidebar_pct = pct;
-                    self.redraw = true;
-                }
-            }
-            DragTarget::ActivityTerminals => {
-                let (_, right_top_rect, right_bottom_rect) = pane_areas(
-                    self.last_area,
-                    self.sidebar_pct,
-                    self.right_top_pct,
-                );
-                let right_height =
-                    right_top_rect.height + right_bottom_rect.height;
-                if right_height == 0 {
-                    return;
-                }
-                let rel = row.saturating_sub(right_top_rect.y) as i32;
-                let pct = (rel * 100 / right_height as i32).clamp(
-                    SPLIT_MIN as i32,
-                    SPLIT_MAX as i32,
-                ) as u16;
-                if pct != self.right_top_pct {
-                    self.right_top_pct = pct;
-                    self.redraw = true;
-                }
-            }
-        }
-    }
-
-    /// Adjust the split percentages. `dx > 0` widens the sidebar;
-    /// `dy > 0` grows the activity row at the terminal stack's
-    /// expense. Clamps both axes to `[SPLIT_MIN, SPLIT_MAX]`. Saves
-    /// the new values to `~/.pilot/config.yaml::ui` so the layout
-    /// survives restart.
-    fn nudge_splits(&mut self, dx: i16, dy: i16) {
-        let new_sidebar = clamp_pct(self.sidebar_pct as i16 + dx);
-        let new_top = clamp_pct(self.right_top_pct as i16 + dy);
-        if new_sidebar != self.sidebar_pct || new_top != self.right_top_pct {
-            self.sidebar_pct = new_sidebar;
-            self.right_top_pct = new_top;
-            self.persist_splits();
-            self.redraw = true;
-        }
-    }
-
-    /// Best-effort save of the current split percentages.
-    fn persist_splits(&self) {
-        let s = self.sidebar_pct;
-        let t = self.right_top_pct;
-        if let Err(e) = pilot_config::Config::save_with(|c| {
-            c.ui.sidebar_pct = Some(s);
-            c.ui.right_top_pct = Some(t);
-        }) {
-            tracing::warn!("save splits failed: {e}");
         }
     }
 
@@ -1976,11 +1837,6 @@ impl<T: TerminalAdapter> Model<T> {
     }
 }
 
-/// Clamp a candidate percentage into the legal split range.
-fn clamp_pct(raw: i16) -> u16 {
-    raw.clamp(SPLIT_MIN as i16, SPLIT_MAX as i16) as u16
-}
-
 /// True if `(col, row)` lies within `rect`'s half-open bounds.
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x
@@ -2036,22 +1892,6 @@ fn split_for_footer(area: Rect) -> (Rect, Rect) {
         height: 1,
     };
     (pane, footer)
-}
-
-/// Compute the three pane rects (sidebar / right-top / right-bottom).
-/// `sidebar_pct` is the sidebar's share of the total width;
-/// `right_top_pct` is the activity row's share of the right column's
-/// height. Both should already be clamped to `[SPLIT_MIN, SPLIT_MAX]`.
-fn pane_areas(area: Rect, sidebar_pct: u16, right_top_pct: u16) -> (Rect, Rect, Rect) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(sidebar_pct), Constraint::Min(0)])
-        .split(area);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(right_top_pct), Constraint::Min(0)])
-        .split(cols[1]);
-    (cols[0], rows[0], rows[1])
 }
 
 #[allow(dead_code)]

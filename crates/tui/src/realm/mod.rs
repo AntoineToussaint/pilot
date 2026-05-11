@@ -37,6 +37,7 @@
 
 pub mod components;
 pub mod keymap;
+pub(crate) mod layout;
 pub mod model;
 pub mod user_event;
 
