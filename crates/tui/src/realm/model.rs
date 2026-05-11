@@ -150,51 +150,10 @@ pub struct Model<T: TerminalAdapter> {
     pub client: Client,
     pub redraw: bool,
     pub quit: bool,
-    /// In-flight setup wizard. When `Some`, splash/choice/loading
-    /// messages route through the runner's state machine instead of
-    /// the generic post-splash path. `None` once setup completes (or
-    /// the user cancels).
-    setup_runner: Option<crate::setup_flow::SetupRunner>,
-    /// Cached setup inputs — populated on first launch by
-    /// `main::run_embedded_realm` so the wizard can be re-opened
-    /// mid-session (key `,`) for adding repos / agents without
-    /// re-detecting from scratch. Refresh inside the wizard via `r`.
-    setup_inputs:
-        Option<(crate::setup::SetupReport, std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>>)>,
-    /// Last-known persisted setup. Cached at startup + after every
-    /// successful wizard run. Used by partial flows from the
-    /// Settings palette to pre-seed the SetupRunner with existing
-    /// state so "Edit filters for github" doesn't lose the user's
-    /// linear config.
-    persisted_setup: Option<pilot_core::PersistedSetup>,
-    /// Items behind the active SettingsMenu picker. Choice gives us
-    /// indices; we map them back to actions here.
-    settings_actions: Vec<SettingsAction>,
-    /// Editors detected on PATH at startup + any custom entries
-    /// from `~/.pilot/config.yaml`. Drives the `E` open-in-editor
-    /// shortcut. Empty when no editor is installed (config error
-    /// surfaces as a footer notice when the user hits `E`).
-    editors: Vec<crate::editors::EditorTemplate>,
-    /// Items behind the active editor picker (when `E` finds 2+
-    /// editors). Same shape as `settings_actions`.
-    editor_choices: Vec<crate::editors::EditorTemplate>,
-    /// Editor launch deferred behind a session-spawn. Populated when
-    /// the user pressed `E` on a workspace with no worktree yet:
-    /// the orchestrator emits `Command::Spawn(Shell)` to provision
-    /// one, and `handle_daemon_event` fires the launch when the
-    /// matching `TerminalSpawned` arrives.
-    pending_editor_launch:
-        Option<(pilot_core::SessionKey, crate::editors::EditorTemplate)>,
-    /// Workspace waiting for an editor pick — set when `E` was
-    /// pressed on a worktreeless workspace AND multiple editors
-    /// were detected. The Choice picker resolves to a template,
-    /// at which point we move it to `pending_editor_launch`.
-    pending_editor_workspace: Option<pilot_core::SessionKey>,
-    /// Hook invoked exactly once when setup finishes successfully.
-    /// `main.rs::run_embedded_realm` installs this so the polling
-    /// loop kicks off with the user's selections.
-    on_setup_complete:
-        Option<Box<dyn FnOnce(crate::setup_flow::SetupOutcome) + Send>>,
+    /// Setup wizard / settings palette / editor-open state — see
+    /// `SetupCtx`. Lives in one struct so the eight related fields
+    /// don't clutter the top-level Model definition.
+    setup: SetupCtx,
     /// Sender into the custom `ChannelPort`. Run loop pushes
     /// keyboard events here when a modal is up so Application's
     /// listener thread picks them up + dispatches.
@@ -259,33 +218,6 @@ impl Poll<UserEvent> for ChannelPort {
     }
 }
 
-/// One row in the Settings palette (`,` opens this).
-#[derive(Debug, Clone)]
-pub enum SettingsAction {
-    /// Add / remove orgs + repos for a provider.
-    EditScopes { provider_id: String, label: String },
-    /// Edit role / item-type filters for a provider.
-    EditFilters { provider_id: String, label: String },
-    /// Re-run the providers picker (enable/disable github / linear / …).
-    EditProviders,
-    /// Re-run the agents picker.
-    EditAgents,
-    /// Bail out and run the full splash → providers → agents → … wizard.
-    FullSetup,
-}
-
-impl SettingsAction {
-    fn label(&self) -> String {
-        match self {
-            Self::EditScopes { label, .. } => format!("Add / remove repos · {label}"),
-            Self::EditFilters { label, .. } => format!("Edit roles + filters · {label}"),
-            Self::EditProviders => "Edit providers (github / linear / …)".into(),
-            Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
-            Self::FullSetup => "Run the full setup wizard".into(),
-        }
-    }
-}
-
 /// CLI-driven post-snapshot focus target. Applied once after the
 /// first Snapshot so the user lands on a specific workspace +
 /// (optionally) session. Used by `--workspace KEY [--session ID]`
@@ -308,6 +240,7 @@ const RETRYABLE_FADE: Duration = Duration::from_secs(5);
 const INFO_FADE: Duration = Duration::from_secs(15);
 
 use crate::realm::layout::{pane_areas, LayoutCtx, SPLIT_STEP};
+use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 
 /// How long the first `q` stays armed waiting for the second tap.
 const Q_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(800);
@@ -358,15 +291,7 @@ impl Model<CrosstermTerminalAdapter> {
             client,
             redraw: true,
             quit: false,
-            setup_runner: None,
-            setup_inputs: None,
-            persisted_setup: None,
-            settings_actions: Vec::new(),
-            editors: Vec::new(),
-            editor_choices: Vec::new(),
-            pending_editor_launch: None,
-            pending_editor_workspace: None,
-            on_setup_complete: None,
+            setup: SetupCtx::new(),
             modal_event_tx,
             q_armed_at: None,
             escape_armed_at: None,
@@ -423,15 +348,7 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
             client,
             redraw: true,
             quit: false,
-            setup_runner: None,
-            setup_inputs: None,
-            persisted_setup: None,
-            settings_actions: Vec::new(),
-            editors: Vec::new(),
-            editor_choices: Vec::new(),
-            pending_editor_launch: None,
-            pending_editor_workspace: None,
-            on_setup_complete: None,
+            setup: SetupCtx::new(),
             modal_event_tx,
             q_armed_at: None,
             escape_armed_at: None,
@@ -460,7 +377,7 @@ impl<T: TerminalAdapter> Model<T> {
         mut self,
         hook: Box<dyn FnOnce(crate::setup_flow::SetupOutcome) + Send>,
     ) -> Self {
-        self.on_setup_complete = Some(hook);
+        self.setup.on_complete = Some(hook);
         self
     }
 
@@ -476,8 +393,8 @@ impl<T: TerminalAdapter> Model<T> {
         sources: std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>>,
     ) {
         use tuirealm::subscription::{EventClause, Sub, SubClause};
-        self.setup_inputs = Some((report.clone(), sources.clone()));
-        self.setup_runner = Some(crate::setup_flow::SetupRunner::new(report, sources));
+        self.setup.inputs = Some((report.clone(), sources.clone()));
+        self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, sources));
         let _ = self.app.mount(
             Id::Splash,
             Box::new(Splash::new()),
@@ -497,20 +414,20 @@ impl<T: TerminalAdapter> Model<T> {
         report: crate::setup::SetupReport,
         sources: std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>>,
     ) {
-        self.setup_inputs = Some((report, sources));
+        self.setup.inputs = Some((report, sources));
     }
 
     /// Cache the user's existing PersistedSetup so partial flows
     /// from the Settings palette can pre-seed the wizard with
     /// current state instead of starting from defaults.
     pub fn cache_persisted_setup(&mut self, persisted: pilot_core::PersistedSetup) {
-        self.persisted_setup = Some(persisted);
+        self.setup.persisted = Some(persisted);
     }
 
     /// Hand in the editors detected at startup. The `E` shortcut
     /// reads from this list; empty list = footer notice on `E`.
     pub fn cache_editors(&mut self, editors: Vec<crate::editors::EditorTemplate>) {
-        self.editors = editors;
+        self.setup.editors = editors;
     }
 
     /// Apply `~/.pilot/config.yaml::attention` + `ui.collapsed_repos`
@@ -548,7 +465,7 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
             return;
         };
-        if self.editors.is_empty() {
+        if self.setup.editors.is_empty() {
             self.notice = Some(Notice::new(
                 "no editor detected — add one under `editors:` in ~/.pilot/config.yaml",
                 NoticeSeverity::Info,
@@ -567,9 +484,9 @@ impl<T: TerminalAdapter> Model<T> {
             // Pick the editor up front (or remember the picker is
             // pending). Single editor → queue + spawn immediately.
             // Multiple → show the picker first, queue when picked.
-            if self.editors.len() == 1 {
-                self.pending_editor_launch =
-                    Some((workspace_key.clone(), self.editors[0].clone()));
+            if self.setup.editors.len() == 1 {
+                self.setup.pending_editor_launch =
+                    Some((workspace_key.clone(), self.setup.editors[0].clone()));
                 let _ = self.client.send(IpcCommand::Spawn {
                     session_key: workspace_key.clone(),
                     session_id: None,
@@ -579,7 +496,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.notice = Some(Notice::new(
                     format!(
                         "Provisioning worktree for {workspace_key} — opening in {} when ready…",
-                        self.editors[0].display
+                        self.setup.editors[0].display
                     ),
                     NoticeSeverity::Info,
                 ));
@@ -587,15 +504,15 @@ impl<T: TerminalAdapter> Model<T> {
             } else {
                 // Multi-editor: defer editor pick + record that the
                 // dispatch needs to spawn first.
-                self.pending_editor_workspace = Some(workspace_key);
+                self.setup.pending_editor_workspace = Some(workspace_key);
                 self.mount_editor_picker();
             }
             return;
         };
 
-        match self.editors.len() {
+        match self.setup.editors.len() {
             1 => {
-                let editor = self.editors[0].clone();
+                let editor = self.setup.editors[0].clone();
                 self.launch_editor(&editor, &worktree);
             }
             _ => self.mount_editor_picker(),
@@ -606,8 +523,8 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::realm::components::choice::Choice;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
         let labels: Vec<String> =
-            self.editors.iter().map(|e| e.display.clone()).collect();
-        self.editor_choices = self.editors.clone();
+            self.setup.editors.iter().map(|e| e.display.clone()).collect();
+        self.setup.editor_choices = self.setup.editors.clone();
         let modal = Choice::single("Open in which editor?", labels)
             .title("Open editor")
             .label(|s: &String| s.clone());
@@ -659,7 +576,7 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::realm::components::choice::Choice;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
 
-        if self.setup_runner.is_some() || matches!(self.modal_stack.last(), Some(Id::Setup)) {
+        if self.setup.runner.is_some() || matches!(self.modal_stack.last(), Some(Id::Setup)) {
             return;
         }
 
@@ -670,7 +587,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         let labels: Vec<String> = actions.iter().map(|a| a.label()).collect();
-        self.settings_actions = actions;
+        self.setup.settings_actions = actions;
         let modal = Choice::single("What do you want to configure?", labels)
             .title("Settings")
             .label(|s: &String| s.clone());
@@ -688,7 +605,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// setup. Per-provider actions only appear if the provider is
     /// enabled. Always includes the "full setup" escape hatch.
     fn build_settings_actions(&self) -> Vec<SettingsAction> {
-        let Some(p) = &self.persisted_setup else {
+        let Some(p) = &self.setup.persisted else {
             return Vec::new();
         };
         let mut actions = Vec::new();
@@ -719,7 +636,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// by main.rs) handles persistence on Finish.
     pub fn dispatch_settings_action(&mut self, action: SettingsAction) {
         use crate::setup_flow::{PartialEntry, SetupRunner};
-        let Some((report, sources)) = self.setup_inputs.clone() else {
+        let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
         };
@@ -739,13 +656,13 @@ impl<T: TerminalAdapter> Model<T> {
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.
-        let outcome = match self.persisted_setup.clone() {
+        let outcome = match self.setup.persisted.clone() {
             Some(p) => crate::setup_flow::persisted_to_outcome(p, report),
             None => crate::setup_flow::SetupOutcome::default_enabled(report),
         };
         let (runner, step) = SetupRunner::at_partial(outcome, sources, entry);
-        self.setup_runner = Some(runner);
-        let owned_runner = self.setup_runner.take().expect("just set");
+        self.setup.runner = Some(runner);
+        let owned_runner = self.setup.runner.take().expect("just set");
         self.handle_runner_step(owned_runner, step);
     }
 
@@ -753,10 +670,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// `(report, sources)` populated at startup. No-op when the
     /// cache is empty (`--test`, `--connect`).
     pub fn reopen_setup(&mut self) {
-        if self.setup_runner.is_some() {
+        if self.setup.runner.is_some() {
             return;
         }
-        let Some((report, sources)) = self.setup_inputs.clone() else {
+        let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("reopen_setup: no cached setup inputs");
             return;
         };
@@ -845,7 +762,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // so this always advances into Providers. The
                 // returning-user "subscribe + focus" path runs from
                 // `Model::new` directly.
-                if let Some(mut runner) = self.setup_runner.take() {
+                if let Some(mut runner) = self.setup.runner.take() {
                     let step = runner.step_splash_confirmed();
                     self.handle_runner_step(runner, step);
                 } else {
@@ -879,16 +796,16 @@ impl<T: TerminalAdapter> Model<T> {
                 if matches!(self.modal_stack.last(), Some(Id::Editor)) {
                     let editor = picks
                         .first()
-                        .and_then(|i| self.editor_choices.get(*i).cloned());
-                    self.editor_choices.clear();
+                        .and_then(|i| self.setup.editor_choices.get(*i).cloned());
+                    self.setup.editor_choices.clear();
                     self.pop_modal();
                     let Some(editor) = editor else { return };
                     // Was this open-editor deferred behind a worktree
                     // creation? If so, queue + spawn shell.
                     if let Some(workspace_key) =
-                        self.pending_editor_workspace.take()
+                        self.setup.pending_editor_workspace.take()
                     {
-                        self.pending_editor_launch =
+                        self.setup.pending_editor_launch =
                             Some((workspace_key.clone(), editor.clone()));
                         let _ = self.client.send(IpcCommand::Spawn {
                             session_key: workspace_key.clone(),
@@ -921,19 +838,19 @@ impl<T: TerminalAdapter> Model<T> {
                 // Settings palette is a non-runner Choice modal — if
                 // the user just picked an action, route into a
                 // partial wizard flow before falling through.
-                else if !self.settings_actions.is_empty()
+                else if !self.setup.settings_actions.is_empty()
                     && matches!(self.modal_stack.last(), Some(Id::Setup))
-                    && self.setup_runner.is_none()
+                    && self.setup.runner.is_none()
                 {
                     let action = picks
                         .first()
-                        .and_then(|i| self.settings_actions.get(*i).cloned());
-                    self.settings_actions.clear();
+                        .and_then(|i| self.setup.settings_actions.get(*i).cloned());
+                    self.setup.settings_actions.clear();
                     self.pop_modal();
                     if let Some(action) = action {
                         self.dispatch_settings_action(action);
                     }
-                } else if let Some(mut runner) = self.setup_runner.take() {
+                } else if let Some(mut runner) = self.setup.runner.take() {
                     let step = runner.step_choice_picked(picks);
                     self.handle_runner_step(runner, step);
                 } else {
@@ -941,13 +858,13 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Msg::ChoiceRefresh => {
-                if let Some(mut runner) = self.setup_runner.take() {
+                if let Some(mut runner) = self.setup.runner.take() {
                     let step = runner.step_choice_refresh();
                     self.handle_runner_step(runner, step);
                 }
             }
             Msg::ChoiceBack => {
-                if let Some(mut runner) = self.setup_runner.take() {
+                if let Some(mut runner) = self.setup.runner.take() {
                     let step = runner.step_choice_back();
                     self.handle_runner_step(runner, step);
                 } else {
@@ -955,7 +872,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Msg::LoadingResolved(carrier) => {
-                if let Some(mut runner) = self.setup_runner.take() {
+                if let Some(mut runner) = self.setup.runner.take() {
                     let payload = carrier.take().unwrap_or_else(|| Box::new(()));
                     let step = runner.step_loading_resolved(payload);
                     self.handle_runner_step(runner, step);
@@ -964,7 +881,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Msg::ModalDismissed => {
-                if let Some(mut runner) = self.setup_runner.take() {
+                if let Some(mut runner) = self.setup.runner.take() {
                     let step = runner.step_dismissed();
                     self.handle_runner_step(runner, step);
                 } else {
@@ -1059,13 +976,13 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::setup_flow::RunnerStep;
         match step {
             RunnerStep::Next(component) => {
-                self.setup_runner = Some(runner);
+                self.setup.runner = Some(runner);
                 self.mount_setup_modal(component);
             }
             RunnerStep::Finish(outcome) => {
                 let sources: Vec<String> =
                     outcome.enabled_providers.iter().cloned().collect();
-                if let Some(hook) = self.on_setup_complete.take() {
+                if let Some(hook) = self.setup.on_complete.take() {
                     hook(outcome);
                 }
                 self.unmount_setup_modal();
@@ -1081,7 +998,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.set_focus_attr();
             }
             RunnerStep::Stay => {
-                self.setup_runner = Some(runner);
+                self.setup.runner = Some(runner);
             }
         }
     }
@@ -1737,13 +1654,13 @@ impl<T: TerminalAdapter> Model<T> {
             // workspace map (NOT `selected_workspace()`) so the
             // launch fires even if the user has since navigated
             // to a different workspace.
-            if let Some((target_key, editor)) = self.pending_editor_launch.clone()
+            if let Some((target_key, editor)) = self.setup.pending_editor_launch.clone()
                 && let Some(worktree) = self
                     .sidebar
                     .workspace_by_key(&target_key)
                     .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()))
             {
-                self.pending_editor_launch = None;
+                self.setup.pending_editor_launch = None;
                 self.launch_editor(&editor, &worktree);
             }
         } else {
