@@ -103,21 +103,49 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 | `x` | Spawn Codex |
 | `u` | Spawn Cursor |
 | `m` | Mark **all** of this workspace's activity as read (bulk) |
-| `r` | Reply (post a comment to the PR) |
 | `n` | New pre-PR workspace |
 | `e` | Open the worktree in your editor (Zed / VS Code / Cursor / …) |
-| `Space` | Fold / unfold the parent repo group |
+| `g` | Manual refresh — re-poll providers right now |
 | `/` | Search |
 | `Shift-X X` | Kill workspace (two-press) |
+
+**Activity** (right pane):
+
+| Key | Action |
+|---|---|
+| `j/k` | Scroll the activity feed |
+| `g/G` | Top / bottom |
+| `m` | Mark the focused comment as read |
+
+**Cross-pane** (works from Sidebar OR Activity):
+
+| Key | Action |
+|---|---|
+| `r` | Reply (open the textarea targeted at the selected workspace) |
 
 **Terminals:** all keys forward to the PTY. `Ctrl-c` is SIGINT.
 `]]` (two presses) returns to the sidebar. Mouse wheel scrolls the
 inner program if it has mouse-tracking on (Claude Code, vim, less,
 …) or scrolls libghostty's scrollback otherwise.
 
+**Pickers** (Settings palette, scope/agent/repo pickers — any
+`Choice` modal):
+
+| Key | Action |
+|---|---|
+| `j/k` or `↑/↓` | Navigate |
+| `Space` | Toggle (multi-select pickers) |
+| `Enter` | Confirm |
+| `PageUp/PageDown` | Jump a screen at a time |
+| `Ctrl-u/Ctrl-d` | Half-page jump (vim-style) |
+| `Home/End` or `g/G` | First / last item |
+| `Backspace` | Back to the previous step (where applicable) |
+| `Esc` or `Ctrl-c` | Cancel |
+
 ## Architecture
 
-15 crates in a client/daemon split. The four core libraries (`core`,
+14 pilot crates in a client/daemon split (+ 2 vendored libghostty
+crates for the embedded terminal). The four core libraries (`core`,
 `auth`, `events`, `store`) never depend on each other. Providers
 plug in via two traits — see
 [`crates/core/src/provider.rs`](crates/core/src/provider.rs) and
@@ -152,7 +180,7 @@ Per-user config lives at `~/.pilot/config.yaml`. The setup wizard
 `,` any time to add a repo / change agents / edit roles without
 nuking state.
 
-**Editors** (the `E` shortcut): pilot detects Zed / VS Code /
+**Editors** (the `e` shortcut): pilot detects Zed / VS Code /
 Cursor / Windsurf / Fleet / IDEA at startup. Add custom entries
 or override builtins via `editors:`:
 
