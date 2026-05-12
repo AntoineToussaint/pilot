@@ -45,6 +45,12 @@ pub struct Config {
     /// Edit by hand if you want to lock a layout.
     #[serde(default)]
     pub ui: UiSection,
+    /// Per-repo overrides — env vars to inject into spawned PTYs
+    /// (Claude/codex/shell) and additional mount points to symlink
+    /// into the worktree on checkout. Keyed by `owner/name`. See
+    /// `RepoConfig`.
+    #[serde(default)]
+    pub repos: std::collections::BTreeMap<String, RepoConfig>,
     pub providers: ProvidersConfig,
     pub display: DisplayConfig,
     pub slack: SlackConfig,
@@ -131,6 +137,34 @@ pub struct UiSection {
 pub struct WorktreeConfig {
     /// Paths to symlink into / above each worktree. See
     /// `pilot_git_ops::Mount` for semantics.
+    pub mounts: Vec<MountSpec>,
+}
+
+/// Per-repo overrides keyed by `owner/name` (the same string GitHub's
+/// API returns as `repo.full_name`). Anything here applies only to
+/// worktrees / spawns whose primary task's `repo` matches the key.
+///
+/// ```yaml
+/// repos:
+///   tensorzero/tensorzero:
+///     env:
+///       DATABASE_URL: postgres://localhost/dev
+///       OPENAI_API_KEY: sk-...
+///     mounts:
+///       - source: ~/shared/tensor-data
+///         link_at: _imports/data
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RepoConfig {
+    /// Environment variables injected into every shell / agent PTY
+    /// spawned inside this repo's worktrees. Layered ON TOP of the
+    /// daemon's process env and the global `agent.env` config — the
+    /// per-repo value wins on key collision.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Extra mount points to symlink into the worktree on checkout.
+    /// Stacked on top of global `worktree.mounts`. Useful for
+    /// sharing common code (`_imports/...`) without committing it.
     pub mounts: Vec<MountSpec>,
 }
 

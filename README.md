@@ -197,6 +197,33 @@ editors:
 
 `{path}` is replaced with the workspace's worktree dir at launch.
 
+**Per-repo overrides** (`repos:`): inject env vars and symlink
+shared folders into worktrees on a per-repo basis. Useful when
+different projects need different `DATABASE_URL`s, or when you
+want to share vendored code across worktrees without committing
+it. Keyed by `owner/name` as GitHub reports it.
+
+```yaml
+repos:
+  tensorzero/tensorzero:
+    env:
+      DATABASE_URL: postgres://localhost/dev
+      OPENAI_API_KEY: sk-...
+    mounts:
+      - source: ~/shared/tensor-data
+        link_at: _imports/data
+      - source: ~/code/vendored/foo
+        link_at: _imports/foo
+```
+
+`env` is injected into every shell / agent PTY pilot spawns inside
+that repo's worktrees (added on top of the daemon's process env;
+per-repo wins on key collision). `mounts` symlinks are applied
+after `git worktree add` and stack on top of the global
+`worktree.mounts` list. `placement: inside` (default) puts the
+link inside the worktree; `placement: above` puts it in the
+worktree's parent dir.
+
 State (workspace activity, read/unread, snooze, terminal scrollback
 ring) persists in `~/.pilot/v2/state.db` via SQLite.
 

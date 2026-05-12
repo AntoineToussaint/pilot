@@ -171,13 +171,18 @@ pub async fn handle_spawn(
         }
     };
     let hint = format!("{}-{kind_label}", session_key.as_str());
+    // Per-repo env injection: look up the workspace's primary task
+    // repo, read `repos.<owner/name>.env` from YAML, fan it into
+    // the spawn. Missing config or workspace = empty env, no error.
+    let env = collect_repo_env(config, &session_key);
     tracing::info!(
         ?argv,
         cwd_path = ?cwd_path,
         %hint,
+        env_count = env.len(),
         "handle_spawn: calling backend.spawn"
     );
-    let backend_key = match config.backend.spawn(&argv, cwd_path.as_deref(), &[], &hint).await {
+    let backend_key = match config.backend.spawn(&argv, cwd_path.as_deref(), &env, &hint).await {
         Ok(k) => k,
         Err(e) => {
             tracing::error!("handle_spawn: backend.spawn failed: {e}");
@@ -465,10 +470,83 @@ async fn provision_worktree(
         .ok_or_else(|| anyhow::anyhow!("repo '{repo}' is not owner/name"))?;
 
     let mgr = pilot_git_ops::WorktreeManager::default_base();
-    mgr.checkout_at(target, owner, name, branch)
+    let worktree = mgr
+        .checkout_at(target, owner, name, branch)
         .await
         .map_err(|e| anyhow::anyhow!("checkout_at failed: {e}"))?;
+
+    // Apply mounts: global `worktree.mounts` + per-repo
+    // `repos.<owner/name>.mounts` from YAML. Best-effort — a mount
+    // failure logs a warning but doesn't fail the spawn. Both are
+    // idempotent so re-running this on an already-mounted worktree
+    // is a no-op.
+    let cfg = pilot_config::Config::load().unwrap_or_default();
+    let mut mounts = config_mounts_to_git(&cfg.worktree.mounts);
+    let repo_key = format!("{owner}/{name}");
+    if let Some(repo_cfg) = cfg.repos.get(&repo_key) {
+        mounts.extend(config_mounts_to_git(&repo_cfg.mounts));
+    }
+    if !mounts.is_empty()
+        && let Err(e) = mgr.apply_mounts(&worktree, &mounts).await
+    {
+        tracing::warn!("apply_mounts for {repo_key} failed: {e}");
+    }
     Ok(())
+}
+
+/// Convert per-config `MountSpec` → git-ops `Mount`, expanding a
+/// leading `~/` in the source path. Kept here so the config crate
+/// doesn't need to depend on `dirs` or git-ops.
+fn config_mounts_to_git(specs: &[pilot_config::MountSpec]) -> Vec<pilot_git_ops::Mount> {
+    specs
+        .iter()
+        .map(|m| pilot_git_ops::Mount {
+            source: expand_tilde(&m.source),
+            link_at: m.link_at.clone(),
+            placement: match m.placement {
+                pilot_config::PlacementSpec::Inside => pilot_git_ops::Placement::Inside,
+                pilot_config::PlacementSpec::Above => pilot_git_ops::Placement::Above,
+            },
+        })
+        .collect()
+}
+
+/// Pull `repos.<owner/name>.env` out of YAML for the workspace
+/// `session_key` lands in. Returns the (key, value) pairs the
+/// backend should set in the spawned PTY. Empty when:
+///   * config didn't load,
+///   * workspace doesn't exist,
+///   * workspace has no primary task / no repo,
+///   * no `repos.<owner/name>` block, or
+///   * block exists but `env` is empty.
+fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(String, String)> {
+    let workspace_key = WorkspaceKey::new(session_key.as_str());
+    let Ok(workspace) = load_workspace(config, &workspace_key) else {
+        return Vec::new();
+    };
+    let Some(repo) = workspace.primary_task().and_then(|t| t.repo.clone()) else {
+        return Vec::new();
+    };
+    let cfg = match pilot_config::Config::load() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    cfg.repos
+        .get(&repo)
+        .map(|rc| rc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default()
+}
+
+fn expand_tilde(p: &std::path::Path) -> PathBuf {
+    let Some(s) = p.to_str() else {
+        return p.to_path_buf();
+    };
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    p.to_path_buf()
 }
 
 /// Idempotently create `path` (and parents). Used as the fallback when
