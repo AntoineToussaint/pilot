@@ -10,6 +10,15 @@ pub enum GhError {
     Api(#[from] octocrab::Error),
     #[error("GraphQL error: {0}")]
     Graphql(String),
+    /// Pagination safety cap hit — typically means the user's filter
+    /// is too loose (>2000 matching PRs). Tail truncated.
+    #[error("GraphQL paged out: returned {count} PRs across {pages} pages, hit safety cap")]
+    Truncated { count: usize, pages: usize },
+    /// Every configured watched-repo query failed. The user opted
+    /// in to those repos explicitly so silently missing them is a
+    /// data-visibility regression worth surfacing.
+    #[error("all {count} watched-repo queries failed")]
+    WatchAllFailed { count: usize },
 }
 
 /// Render a `GhError` as a useful string. The Display impl on
@@ -20,6 +29,13 @@ pub enum GhError {
 fn detail_of(err: &GhError) -> String {
     match err {
         GhError::Graphql(s) => s.clone(),
+        GhError::Truncated { count, pages } => format!(
+            "GitHub returned {count} PRs across {pages} pages and we hit the safety cap. \
+             Your filter likely matches too many PRs — narrow it in Settings."
+        ),
+        GhError::WatchAllFailed { count } => format!(
+            "all {count} configured watched-repo queries failed (network or auth issue)"
+        ),
         GhError::Api(octo) => match octo {
             octocrab::Error::GitHub { source, .. } => {
                 // GitHubError's Display does the right thing —
@@ -495,12 +511,21 @@ impl GhClient {
             }
             page += 1;
             if page >= 20 {
-                tracing::warn!("GraphQL paged: bailing after {page} pages (safety cap)");
-                break;
+                // 20 pages × 100 per page = 2000 PRs. Past that, we
+                // truncate. Almost always means the user's filter is
+                // way too loose; surface it as a retryable error so
+                // the TUI's footer can warn instead of silently
+                // dropping the tail.
+                tracing::error!("GraphQL paged: bailing after {page} pages (safety cap; tail truncated)");
+                return Err(GhError::Truncated {
+                    count: tasks.len(),
+                    pages: page,
+                });
             }
         }
 
         // Fetch watched repos (all open PRs, not just involves:user).
+        let mut watch_failures: usize = 0;
         for repo in &self.watch_repos {
             let watch_query = format!("is:open is:pr repo:{repo} archived:false");
             let watch_body = graphql::query_body(&watch_query);
@@ -529,6 +554,7 @@ impl GhClient {
                 }
                 Err(e) => {
                     tracing::warn!("Watch query failed for {repo}: {e}");
+                    watch_failures += 1;
                 }
             }
         }
@@ -538,6 +564,16 @@ impl GhClient {
             tasks.len(),
             self.watch_repos.len()
         );
+        // If every configured watched-repo query failed, surface a
+        // retryable error. The main query succeeded so we have
+        // *some* tasks, but the user explicitly opted in to those
+        // extra repos and silently missing them is worse than a
+        // visible "couldn't fetch watched repos" notice.
+        if !self.watch_repos.is_empty() && watch_failures == self.watch_repos.len() {
+            return Err(GhError::WatchAllFailed {
+                count: self.watch_repos.len(),
+            });
+        }
         Ok(tasks)
     }
 
@@ -615,8 +651,12 @@ impl GhClient {
             }
             page += 1;
             if page >= 20 {
-                tracing::warn!("Issues paged: bailing after {page} pages");
-                break;
+                // Same safety-cap visibility as fetch_all_prs.
+                tracing::error!("Issues paged: bailing after {page} pages (safety cap; tail truncated)");
+                return Err(GhError::Truncated {
+                    count: tasks.len(),
+                    pages: page,
+                });
             }
         }
 

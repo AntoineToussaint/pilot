@@ -139,9 +139,15 @@ impl Workspace {
     /// Append a fresh session and return its id. Sessions own a
     /// worktree path; the workspace becomes "live on disk" only once
     /// at least one session has been added.
+    ///
+    /// If a session with the same id already exists, this is a
+    /// no-op — protects against a daemon-side resend or a buggy
+    /// caller pushing duplicates into the list.
     pub fn add_session(&mut self, session: Session) -> SessionId {
         let id = session.id;
-        self.sessions.push(session);
+        if !self.sessions.iter().any(|s| s.id == id) {
+            self.sessions.push(session);
+        }
         id
     }
 
@@ -1045,5 +1051,34 @@ mod tests {
             }),
             "log: build.log"
         );
+    }
+
+    /// `add_session` used to blindly push, so a daemon resend or a
+    /// buggy caller could leave the workspace with two `Session`s
+    /// sharing the same `SessionId`. Guard added in this commit:
+    /// adding a session that already exists is a no-op.
+    #[test]
+    fn add_session_dedupes_by_id() {
+        let mut w = Workspace::empty(
+            crate::WorkspaceKey::new("github:owner/repo"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let id = SessionId::new();
+        let key = w.key.clone();
+        let make = || Session {
+            id,
+            workspace_key: key.clone(),
+            name: "claude".into(),
+            kind: SessionKind::Agent { agent_id: "claude".into() },
+            state: SessionRunState::Idle,
+            worktree_path: "/tmp/wt".into(),
+            created_at: chrono::Utc::now(),
+            last_output_at: None,
+            layout: SessionLayout::default(),
+        };
+        w.add_session(make());
+        w.add_session(make());
+        assert_eq!(w.sessions.len(), 1, "second add with same id is a no-op");
     }
 }

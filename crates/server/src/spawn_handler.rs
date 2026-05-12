@@ -203,6 +203,16 @@ pub async fn handle_spawn(
         _ => None,
     };
     let session_key_for_pump = session_key.clone();
+    // Broadcast BEFORE spawning the pump task. Otherwise a
+    // fast-exiting terminal (e.g. a command that immediately
+    // errors) can fire `TerminalExited` from the pump before this
+    // `TerminalSpawned` even goes out — subscribers see "remove a
+    // terminal you never told me about" and book-keeping diverges.
+    let _ = config.bus.send(Event::TerminalSpawned {
+        terminal_id,
+        session_key,
+        kind,
+    });
     tokio::spawn(async move {
         let mut sub = match backend.subscribe(&key_for_pump).await {
             Ok(s) => s,
@@ -302,12 +312,6 @@ pub async fn handle_spawn(
         agent_states_map.lock().await.remove(&id_for_pump);
         terminal_meta_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
-    });
-
-    let _ = config.bus.send(Event::TerminalSpawned {
-        terminal_id,
-        session_key,
-        kind,
     });
 }
 
@@ -817,6 +821,13 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let terminals_map = config.terminals.clone();
         let terminal_meta_map = config.terminal_meta.clone();
         let key_for_pump = key.clone();
+        // Broadcast Spawned before spawning the pump — same race
+        // guard as the main spawn path.
+        let _ = config.bus.send(Event::TerminalSpawned {
+            terminal_id,
+            session_key,
+            kind,
+        });
         tokio::spawn(async move {
             let mut sub = match backend.subscribe(&key_for_pump).await {
                 Ok(s) => s,
@@ -846,12 +857,6 @@ pub async fn recover_sessions(config: &ServerConfig) {
             });
             terminals_map.lock().await.remove(&terminal_id);
             terminal_meta_map.lock().await.remove(&terminal_id);
-        });
-
-        let _ = config.bus.send(Event::TerminalSpawned {
-            terminal_id,
-            session_key,
-            kind,
         });
     }
 }

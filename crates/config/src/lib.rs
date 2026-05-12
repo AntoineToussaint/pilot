@@ -322,10 +322,19 @@ impl Config {
     /// writes back. Most callers (sidebar collapse, splitter
     /// resize) only touch one field — this avoids the boilerplate
     /// of the load/save dance.
+    ///
+    /// A process-global mutex serialises the load-mutate-write
+    /// sequence. Without it, two concurrent callers (e.g. dragging
+    /// a splitter while toggling a repo's collapse state) would
+    /// each load, each apply their mutation to independent copies,
+    /// then race to write — one mutation silently lost.
     pub fn save_with<F>(f: F) -> Result<(), ConfigError>
     where
         F: FnOnce(&mut Self),
     {
+        use std::sync::Mutex;
+        static SAVE_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cfg = Self::load()?;
         f(&mut cfg);
         cfg.save()
@@ -468,3 +477,4 @@ mod duration_secs {
         Ok(Duration::from_secs(secs))
     }
 }
+

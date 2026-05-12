@@ -137,19 +137,40 @@ impl LinearClient {
             .viewer
             .id;
 
-        // 2. Page through issues.
+        // 2. Page through issues. If page 1 fails outright we
+        //    surface the error; if a later page fails we return
+        //    what we have plus a warning log — losing pages N+1..
+        //    silently was the prior behavior and easy to miss.
         let mut tasks = Vec::new();
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
         loop {
             let body = graphql::build_issues_body(cursor.as_deref());
-            let resp: graphql::IssuesResponse = self.graphql(&body).await?;
+            let resp: graphql::IssuesResponse = match self.graphql(&body).await {
+                Ok(r) => r,
+                Err(e) if page > 0 => {
+                    tracing::error!(
+                        "Linear page {page} failed mid-pagination; \
+                         returning {} partial issues. error: {e}",
+                        tasks.len()
+                    );
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
             if let Some(errors) = resp.errors {
                 let joined = errors
                     .iter()
                     .map(|e| e.message.as_str())
                     .collect::<Vec<_>>()
                     .join("; ");
+                if page > 0 {
+                    tracing::error!(
+                        "Linear GraphQL errors at page {page}; returning {} partial issues. errors: {joined}",
+                        tasks.len()
+                    );
+                    break;
+                }
                 return Err(LinearError::Graphql(joined));
             }
             let data = resp
@@ -168,7 +189,9 @@ impl LinearClient {
             }
             page += 1;
             if page >= 20 {
-                tracing::warn!("Linear paged: bailing after {page} pages");
+                tracing::error!(
+                    "Linear paged: bailing after {page} pages (safety cap; tail truncated)"
+                );
                 break;
             }
         }
