@@ -930,23 +930,24 @@ pub fn set_snooze(
 pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     let key_str = key.as_str();
 
-    // Snapshot (terminal_id, backend_key) pairs whose backend key
-    // belongs to this workspace, then drop the lock before any
-    // async backend.kill() calls. The backend key shape is
-    // "<session_key>/<session_id>/<kind>" — workspace key is the
-    // first slash-separated segment.
+    // Find every terminal whose session_key matches via
+    // terminal_meta — the authoritative wire-side mapping. Earlier
+    // we parsed the backend_key prefix, but the backend's session
+    // name format isn't part of any contract (tmux now uses
+    // `pilot-{repo}-{kind}-{pid}-{n}`); the meta map is. Locks are
+    // taken + dropped before async backend.kill() calls.
+    let to_kill_ids: Vec<pilot_ipc::TerminalId> = {
+        let meta = config.terminal_meta.lock().await;
+        meta.iter()
+            .filter(|(_, (sk, _))| sk.as_str() == key_str)
+            .map(|(tid, _)| *tid)
+            .collect()
+    };
     let to_kill: Vec<(pilot_ipc::TerminalId, String)> = {
         let terminals = config.terminals.lock().await;
-        terminals
-            .iter()
-            .filter(|(_, backend_key)| {
-                backend_key
-                    .split('/')
-                    .next()
-                    .map(|s| s == key_str)
-                    .unwrap_or(false)
-            })
-            .map(|(tid, k)| (*tid, k.clone()))
+        to_kill_ids
+            .into_iter()
+            .filter_map(|tid| terminals.get(&tid).map(|k| (tid, k.clone())))
             .collect()
     };
 
@@ -959,7 +960,16 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
             if let Err(e) = config.backend.kill(&backend_key).await {
                 tracing::warn!("kill {backend_key}: {e}");
             }
+            // Clean every auxiliary map too. The pump task will
+            // ALSO clean these when wait_exit returns, but that
+            // happens on a tokio task with no upper bound on
+            // latency. Doing it here closes the window where
+            // rescope (or another subsystem) would see an entry
+            // for a workspace we just deleted.
             config.terminals.lock().await.remove(&tid);
+            config.terminal_meta.lock().await.remove(&tid);
+            config.terminal_sessions.lock().await.remove(&tid);
+            config.agent_states.lock().await.remove(&tid);
             // Mirror the daemon-pump's exit broadcast so any
             // still-connected clients see the tab disappear.
             let _ = config.bus.send(Event::TerminalExited {

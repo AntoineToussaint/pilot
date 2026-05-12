@@ -1128,3 +1128,70 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         "all-failed poll must not remove anything: got {after:?}"
     );
 }
+
+#[tokio::test]
+async fn delete_workspace_kills_terminals_via_terminal_meta() {
+    // Regression: an earlier implementation parsed the backend_key
+    // prefix to find which terminals belong to a workspace. After
+    // tmux session names switched to `pilot-{repo}-{kind}-{pid}-{n}`
+    // (no longer prefixed with the workspace_key), that filter
+    // matched zero terminals — Shift-X X silently kept the ghosts.
+    // Now we use terminal_meta as the source of truth.
+    use pilot_core::{SessionKey, WorkspaceKey};
+    use pilot_ipc::{TerminalId, TerminalKind};
+
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#1")).await;
+
+    let workspace_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#1")));
+    let session_key = SessionKey::from(workspace_key.as_str());
+    // Insert a terminal pointing at this workspace, with a backend
+    // key in the NEW format that doesn't start with the workspace
+    // key.
+    let backend_key_new_format = format!("pilot-o-r-1-claude-{}-1", std::process::id());
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(42), backend_key_new_format.clone());
+    config.terminal_meta.lock().await.insert(
+        TerminalId(42),
+        (session_key.clone(), TerminalKind::Agent("claude".into())),
+    );
+    // Also seed the auxiliary maps so we can assert delete cleans
+    // them up — otherwise a stale entry leaks into rescope's next
+    // tick.
+    config
+        .terminal_sessions
+        .lock()
+        .await
+        .insert(TerminalId(42), pilot_core::SessionId::new());
+    config
+        .agent_states
+        .lock()
+        .await
+        .insert(TerminalId(42), pilot_ipc::AgentState::Active);
+
+    polling::delete_workspace(&config, &workspace_key).await;
+
+    assert!(
+        config.terminals.lock().await.get(&TerminalId(42)).is_none(),
+        "delete_workspace must remove the terminal from the wire-side map"
+    );
+    assert!(
+        config.terminal_meta.lock().await.get(&TerminalId(42)).is_none(),
+        "terminal_meta cleaned too"
+    );
+    assert!(
+        config.terminal_sessions.lock().await.get(&TerminalId(42)).is_none(),
+        "terminal_sessions cleaned too"
+    );
+    assert!(
+        config.agent_states.lock().await.get(&TerminalId(42)).is_none(),
+        "agent_states cleaned too"
+    );
+    assert!(
+        config.store.list_workspaces().unwrap().is_empty(),
+        "workspace deleted from store"
+    );
+}
