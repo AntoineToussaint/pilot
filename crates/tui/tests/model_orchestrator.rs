@@ -311,3 +311,33 @@ fn out_of_scope_prompts_queue_one_at_a_time() {
     // Queue drained.
     assert_eq!(m.top_modal(), None);
 }
+
+#[test]
+fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
+    // Bug previously: if the user had Help open when the daemon
+    // emitted WorkspaceOutOfScope, the prompt sat in the queue
+    // forever — only a removal-prompt dismissal triggered the
+    // drain. Now ANY ModalDismissed retries the queue.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    // Open Help. The Help modal subscribes to the bus the same way
+    // any modal does; we don't drive its construction directly so
+    // we just verify the queue behavior via the run-through.
+    m.dispatch_key(key(Key::Char('?')));
+    assert_eq!(m.top_modal(), Some(&Id::Help));
+    // Daemon sends an out-of-scope event while Help is up.
+    m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+        workspace_key: pilot_core::WorkspaceKey::new("github:o/r#1"),
+        label: "o/r#1".into(),
+        active_terminal_count: 1,
+    });
+    // Help still on top — the queued prompt hasn't surfaced yet.
+    assert_eq!(m.top_modal(), Some(&Id::Help));
+    // Dismiss Help. Now the prompt should mount.
+    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::RemoveOutOfScope),
+        "queued out-of-scope prompt must surface after Help dismisses"
+    );
+}

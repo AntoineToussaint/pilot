@@ -898,8 +898,16 @@ impl<T: TerminalAdapter> Model<T> {
                     self.pop_modal();
                     if dismissing_removal_prompt {
                         self.active_removal_prompt = None;
-                        self.maybe_mount_next_removal_prompt();
                     }
+                    // Always try to surface a queued out-of-scope
+                    // prompt after a modal dismisses — not just when
+                    // the dismissed modal was a removal prompt
+                    // itself. Otherwise a user who has Help / Settings
+                    // open when the daemon emits WorkspaceOutOfScope
+                    // would have the prompt stuck in the queue
+                    // indefinitely until something else triggered
+                    // the drain.
+                    self.maybe_mount_next_removal_prompt();
                 }
             }
             Msg::Confirmed(yes) => {
@@ -918,8 +926,8 @@ impl<T: TerminalAdapter> Model<T> {
                         let session_key: pilot_core::SessionKey = (&workspace_key).into();
                         self.send_cmd(IpcCommand::Kill { session_key });
                     }
-                    self.maybe_mount_next_removal_prompt();
                 }
+                self.maybe_mount_next_removal_prompt();
             }
             Msg::TextareaSubmitted(body) => {
                 // Reply submit: build a PostReply for the workspace
