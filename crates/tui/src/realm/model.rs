@@ -1118,11 +1118,13 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
-            // `r` on a sidebar row: open the reply textarea targeted
-            // at the selected workspace. Submit posts via the
-            // provider's reply hook (currently github only).
+            // `r` opens the reply textarea targeted at the selected
+            // workspace. Available from Sidebar AND Right (Activity)
+            // — replying is more naturally "an action on the thing
+            // I'm reading" than "an action on the row". Disabled in
+            // Terminals where `r` belongs to the PTY.
             Key::Char('r')
-                if key.modifiers.is_empty() && self.focus == PaneFocus::Sidebar =>
+                if key.modifiers.is_empty() && self.focus != PaneFocus::Terminals =>
             {
                 self.q_armed_at = None;
                 if let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() {

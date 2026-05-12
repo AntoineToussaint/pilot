@@ -224,3 +224,46 @@ fn drag_on_sidebar_splitter_changes_split() {
         "dragging right widens sidebar ({before}% → {after}%)"
     );
 }
+
+#[test]
+fn r_mounts_reply_modal_from_sidebar() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let target_key = "github:owner/repo#42";
+    let workspace = Workspace::empty(
+        WorkspaceKey(target_key.to_string()),
+        "main",
+        Utc::now(),
+    );
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+    });
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+    m.dispatch_key(key(Key::Char('r')));
+    assert_eq!(m.top_modal(), Some(&Id::Reply));
+}
+
+#[test]
+fn r_mounts_reply_modal_from_right_pane() {
+    // Regression: `r` used to only fire when focus == Sidebar.
+    // Users reading the Activity feed (focus == Right) hit `r`,
+    // got nothing, and reported "r doesn't work."
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let target_key = "github:owner/repo#42";
+    let workspace = Workspace::empty(
+        WorkspaceKey(target_key.to_string()),
+        "main",
+        Utc::now(),
+    );
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+    });
+    // Tab to the Right pane (Activity).
+    m.dispatch_key(key(Key::Tab));
+    assert_eq!(m.focus(), PaneFocus::Right);
+    m.dispatch_key(key(Key::Char('r')));
+    assert_eq!(m.top_modal(), Some(&Id::Reply));
+}
