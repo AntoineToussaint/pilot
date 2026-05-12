@@ -198,11 +198,13 @@ pub async fn handle_spawn(
     tracing::info!(%backend_key, "handle_spawn: backend.spawn ok");
 
     let terminal_id = alloc_terminal_id();
-    config
-        .terminals
-        .lock()
-        .await
-        .insert(terminal_id, backend_key.clone());
+    // Insert the auxiliary maps BEFORE the primary `terminals` map.
+    // `snapshot_terminals` iterates `terminals` and looks up meta;
+    // doing terminals-last means a snapshot during the gap sees no
+    // entry for this id (consistent miss) instead of an entry with
+    // a bogus default session_key (inconsistent hit). The
+    // `TerminalSpawned` broadcast below tells clients about the
+    // newly-complete terminal once both inserts have landed.
     config
         .terminal_meta
         .lock()
@@ -215,6 +217,11 @@ pub async fn handle_spawn(
             .await
             .insert(terminal_id, sid);
     }
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(terminal_id, backend_key.clone());
     // Persist the (backend_key → session_key, kind) pairing so the
     // next pilot start can reattach surviving tmux sessions to their
     // owning workspace. Without this, `recover_sessions` reattaches
@@ -1036,10 +1043,18 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     let meta = config.terminal_meta.lock().await;
     let mut out = Vec::with_capacity(map.len());
     for (id, _key) in map.iter() {
-        let (session_key, kind) = meta
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
+        // Skip orphaned ids (terminals map says yes, terminal_meta
+        // says no) — they should never exist in steady state, only
+        // in a window during teardown. Emitting a default-valued
+        // snapshot would feed the TUI an empty-session-key
+        // workspace which the sidebar would render as `(no repo)`.
+        let Some((session_key, kind)) = meta.get(id).cloned() else {
+            tracing::warn!(
+                terminal_id = ?id,
+                "snapshot_terminals: terminal_id has no terminal_meta entry — skipping"
+            );
+            continue;
+        };
         out.push(TerminalSnapshot {
             terminal_id: *id,
             session_key,
