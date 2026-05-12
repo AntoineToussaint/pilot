@@ -235,7 +235,19 @@ impl Server {
             tokio::select! {
                 cmd = conn.rx.recv() => {
                     let Some(cmd) = cmd else { break };
-                    tracing::debug!("daemon ← {cmd:?}");
+                    // INFO for the loud commands that change session
+                    // shape (spawn/close/create); debug for everything
+                    // else so the log doesn't drown in Write chunks.
+                    match &cmd {
+                        pilot_ipc::Command::Spawn { .. }
+                        | pilot_ipc::Command::Close { .. }
+                        | pilot_ipc::Command::CreateSession { .. }
+                        | pilot_ipc::Command::Subscribe
+                        | pilot_ipc::Command::Refresh => {
+                            tracing::info!("daemon ← {cmd:?}");
+                        }
+                        _ => tracing::debug!("daemon ← {cmd:?}"),
+                    }
                     match cmd {
                         pilot_ipc::Command::Subscribe => {
                             let workspaces = load_workspaces(&*self.config.store);

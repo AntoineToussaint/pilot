@@ -99,6 +99,13 @@ pub async fn handle_spawn(
     kind: TerminalKind,
     cwd: Option<String>,
 ) {
+    tracing::info!(
+        %session_key,
+        ?session_id,
+        ?kind,
+        cwd = ?cwd,
+        "handle_spawn: entry"
+    );
     // Singleton enforcement at the daemon (the source of truth for
     // who's running what). The TUI also intercepts duplicates
     // client-side for snappy focus-not-spawn behavior, but that
@@ -106,6 +113,10 @@ pub async fn handle_spawn(
     // daemon. The guard here protects the invariant for everyone:
     // at most one Claude per session, one Codex per session, etc.
     if let Some(existing) = find_existing_singleton(config, &session_key, &kind).await {
+        tracing::info!(
+            terminal_id = ?existing,
+            "handle_spawn: existing singleton found, sending TerminalFocusRequested"
+        );
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
         });
@@ -147,9 +158,15 @@ pub async fn handle_spawn(
         }
     };
 
+    tracing::info!(
+        ?argv,
+        cwd_path = ?cwd_path,
+        "handle_spawn: calling backend.spawn"
+    );
     let backend_key = match config.backend.spawn(&argv, cwd_path.as_deref(), &[]).await {
         Ok(k) => k,
         Err(e) => {
+            tracing::error!("handle_spawn: backend.spawn failed: {e}");
             let _ = config.bus.send(Event::ProviderError {
                 source: "spawn".into(),
                 message: format!("{e}"),
@@ -159,6 +176,7 @@ pub async fn handle_spawn(
             return;
         }
     };
+    tracing::info!(%backend_key, "handle_spawn: backend.spawn ok");
 
     let terminal_id = alloc_terminal_id();
     config
@@ -208,11 +226,22 @@ pub async fn handle_spawn(
     // errors) can fire `TerminalExited` from the pump before this
     // `TerminalSpawned` even goes out — subscribers see "remove a
     // terminal you never told me about" and book-keeping diverges.
-    let _ = config.bus.send(Event::TerminalSpawned {
+    let subscriber_count = config.bus.receiver_count();
+    tracing::info!(
+        ?terminal_id,
+        %session_key,
+        ?kind,
+        subscriber_count,
+        "handle_spawn: broadcasting TerminalSpawned"
+    );
+    let send_result = config.bus.send(Event::TerminalSpawned {
         terminal_id,
         session_key,
         kind,
     });
+    if let Err(e) = send_result {
+        tracing::error!("handle_spawn: bus.send(TerminalSpawned) failed: {e}");
+    }
     tokio::spawn(async move {
         let mut sub = match backend.subscribe(&key_for_pump).await {
             Ok(s) => s,
