@@ -217,21 +217,19 @@ async fn run_embedded_realm(
     //   2. No persisted setup → run detection, hand the wizard to
     //      the realm `Model`, and wire the on-complete hook to fire
     //      polling once the user finishes.
-    let polling_config_immediate = config.clone();
     let persisted = persisted_setup(&*config.store);
     let returning_sources: Vec<String> = persisted
         .as_ref()
         .map(|p| p.enabled_providers.iter().cloned().collect())
         .unwrap_or_default();
-    // Capture for handing into Model below (the `if let` arm moves
-    // it into the polling task).
     let persisted_for_model = persisted.clone();
-    if let Some(persisted) = persisted {
-        tokio::spawn(async move {
-            let bus = polling_config_immediate.bus.clone();
-            let sources = polling::sources_for(&persisted, bus).await;
-            polling::spawn(polling_config_immediate, sources, POLL_INTERVAL);
-        });
+    // Spawn the long-lived poll loop ONCE. It re-reads YAML on
+    // every tick so filter / scope edits made via the Settings
+    // palette take effect on the next cycle without a respawn.
+    // Replaces the old per-Finish-respawn pattern that leaked one
+    // tokio task per edit.
+    if persisted.is_some() {
+        polling::spawn(config.clone(), POLL_INTERVAL);
     }
 
     // Always pre-run detection + scope sources. Two reasons: (1)
@@ -250,7 +248,6 @@ async fn run_embedded_realm(
         None
     };
 
-    let polling_after_setup = config.clone();
     let store_for_save = config.store.clone();
     tokio::task::spawn_blocking(move || {
         let mut model = pilot_tui::realm::Model::new(client)?;
@@ -260,13 +257,12 @@ async fn run_embedded_realm(
             model.show_polling(returning_sources);
         }
         // Hook: every time setup finishes (first-run wizard AND
-        // partial flows like "Add a repo"), persist + (re)spawn
-        // polling so the new sources start being fetched. `Arc<dyn Fn>`
-        // because partial flows fire multiple times. Note: we don't
-        // abort the previous polling task — each call leaks a tokio
-        // task. Solo-dev acceptable; a follow-up could thread an
-        // `AbortHandle` through.
-        let polling_cfg = polling_after_setup.clone();
+        // partial flows like "Add a repo"), persist the new setup
+        // to YAML. The long-lived poll loop (spawned ONCE above)
+        // reads the YAML on every tick, so the next poll picks up
+        // the change. Model also fires Command::Refresh on Finish
+        // for an immediate tick + rescope. `Arc<dyn Fn>` because
+        // partial flows can fire many times.
         let store_for_save = std::sync::Arc::new(store_for_save);
         let hook: std::sync::Arc<
             dyn Fn(pilot_tui::setup_flow::SetupOutcome) + Send + Sync,
@@ -274,19 +270,6 @@ async fn run_embedded_realm(
             let persisted =
                 pilot_tui::setup_flow::outcome_to_persisted(&outcome);
             pilot_tui::setup_flow::save_persisted(&**store_for_save, &persisted);
-            let bus = polling_cfg.bus.clone();
-            let cfg = polling_cfg.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("polling rt");
-                rt.block_on(async move {
-                    let sources = polling::sources_for(&persisted, bus).await;
-                    polling::spawn(cfg, sources, POLL_INTERVAL);
-                    futures_util::future::pending::<()>().await;
-                });
-            });
         });
         model = model.with_setup_complete_hook(hook);
         if let Some(p) = preselect {
@@ -409,8 +392,7 @@ async fn server_start() -> anyhow::Result<()> {
 
     let config = ServerConfig::from_user_config();
     pilot_server::spawn_handler::recover_sessions(&config).await;
-    let sources = polling::default_sources(config.bus.clone()).await;
-    polling::spawn(config.clone(), sources, POLL_INTERVAL);
+    polling::spawn(config.clone(), POLL_INTERVAL);
 
     let factory_config = config.clone();
     let service = SocketService::new(socket.clone(), pid_file, move || factory_config.clone());

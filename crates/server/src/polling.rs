@@ -464,9 +464,9 @@ pub async fn default_sources(
 
 /// Run one poll tick: every source is called once and its tasks are
 /// upserted. Errors from one source don't stop the others.
-pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) {
+pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) -> Vec<WorkspaceKey> {
     let mut state = TickState::default();
-    tick_with_state(config, sources, &mut state).await;
+    tick_with_state(config, sources, &mut state).await
 }
 
 /// Per-loop state that the long-lived `spawn` task threads through
@@ -483,13 +483,19 @@ pub async fn tick_with_state(
     config: &ServerConfig,
     sources: &[Box<dyn TaskSource>],
     state: &mut TickState,
-) {
+) -> Vec<WorkspaceKey> {
+    // Track every workspace key we upserted this tick. Callers use
+    // it for "in scope" rescoping after the tick — anything in the
+    // store NOT in this set is a candidate for removal.
+    let mut polled: Vec<WorkspaceKey> = Vec::new();
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
                 let count = tasks.len();
                 tracing::info!(source = source.name(), count, "poll succeeded");
                 for task in tasks {
+                    let key = WorkspaceKey::new(pilot_core::workspace_key_for(&task));
+                    polled.push(key);
                     upsert(config, task).await;
                 }
                 // Clear the debounce slot — the next failure should
@@ -537,12 +543,94 @@ pub async fn tick_with_state(
             }
         }
     }
+    polled
+}
+
+/// Compare `polled` against the persisted workspace set; remove
+/// workspaces no longer in scope (filter / scope change). Active
+/// sessions are preserved — those workspaces stay until the user
+/// kills them explicitly (or, in a future phase, confirms removal
+/// via a prompt).
+///
+/// Empty `polled` is treated as "no data this cycle" and skipped —
+/// otherwise a single network blip would wipe the whole sidebar.
+/// Callers that genuinely want a fresh slate should delete
+/// workspaces directly.
+pub async fn rescope(config: &ServerConfig, polled: &[WorkspaceKey]) {
+    if polled.is_empty() {
+        return;
+    }
+    let polled_set: std::collections::HashSet<&str> =
+        polled.iter().map(|k| k.as_str()).collect();
+
+    let records = match config.store.list_workspaces() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("rescope: list_workspaces failed: {e}");
+            return;
+        }
+    };
+
+    let terminal_meta = config.terminal_meta.lock().await;
+    let active_session_keys: std::collections::HashSet<String> = terminal_meta
+        .values()
+        .map(|(sk, _)| sk.as_str().to_string())
+        .collect();
+    drop(terminal_meta);
+
+    for r in records {
+        if polled_set.contains(r.key.as_str()) {
+            continue;
+        }
+        let key = WorkspaceKey::new(r.key.clone());
+        // Skip workspaces that have an active terminal — removing
+        // them would yank the rug out from under the user's running
+        // agent. Phase 2 will prompt for these.
+        if active_session_keys.contains(r.key.as_str()) {
+            tracing::info!(
+                workspace_key = %r.key,
+                "rescope: out of scope but has active session(s) — kept"
+            );
+            continue;
+        }
+        tracing::info!(workspace_key = %r.key, "rescope: removing out-of-scope workspace");
+        delete_workspace(config, &key).await;
+    }
 }
 
 /// Spawn the long-lived polling loop. Returns the join handle so the
 /// caller can `abort()` on shutdown if it wants — `pilot daemon stop`
 /// drops the whole process so we don't bother in main.
+///
+/// Each tick reads `~/.pilot/config.yaml` fresh and rebuilds the
+/// source list. This means a filter / scope change made via the
+/// Settings palette takes effect on the NEXT tick at the latest —
+/// no separate "respawn polling" plumbing needed, and the previous
+/// per-Finish-respawn pattern (which leaked one tokio task per
+/// edit) is gone.
 pub fn spawn(
+    config: ServerConfig,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        let mut state = TickState::default();
+        // First tick fires immediately; subsequent ticks honor `interval`.
+        ticker.tick().await;
+        run_one_tick(&config, &mut state).await;
+        loop {
+            ticker.tick().await;
+            run_one_tick(&config, &mut state).await;
+        }
+    })
+}
+
+/// Test-only entry point: spawn a polling loop with an explicit
+/// source list (skips the YAML reload). Production code should use
+/// `spawn`; this exists so tests can inject mock `TaskSource`s
+/// without writing a config file.
+#[doc(hidden)]
+pub fn spawn_with_sources(
     config: ServerConfig,
     sources: Vec<Box<dyn TaskSource>>,
     interval: Duration,
@@ -554,14 +642,34 @@ pub fn spawn(
         }
         let mut ticker = tokio::time::interval(interval);
         let mut state = TickState::default();
-        // First tick fires immediately; subsequent ticks honor `interval`.
         ticker.tick().await;
-        tick_with_state(&config, &sources, &mut state).await;
+        let polled = tick_with_state(&config, &sources, &mut state).await;
+        rescope(&config, &polled).await;
         loop {
             ticker.tick().await;
-            tick_with_state(&config, &sources, &mut state).await;
+            let polled = tick_with_state(&config, &sources, &mut state).await;
+            rescope(&config, &polled).await;
         }
     })
+}
+
+/// Single iteration of the poll loop. Loads the latest persisted
+/// setup, builds sources, ticks, rescopes. Shared between the
+/// long-lived spawn and the `Command::Refresh` immediate-tick path.
+pub async fn run_one_tick(config: &ServerConfig, state: &mut TickState) {
+    let setup = match pilot_config::Config::load() {
+        Ok(c) => crate::persisted_from_config(&c),
+        Err(e) => {
+            tracing::warn!("polling: config.yaml load failed: {e}");
+            return;
+        }
+    };
+    let sources = sources_for(&setup, config.bus.clone()).await;
+    if sources.is_empty() {
+        return;
+    }
+    let polled = tick_with_state(config, &sources, state).await;
+    rescope(config, &polled).await;
 }
 
 /// Merge `task` into the existing workspace for its workspace key

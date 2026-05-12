@@ -414,9 +414,11 @@ impl Server {
                             // (so newly-added repos are picked up
                             // without waiting for the long-lived poll
                             // loop to tick), builds the matching
-                            // sources, and runs ONE tick. Independent
-                            // of the long-lived poll loop — that one
-                            // keeps its own cadence.
+                            // sources, runs ONE tick, then rescopes:
+                            // workspaces in the store that the poll
+                            // DIDN'T return (filter changed, scope
+                            // dropped, repo unsubscribed) and that
+                            // have no active session get cleaned up.
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 let setup = match pilot_config::Config::load() {
@@ -434,7 +436,8 @@ impl Server {
                                     );
                                     return;
                                 }
-                                polling::tick(&cfg, &sources).await;
+                                let polled = polling::tick(&cfg, &sources).await;
+                                polling::rescope(&cfg, &polled).await;
                             });
                         }
                         pilot_ipc::Command::PostReply { session_key, body } => {
@@ -490,7 +493,7 @@ impl Server {
 /// daemon can run a one-off poll (Command::Refresh) using the
 /// latest user-edited subscriptions, without waiting for the long-
 /// lived poll loop's next tick.
-fn persisted_from_config(c: &pilot_config::Config) -> pilot_core::PersistedSetup {
+pub fn persisted_from_config(c: &pilot_config::Config) -> pilot_core::PersistedSetup {
     pilot_core::PersistedSetup {
         enabled_providers: c.setup.providers.clone(),
         enabled_agents: c.setup.agents.clone(),

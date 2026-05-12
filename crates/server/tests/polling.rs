@@ -680,7 +680,7 @@ async fn spawn_with_no_sources_exits_quickly_and_silently() {
     // should still boot, just with an idle polling task that doesn't
     // burn CPU spinning forever.
     let config = ServerConfig::in_memory();
-    let handle = polling::spawn(config, vec![], Duration::from_millis(10));
+    let handle = polling::spawn_with_sources(config, vec![], Duration::from_millis(10));
     tokio::time::timeout(Duration::from_millis(500), handle)
         .await
         .expect("polling task exits when sources is empty")
@@ -970,7 +970,7 @@ async fn spawn_drives_sources_on_interval() {
         name: "test".into(),
         counter: counter.clone(),
     });
-    let handle = polling::spawn(config, vec![source], Duration::from_millis(40));
+    let handle = polling::spawn_with_sources(config, vec![source], Duration::from_millis(40));
 
     // Wait long enough for several ticks; the first tick fires
     // immediately, subsequent ticks every 40ms.
