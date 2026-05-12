@@ -979,3 +979,90 @@ async fn spawn_drives_sources_on_interval() {
     let n = counter.load(Ordering::SeqCst);
     assert!(n >= 2, "polled at least twice (got {n})");
 }
+
+#[tokio::test]
+async fn rescope_removes_workspaces_with_no_active_session() {
+    use pilot_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    // Seed with an existing workspace (was in scope last poll).
+    polling::upsert(&config, make_task("o/r#stale")).await;
+    polling::upsert(&config, make_task("o/r#current")).await;
+
+    // Simulate a new poll that returns only `#current` — `#stale`
+    // fell out of scope (filter change, repo unsubscribed, …).
+    let polled = vec![WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#current")))];
+    polling::rescope(&config, &polled).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        !after.iter().any(|k| k.contains("stale")),
+        "stale workspace should be removed; got: {after:?}"
+    );
+    assert!(after.iter().any(|k| k.contains("current")));
+}
+
+#[tokio::test]
+async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
+    use pilot_core::{SessionKey, WorkspaceKey};
+    use pilot_ipc::{TerminalId, TerminalKind};
+    let config = ServerConfig::in_memory();
+    let mut bus_rx = config.bus.subscribe();
+    polling::upsert(&config, make_task("o/r#alive")).await;
+    polling::upsert(&config, make_task("o/r#kept-elsewhere")).await;
+
+    // Stash a terminal pointing at `#alive` so rescope sees it as
+    // "has active session". `terminal_meta` is the source of truth
+    // the production code consults.
+    let session_key: SessionKey =
+        SessionKey::from(pilot_core::workspace_key_for(&make_task("o/r#alive")));
+    config
+        .terminal_meta
+        .lock()
+        .await
+        .insert(TerminalId(7), (session_key, TerminalKind::Shell));
+
+    // Poll returns only `#kept-elsewhere` — `#alive` is out of
+    // scope but has a live terminal.
+    let polled = vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+        &make_task("o/r#kept-elsewhere"),
+    ))];
+    let mut state = polling::TickState::default();
+    polling::rescope_with_state(&config, &polled, &mut state).await;
+
+    // Drain bus_rx, capture the prompt(s).
+    let mut prompts = 0;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if matches!(evt, Event::WorkspaceOutOfScope { .. }) {
+            prompts += 1;
+        }
+    }
+    assert_eq!(prompts, 1, "exactly one prompt for the active-session workspace");
+
+    // Critical: a second rescope with the same input should NOT
+    // re-prompt. State threading dedupes — without it, every 60s
+    // tick would re-fire the same modal at the user.
+    polling::rescope_with_state(&config, &polled, &mut state).await;
+    let mut prompts2 = 0;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if matches!(evt, Event::WorkspaceOutOfScope { .. }) {
+            prompts2 += 1;
+        }
+    }
+    assert_eq!(prompts2, 0, "second rescope must not re-prompt for the same workspace");
+
+    // Active workspace still in the store; nothing was killed.
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(after.iter().any(|k| k.contains("alive")));
+}

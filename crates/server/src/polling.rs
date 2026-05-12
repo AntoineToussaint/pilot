@@ -477,6 +477,15 @@ pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) -> Vec
 #[derive(Default)]
 pub struct TickState {
     last_error: std::collections::HashMap<String, String>,
+    /// Workspace keys we've already broadcast `WorkspaceOutOfScope`
+    /// for. Without this, every 60s tick would re-prompt the user
+    /// about the same workspace (they said "no" once, that's
+    /// final). Re-entered into the polled set on the next successful
+    /// poll that surfaces the workspace again — i.e. once the user
+    /// re-adds the filter / scope, we forget the dismissal and the
+    /// workspace can produce a fresh prompt later if it falls out
+    /// of scope again.
+    prompted_out_of_scope: std::collections::HashSet<String>,
 }
 
 pub async fn tick_with_state(
@@ -557,11 +566,24 @@ pub async fn tick_with_state(
 /// Callers that genuinely want a fresh slate should delete
 /// workspaces directly.
 pub async fn rescope(config: &ServerConfig, polled: &[WorkspaceKey]) {
+    let mut state = TickState::default();
+    rescope_with_state(config, polled, &mut state).await;
+}
+
+pub async fn rescope_with_state(
+    config: &ServerConfig,
+    polled: &[WorkspaceKey],
+    state: &mut TickState,
+) {
     if polled.is_empty() {
         return;
     }
     let polled_set: std::collections::HashSet<&str> =
         polled.iter().map(|k| k.as_str()).collect();
+    // Anything we polled is back in scope — drop any "already
+    // prompted" memory for it so a future fall-out triggers a fresh
+    // prompt.
+    state.prompted_out_of_scope.retain(|k| !polled_set.contains(k.as_str()));
 
     let records = match config.store.list_workspaces() {
         Ok(r) => r,
@@ -594,11 +616,18 @@ pub async fn rescope(config: &ServerConfig, polled: &[WorkspaceKey]) {
                     "rescope: removing out-of-scope workspace"
                 );
                 delete_workspace(config, &key).await;
+                state.prompted_out_of_scope.remove(r.key.as_str());
             }
             Some(count) => {
-                // Has active sessions — ask the user. Build a short
-                // label from the stored workspace JSON if available;
-                // fall back to the raw key.
+                // Has active sessions — ask the user, once. Without
+                // the dedupe, every 60s tick would re-fire the same
+                // prompt for a workspace the user already dismissed.
+                if state.prompted_out_of_scope.contains(r.key.as_str()) {
+                    continue;
+                }
+                state.prompted_out_of_scope.insert(r.key.clone());
+                // Build a short label from the stored workspace JSON
+                // if available; fall back to the raw key.
                 let label = r
                     .workspace_json
                     .as_deref()
@@ -672,7 +701,7 @@ pub fn spawn_with_sources(
         let mut state = TickState::default();
         ticker.tick().await;
         let polled = tick_with_state(&config, &sources, &mut state).await;
-        rescope(&config, &polled).await;
+        rescope_with_state(&config, &polled, &mut state).await;
         loop {
             ticker.tick().await;
             let polled = tick_with_state(&config, &sources, &mut state).await;
@@ -697,7 +726,7 @@ pub async fn run_one_tick(config: &ServerConfig, state: &mut TickState) {
         return;
     }
     let polled = tick_with_state(config, &sources, state).await;
-    rescope(config, &polled).await;
+    rescope_with_state(config, &polled, state).await;
 }
 
 /// Merge `task` into the existing workspace for its workspace key
