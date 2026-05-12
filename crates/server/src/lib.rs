@@ -132,6 +132,14 @@ pub struct ServerConfig {
     /// Local/dev fallback principal. API auth can replace this with a
     /// per-connection principal later.
     pub default_principal_id: pilot_ipc::PrincipalId,
+    /// Cross-tick polling state — provider-error debounce + the
+    /// "already prompted" set for out-of-scope workspaces. Shared
+    /// between the long-lived poll loop and `Command::Refresh`'s
+    /// one-shot tick so dismissed prompts stay dismissed across
+    /// both paths. Without this, Refresh would prompt, you'd
+    /// dismiss, and 30s later the long-lived loop would re-prompt
+    /// (each has its own `TickState`).
+    pub poll_state: Arc<Mutex<polling::TickState>>,
 }
 
 impl ServerConfig {
@@ -200,6 +208,7 @@ impl ServerConfig {
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: pilot_ipc::PrincipalId::local(),
+            poll_state: Arc::new(Mutex::new(polling::TickState::default())),
         }
     }
 
@@ -436,8 +445,13 @@ impl Server {
                                     );
                                     return;
                                 }
-                                let outcome = polling::tick(&cfg, &sources).await;
-                                polling::rescope(&cfg, &outcome).await;
+                                // Share TickState with the long-lived
+                                // poll loop so a prompt dismissed here
+                                // stays dismissed there (and vice versa).
+                                let mut state = cfg.poll_state.lock().await;
+                                let outcome =
+                                    polling::tick_with_state(&cfg, &sources, &mut state).await;
+                                polling::rescope_with_state(&cfg, &outcome, &mut state).await;
                             });
                         }
                         pilot_ipc::Command::PostReply { session_key, body } => {

@@ -41,13 +41,30 @@ impl CredentialProvider for CommandProvider {
     }
 
     async fn resolve(&self, _scope: &str) -> Result<Credential, CredentialError> {
-        let output = tokio::process::Command::new(&self.program)
+        // 5s timeout. `gh auth token` is usually <100ms but can hang
+        // if the network's down or `gh` is misconfigured. Without
+        // this, the daemon's polling task blocks indefinitely on
+        // first launch — pilot looks frozen.
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let run = tokio::process::Command::new(&self.program)
             .args(&self.args)
-            .output()
-            .await
-            .map_err(|e| {
-                CredentialError::Provider(format!("failed to run `{}`: {e}", self.label))
-            })?;
+            .output();
+        let output = match tokio::time::timeout(TIMEOUT, run).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                return Err(CredentialError::Provider(format!(
+                    "failed to run `{}`: {e}",
+                    self.label
+                )));
+            }
+            Err(_) => {
+                return Err(CredentialError::Provider(format!(
+                    "`{}` timed out after {}s",
+                    self.label,
+                    TIMEOUT.as_secs()
+                )));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -68,5 +85,44 @@ impl CredentialProvider for CommandProvider {
         }
 
         Ok(Credential::new(token, format!("cmd:{}", self.label)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command that runs forever (`sleep 60`) must surface as a
+    /// timeout, not a hang. Without the timeout in `resolve`, this
+    /// test would block indefinitely.
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_times_out_on_hanging_command() {
+        let provider = CommandProvider::new("sleep", &["60"]);
+        let start = std::time::Instant::now();
+        let result = provider.resolve("any").await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "should time out within ~5s, not block forever; took {elapsed:?}"
+        );
+        let err = result.expect_err("hanging command must produce an error, not a fake credential");
+        match err {
+            CredentialError::Provider(msg) => {
+                assert!(
+                    msg.contains("timed out"),
+                    "error message should mention timeout; got: {msg}"
+                );
+            }
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    /// Sanity check: a fast successful command still returns the
+    /// trimmed stdout as a credential.
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_returns_stdout_on_success() {
+        let provider = CommandProvider::new("printf", &["test-token-123"]);
+        let cred = provider.resolve("any").await.expect("printf works");
+        assert_eq!(cred.token(), "test-token-123");
     }
 }

@@ -693,13 +693,12 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
-        let mut state = TickState::default();
         // First tick fires immediately; subsequent ticks honor `interval`.
         ticker.tick().await;
-        run_one_tick(&config, &mut state).await;
+        run_one_tick(&config).await;
         loop {
             ticker.tick().await;
-            run_one_tick(&config, &mut state).await;
+            run_one_tick(&config).await;
         }
     })
 }
@@ -735,7 +734,9 @@ pub fn spawn_with_sources(
 /// Single iteration of the poll loop. Loads the latest persisted
 /// setup, builds sources, ticks, rescopes. Shared between the
 /// long-lived spawn and the `Command::Refresh` immediate-tick path.
-pub async fn run_one_tick(config: &ServerConfig, state: &mut TickState) {
+/// Uses `config.poll_state` so prompt-dismissal memory crosses both
+/// paths.
+pub async fn run_one_tick(config: &ServerConfig) {
     let setup = match pilot_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
         Err(e) => {
@@ -747,8 +748,9 @@ pub async fn run_one_tick(config: &ServerConfig, state: &mut TickState) {
     if sources.is_empty() {
         return;
     }
-    let outcome = tick_with_state(config, &sources, state).await;
-    rescope_with_state(config, &outcome, state).await;
+    let mut state = config.poll_state.lock().await;
+    let outcome = tick_with_state(config, &sources, &mut state).await;
+    rescope_with_state(config, &outcome, &mut state).await;
 }
 
 /// Merge `task` into the existing workspace for its workspace key

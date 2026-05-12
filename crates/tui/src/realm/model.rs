@@ -1711,13 +1711,29 @@ impl<T: TerminalAdapter> Model<T> {
             active_terminal_count,
         } = &event
         {
-            self.pending_removal_prompts.push_back((
-                workspace_key.clone(),
-                label.clone(),
-                *active_terminal_count,
-            ));
-            self.maybe_mount_next_removal_prompt();
-            self.redraw = true;
+            // Dedupe: ignore re-emits for the workspace currently
+            // being prompted about OR already queued. The daemon
+            // dedupes per-process, but a daemon restart would reset
+            // its state and could spam the same prompt. Belt and
+            // braces.
+            let already_active = self
+                .active_removal_prompt
+                .as_ref()
+                .map(|k| k == workspace_key)
+                .unwrap_or(false);
+            let already_queued = self
+                .pending_removal_prompts
+                .iter()
+                .any(|(k, _, _)| k == workspace_key);
+            if !already_active && !already_queued {
+                self.pending_removal_prompts.push_back((
+                    workspace_key.clone(),
+                    label.clone(),
+                    *active_terminal_count,
+                ));
+                self.maybe_mount_next_removal_prompt();
+                self.redraw = true;
+            }
             return;
         }
         self.sidebar.on_daemon_event(&event);
