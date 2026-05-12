@@ -50,6 +50,12 @@ pub struct RightPane {
     comment_scroll: usize,
     /// Highlighted comment index, for `Space`-to-select UX later.
     comment_cursor: usize,
+    /// How many activity cards rendered in the last frame. Updated
+    /// during `render`; consumed by `clamp_scroll_to_cursor` to
+    /// keep the focused row on-screen as j/k walk through long
+    /// PR threads. 1 is a conservative default before the first
+    /// render so the cursor never gets stranded.
+    last_visible_cards: usize,
     /// Whether the activity section is collapsed to its header row.
     /// Defaults to expanded; auto-collapses when the workspace has no
     /// activity (the empty pane is just visual noise — keeping the
@@ -87,6 +93,7 @@ impl RightPane {
             workspace: None,
             comment_scroll: 0,
             comment_cursor: 0,
+            last_visible_cards: 1,
             // Empty workspace → collapsed; cleared on first non-empty
             // workspace landing in `set_workspace`.
             activity_collapsed: true,
@@ -116,6 +123,22 @@ impl RightPane {
 
     /// Arm the auto-mark timer iff the cursor is currently on an
     /// unread activity. Called whenever cursor or workspace state
+    /// Keep the focused row on-screen as the cursor walks the
+    /// activity list. Without this, `comment_scroll` is frozen at 0
+    /// and `j` past the visible window lets the cursor disappear
+    /// off the bottom of the pane. `last_visible_cards` is set
+    /// during the previous render — conservative default of 1
+    /// avoids a stranded cursor before the first frame.
+    fn clamp_scroll_to_cursor(&mut self) {
+        if self.comment_cursor < self.comment_scroll {
+            self.comment_scroll = self.comment_cursor;
+        } else if self.comment_cursor
+            >= self.comment_scroll + self.last_visible_cards
+        {
+            self.comment_scroll = self.comment_cursor + 1 - self.last_visible_cards;
+        }
+    }
+
     /// changes in a way that might affect the answer (j/k/g/G,
     /// set_workspace, focus enter). Idempotent on re-arm.
     fn rearm_mark_timer(&mut self, focused: bool) {
@@ -254,6 +277,13 @@ impl RightPane {
         self.comment_cursor
     }
 
+    /// Test accessor — top-of-viewport index into the activity
+    /// list. Tests use this to verify the scroll-follows-cursor
+    /// behavior.
+    pub fn comment_scroll(&self) -> usize {
+        self.comment_scroll
+    }
+
     fn render_header(&self, area: Rect, frame: &mut Frame) {
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
@@ -361,7 +391,7 @@ impl RightPane {
     ///
     /// Returns the row count consumed (header + optional body), so
     /// future sections stacked below can offset themselves.
-    fn render_activity(&self, area: Rect, frame: &mut Frame, focused: bool) -> u16 {
+    fn render_activity(&mut self, area: Rect, frame: &mut Frame, focused: bool) -> u16 {
         let theme = crate::theme::current();
         let title_color = if focused { theme.accent } else { theme.chrome };
 
@@ -458,6 +488,7 @@ impl RightPane {
 
         let body_width = inner.width.saturating_sub(BODY_INDENT);
         let mut cards: Vec<Line<'static>> = Vec::new();
+        let mut rendered_activities: usize = 0;
         for (i, activity) in workspace
             .activity
             .iter()
@@ -467,6 +498,7 @@ impl RightPane {
             if cards.len() >= inner.height as usize {
                 break;
             }
+            rendered_activities += 1;
 
             let is_cursor = i == self.comment_cursor;
             let is_unread = workspace.is_activity_unread(i);
@@ -570,6 +602,7 @@ impl RightPane {
         }
 
         frame.render_widget(Paragraph::new(cards), inner);
+        self.last_visible_cards = rendered_activities.max(1);
         area.height
     }
 }
@@ -704,10 +737,26 @@ impl RightPane {
                 if self.comment_cursor < last {
                     self.comment_cursor += 1;
                 }
+                self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
             (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
                 self.comment_cursor = self.comment_cursor.saturating_sub(1);
+                self.clamp_scroll_to_cursor();
+                PaneOutcome::Consumed
+            }
+            (KeyCode::PageDown, _) => {
+                if !workspace.activity.is_empty() {
+                    let jump = self.last_visible_cards;
+                    self.comment_cursor = (self.comment_cursor + jump).min(last);
+                    self.clamp_scroll_to_cursor();
+                }
+                PaneOutcome::Consumed
+            }
+            (KeyCode::PageUp, _) => {
+                let jump = self.last_visible_cards;
+                self.comment_cursor = self.comment_cursor.saturating_sub(jump);
+                self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
             // `→`/`l` expand the focused comment, `←`/`h` collapse it.
@@ -730,6 +779,7 @@ impl RightPane {
             }
             (KeyCode::Char('G'), m) if m.contains(KeyModifiers::SHIFT) => {
                 self.comment_cursor = last;
+                self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
             // `m` marks the focused activity row as read — the

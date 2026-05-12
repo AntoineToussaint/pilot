@@ -675,3 +675,70 @@ fn cursor_move_clears_undo_target() {
     );
     assert!(!rp.can_undo_mark_read(), "moving the cursor invalidates undo");
 }
+
+#[test]
+fn cursor_walks_long_thread_with_scroll_following() {
+    // Long PR thread (40 comments). Render at a small height that
+    // fits ~8 cards. The first frame establishes `last_visible_cards`
+    // by rendering at the small height. Then j past the visible
+    // window — comment_scroll must advance so the cursor stays
+    // on-screen.
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 40)));
+    // Force the cards loop by rendering once at a small body height.
+    // Activity body takes about ~12 lines per card collapsed +
+    // header + breathing; at height 20 we get ~1-2 cards visible.
+    let _ = render_to_string(&mut rp, 80, 20, true);
+    let visible_after_first_render = rp.comment_scroll();
+    assert_eq!(visible_after_first_render, 0, "scroll starts at top");
+    // Walk down 15 rows. The cursor should still be on-screen,
+    // meaning scroll has advanced.
+    for _ in 0..15 {
+        rp.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut Vec::new(),
+        );
+    }
+    assert_eq!(rp.comment_cursor(), 15, "cursor advanced 15 times");
+    assert!(
+        rp.comment_scroll() > 0,
+        "scroll must have advanced past 0 to keep the cursor visible; got {}",
+        rp.comment_scroll()
+    );
+    assert!(
+        rp.comment_cursor() >= rp.comment_scroll(),
+        "cursor never falls behind the top of the viewport"
+    );
+}
+
+#[test]
+fn page_down_jumps_by_visible_window() {
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 40)));
+    let _ = render_to_string(&mut rp, 80, 20, true);
+    let start = rp.comment_cursor();
+    rp.handle_key(
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        &mut Vec::new(),
+    );
+    assert!(rp.comment_cursor() > start, "PageDown moves the cursor down");
+}
+
+#[test]
+fn page_up_walks_back() {
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 40)));
+    let _ = render_to_string(&mut rp, 80, 20, true);
+    for _ in 0..15 {
+        rp.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut Vec::new(),
+        );
+    }
+    let mid = rp.comment_cursor();
+    rp.handle_key(
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        &mut Vec::new(),
+    );
+    assert!(rp.comment_cursor() < mid, "PageUp walks back");
+}

@@ -113,9 +113,13 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 
 | Key | Action |
 |---|---|
-| `j/k` | Scroll the activity feed |
+| `j/k` | Navigate the activity feed (scroll follows the cursor) |
+| `PageUp/PageDown` | Jump by a screenful |
 | `g/G` | Top / bottom |
+| `h/l` (or `←/→`) | Collapse / expand the focused comment |
 | `m` | Mark the focused comment as read |
+| `z` | Undo the most recent auto-mark-read |
+| `Enter/Space/o` | Collapse / expand the whole Activity section |
 
 **Cross-pane** (works from Sidebar OR Activity):
 
