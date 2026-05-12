@@ -990,8 +990,13 @@ async fn rescope_removes_workspaces_with_no_active_session() {
 
     // Simulate a new poll that returns only `#current` — `#stale`
     // fell out of scope (filter change, repo unsubscribed, …).
-    let polled = vec![WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#current")))];
-    polling::rescope(&config, &polled).await;
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &make_task("o/r#current"),
+        ))],
+        any_source_succeeded: true,
+    };
+    polling::rescope(&config, &outcome).await;
 
     let after: Vec<String> = config
         .store
@@ -1029,11 +1034,14 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
 
     // Poll returns only `#kept-elsewhere` — `#alive` is out of
     // scope but has a live terminal.
-    let polled = vec![WorkspaceKey::new(pilot_core::workspace_key_for(
-        &make_task("o/r#kept-elsewhere"),
-    ))];
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &make_task("o/r#kept-elsewhere"),
+        ))],
+        any_source_succeeded: true,
+    };
     let mut state = polling::TickState::default();
-    polling::rescope_with_state(&config, &polled, &mut state).await;
+    polling::rescope_with_state(&config, &outcome, &mut state).await;
 
     // Drain bus_rx, capture the prompt(s).
     let mut prompts = 0;
@@ -1047,7 +1055,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     // Critical: a second rescope with the same input should NOT
     // re-prompt. State threading dedupes — without it, every 60s
     // tick would re-fire the same modal at the user.
-    polling::rescope_with_state(&config, &polled, &mut state).await;
+    polling::rescope_with_state(&config, &outcome, &mut state).await;
     let mut prompts2 = 0;
     while let Ok(evt) = bus_rx.try_recv() {
         if matches!(evt, Event::WorkspaceOutOfScope { .. }) {
@@ -1065,4 +1073,58 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
         .map(|r| r.key)
         .collect();
     assert!(after.iter().any(|k| k.contains("alive")));
+}
+
+#[tokio::test]
+async fn rescope_with_empty_but_successful_poll_still_cleans_up() {
+    // User had a wide filter, polled saw 10 PRs. Then they narrow
+    // it to "only assigned to me" and they have none. polled is
+    // empty but the poll itself succeeded. Existing workspaces in
+    // the store must be removed — otherwise narrowing your filter
+    // leaves ghost rows in the sidebar.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#ghost-1")).await;
+    polling::upsert(&config, make_task("o/r#ghost-2")).await;
+    let outcome = polling::TickOutcome {
+        polled: vec![],
+        any_source_succeeded: true,
+    };
+    polling::rescope(&config, &outcome).await;
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.is_empty(),
+        "successful but empty poll should still clean up: got {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn rescope_with_all_sources_failed_skips_cleanup() {
+    // Different case: poll attempted but every source errored
+    // (network down, rate limit, …). polled is empty AND
+    // any_source_succeeded is false. We must NOT remove anything;
+    // a transient network blip shouldn't wipe the sidebar.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#keep-me")).await;
+    let outcome = polling::TickOutcome {
+        polled: vec![],
+        any_source_succeeded: false,
+    };
+    polling::rescope(&config, &outcome).await;
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k.contains("keep-me")),
+        "all-failed poll must not remove anything: got {after:?}"
+    );
 }

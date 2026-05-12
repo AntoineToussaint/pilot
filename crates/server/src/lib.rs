@@ -436,8 +436,8 @@ impl Server {
                                     );
                                     return;
                                 }
-                                let polled = polling::tick(&cfg, &sources).await;
-                                polling::rescope(&cfg, &polled).await;
+                                let outcome = polling::tick(&cfg, &sources).await;
+                                polling::rescope(&cfg, &outcome).await;
                             });
                         }
                         pilot_ipc::Command::PostReply { session_key, body } => {

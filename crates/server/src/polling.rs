@@ -464,7 +464,7 @@ pub async fn default_sources(
 
 /// Run one poll tick: every source is called once and its tasks are
 /// upserted. Errors from one source don't stop the others.
-pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) -> Vec<WorkspaceKey> {
+pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) -> TickOutcome {
     let mut state = TickState::default();
     tick_with_state(config, sources, &mut state).await
 }
@@ -492,14 +492,19 @@ pub async fn tick_with_state(
     config: &ServerConfig,
     sources: &[Box<dyn TaskSource>],
     state: &mut TickState,
-) -> Vec<WorkspaceKey> {
+) -> TickOutcome {
     // Track every workspace key we upserted this tick. Callers use
     // it for "in scope" rescoping after the tick — anything in the
     // store NOT in this set is a candidate for removal.
     let mut polled: Vec<WorkspaceKey> = Vec::new();
+    // Per-source success tracking. Rescoping needs "did anyone
+    // actually report?" — a genuinely empty result set (filter
+    // matches nothing) is data; "all sources errored" is not.
+    let mut any_source_succeeded = false;
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
+                any_source_succeeded = true;
                 let count = tasks.len();
                 tracing::info!(source = source.name(), count, "poll succeeded");
                 for task in tasks {
@@ -552,7 +557,20 @@ pub async fn tick_with_state(
             }
         }
     }
-    polled
+    TickOutcome {
+        polled,
+        any_source_succeeded,
+    }
+}
+
+/// What `tick` / `tick_with_state` returns. The list of workspace
+/// keys polled into the store, plus a "did anyone actually report?"
+/// flag so callers (rescope) can distinguish "filter genuinely
+/// matches nothing today" from "every source failed".
+#[derive(Debug, Default)]
+pub struct TickOutcome {
+    pub polled: Vec<WorkspaceKey>,
+    pub any_source_succeeded: bool,
 }
 
 /// Compare `polled` against the persisted workspace set; remove
@@ -565,21 +583,25 @@ pub async fn tick_with_state(
 /// otherwise a single network blip would wipe the whole sidebar.
 /// Callers that genuinely want a fresh slate should delete
 /// workspaces directly.
-pub async fn rescope(config: &ServerConfig, polled: &[WorkspaceKey]) {
+pub async fn rescope(config: &ServerConfig, outcome: &TickOutcome) {
     let mut state = TickState::default();
-    rescope_with_state(config, polled, &mut state).await;
+    rescope_with_state(config, outcome, &mut state).await;
 }
 
 pub async fn rescope_with_state(
     config: &ServerConfig,
-    polled: &[WorkspaceKey],
+    outcome: &TickOutcome,
     state: &mut TickState,
 ) {
-    if polled.is_empty() {
+    // No source produced a successful response — every provider
+    // errored out (rate limit, network, auth). Treat as a transient
+    // hiccup and skip the rescope; otherwise a single bad minute
+    // would wipe the whole sidebar.
+    if !outcome.any_source_succeeded {
         return;
     }
     let polled_set: std::collections::HashSet<&str> =
-        polled.iter().map(|k| k.as_str()).collect();
+        outcome.polled.iter().map(|k| k.as_str()).collect();
     // Anything we polled is back in scope — drop any "already
     // prompted" memory for it so a future fall-out triggers a fresh
     // prompt.
@@ -700,12 +722,12 @@ pub fn spawn_with_sources(
         let mut ticker = tokio::time::interval(interval);
         let mut state = TickState::default();
         ticker.tick().await;
-        let polled = tick_with_state(&config, &sources, &mut state).await;
-        rescope_with_state(&config, &polled, &mut state).await;
+        let outcome = tick_with_state(&config, &sources, &mut state).await;
+        rescope_with_state(&config, &outcome, &mut state).await;
         loop {
             ticker.tick().await;
-            let polled = tick_with_state(&config, &sources, &mut state).await;
-            rescope(&config, &polled).await;
+            let outcome = tick_with_state(&config, &sources, &mut state).await;
+            rescope_with_state(&config, &outcome, &mut state).await;
         }
     })
 }
@@ -725,8 +747,8 @@ pub async fn run_one_tick(config: &ServerConfig, state: &mut TickState) {
     if sources.is_empty() {
         return;
     }
-    let polled = tick_with_state(config, &sources, state).await;
-    rescope_with_state(config, &polled, state).await;
+    let outcome = tick_with_state(config, &sources, state).await;
+    rescope_with_state(config, &outcome, state).await;
 }
 
 /// Merge `task` into the existing workspace for its workspace key
