@@ -942,6 +942,17 @@ impl<T: TerminalAdapter> Model<T> {
                         session_key,
                         body,
                     });
+                    // Footer hint so the user knows it submitted —
+                    // poll-tick brings the new comment back into
+                    // the activity feed within a few seconds (we
+                    // also kick a Refresh below so it doesn't wait
+                    // for the 60s loop).
+                    use crate::realm::components::footer::{Notice, NoticeSeverity};
+                    self.status.notice = Some(Notice::new(
+                        "Reply submitted — fetching…",
+                        NoticeSeverity::Info,
+                    ));
+                    self.send_cmd(IpcCommand::Refresh);
                 }
             }
             Msg::InputSubmitted(text) => {
@@ -1823,8 +1834,21 @@ impl<T: TerminalAdapter> Model<T> {
     fn sync_panes(&mut self) {
         let workspace = self.sidebar.selected_workspace().cloned();
         let session_key = self.sidebar.selected_workspace_key().cloned();
+        // Also forward the workspace's persisted SessionLayout to
+        // the terminal stack so the user's tile arrangement
+        // follows them across workspace switches. Each workspace's
+        // default session carries its own Tabs/Splits state; the
+        // stack used to keep whatever layout the LAST workspace
+        // had, so jumping from a split workspace to a tabs one
+        // would render the new one with the old split's tree.
+        let layout = workspace
+            .as_ref()
+            .and_then(|w| w.default_session())
+            .map(|s| s.layout.clone())
+            .unwrap_or_default();
         self.right.set_workspace(workspace);
         self.terminals.set_active_session(session_key);
+        self.terminals.set_layout(layout);
     }
 
     /// Apply the pending `--workspace [--session]` selection. One-shot

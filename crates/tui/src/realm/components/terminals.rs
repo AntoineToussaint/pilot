@@ -57,6 +57,17 @@ impl Terminals {
         self.inner.set_active_session(session);
     }
 
+    /// Replace the active layout. Used when the user navigates
+    /// between workspaces — each workspace's default session has
+    /// its own persisted SessionLayout (Tabs vs Splits with a
+    /// specific tile tree), and the terminal_stack needs to swap
+    /// to it so the panes render with the right arrangement.
+    /// Without this call, switching workspaces shows the previous
+    /// workspace's layout against the new workspace's terminals.
+    pub fn set_layout(&mut self, layout: pilot_core::SessionLayout) {
+        self.inner.set_layout(layout);
+    }
+
     /// Currently active terminal id (the one keys route to).
     pub fn active_terminal_id(&self) -> Option<TerminalId> {
         self.inner.active_terminal_id()
