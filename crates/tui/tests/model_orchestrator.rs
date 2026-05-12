@@ -267,3 +267,47 @@ fn r_mounts_reply_modal_from_right_pane() {
     m.dispatch_key(key(Key::Char('r')));
     assert_eq!(m.top_modal(), Some(&Id::Reply));
 }
+
+#[test]
+fn out_of_scope_with_active_session_queues_a_prompt() {
+    // Phase 2 of the rescope flow: when the daemon sends a
+    // `WorkspaceOutOfScope` event (a workspace fell out of the
+    // filter while having running terminals), the model must
+    // mount a Confirm modal asking the user before killing.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let target = "github:owner/repo#42";
+    m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+        workspace_key: pilot_core::WorkspaceKey::new(target),
+        label: "owner/repo#42".into(),
+        active_terminal_count: 1,
+    });
+    assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+}
+
+#[test]
+fn out_of_scope_prompts_queue_one_at_a_time() {
+    // Two workspaces fall out of scope back-to-back. Only one
+    // prompt is mounted at a time; the next surfaces when the
+    // first is dismissed.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+        workspace_key: pilot_core::WorkspaceKey::new("github:o/a#1"),
+        label: "o/a#1".into(),
+        active_terminal_count: 1,
+    });
+    m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+        workspace_key: pilot_core::WorkspaceKey::new("github:o/b#2"),
+        label: "o/b#2".into(),
+        active_terminal_count: 2,
+    });
+    assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+    // Press Esc to dismiss the first prompt (= "no, keep it").
+    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    // Next prompt should be live now.
+    assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    // Queue drained.
+    assert_eq!(m.top_modal(), None);
+}

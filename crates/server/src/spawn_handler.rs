@@ -531,8 +531,13 @@ fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(Str
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
+    env_for_repo(&cfg, &repo)
+}
+
+/// Pure-data lookup so tests don't need a real YAML on disk.
+pub(crate) fn env_for_repo(cfg: &pilot_config::Config, repo: &str) -> Vec<(String, String)> {
     cfg.repos
-        .get(&repo)
+        .get(repo)
         .map(|rc| rc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default()
 }
@@ -1116,5 +1121,93 @@ fn kind_id(kind: &TerminalKind) -> String {
         TerminalKind::Agent(id) => format!("agent:{id}"),
         TerminalKind::Shell => "shell".into(),
         TerminalKind::LogTail { path } => format!("log:{path}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Per-repo env lookup returns the expected pairs and is
+    /// case-sensitive on the repo key.
+    #[test]
+    fn env_for_repo_returns_repo_env() {
+        let mut cfg = pilot_config::Config::default();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("DATABASE_URL".to_string(), "postgres://x".to_string());
+        env.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
+        cfg.repos.insert(
+            "tensorzero/tensorzero".into(),
+            pilot_config::RepoConfig { env, mounts: vec![] },
+        );
+
+        let out = env_for_repo(&cfg, "tensorzero/tensorzero");
+        assert_eq!(out.len(), 2);
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert_eq!(map.get("DATABASE_URL").map(String::as_str), Some("postgres://x"));
+        assert_eq!(map.get("OPENAI_API_KEY").map(String::as_str), Some("sk-test"));
+    }
+
+    #[test]
+    fn env_for_repo_returns_empty_when_repo_not_configured() {
+        let cfg = pilot_config::Config::default();
+        assert!(env_for_repo(&cfg, "no/such-repo").is_empty());
+    }
+
+    #[test]
+    fn env_for_repo_case_sensitive() {
+        let mut cfg = pilot_config::Config::default();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("X".into(), "1".into());
+        cfg.repos.insert(
+            "Owner/Repo".into(),
+            pilot_config::RepoConfig { env, mounts: vec![] },
+        );
+        // Different case should miss.
+        assert!(env_for_repo(&cfg, "owner/repo").is_empty());
+        assert_eq!(env_for_repo(&cfg, "Owner/Repo").len(), 1);
+    }
+
+    #[test]
+    fn expand_tilde_replaces_leading_tilde_with_home() {
+        // SAFETY: tests in this crate run with --test-threads default.
+        // We don't read HOME elsewhere in this test file, and we
+        // restore it on exit.
+        let prior = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/tmp/fake-home"); }
+        let out = expand_tilde(std::path::Path::new("~/data"));
+        assert_eq!(out, std::path::PathBuf::from("/tmp/fake-home/data"));
+        // Non-tilde paths pass through unchanged.
+        assert_eq!(
+            expand_tilde(std::path::Path::new("/abs/path")),
+            std::path::PathBuf::from("/abs/path")
+        );
+        unsafe {
+            if let Some(p) = prior {
+                std::env::set_var("HOME", p);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn config_mounts_to_git_translates_placement() {
+        let specs = vec![
+            pilot_config::MountSpec {
+                source: std::path::PathBuf::from("/a"),
+                link_at: std::path::PathBuf::from("inside"),
+                placement: pilot_config::PlacementSpec::Inside,
+            },
+            pilot_config::MountSpec {
+                source: std::path::PathBuf::from("/b"),
+                link_at: std::path::PathBuf::from("above"),
+                placement: pilot_config::PlacementSpec::Above,
+            },
+        ];
+        let mounts = config_mounts_to_git(&specs);
+        assert_eq!(mounts.len(), 2);
+        assert!(matches!(mounts[0].placement, pilot_git_ops::Placement::Inside));
+        assert!(matches!(mounts[1].placement, pilot_git_ops::Placement::Above));
     }
 }

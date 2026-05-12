@@ -512,3 +512,74 @@ mod duration_secs {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `repos.<owner/name>.{env,mounts}` should round-trip cleanly
+    /// through serde so a hand-edited YAML survives a save_with
+    /// load → mutate → write cycle.
+    #[test]
+    fn repos_section_round_trips() {
+        let yaml = r#"
+repos:
+  tensorzero/tensorzero:
+    env:
+      DATABASE_URL: postgres://localhost/dev
+      OPENAI_API_KEY: sk-test
+    mounts:
+      - source: ~/shared/data
+        link_at: _imports/data
+        placement: inside
+      - source: /abs/path/to/scripts
+        link_at: scripts
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        let entry = cfg
+            .repos
+            .get("tensorzero/tensorzero")
+            .expect("repos.tensorzero/tensorzero block present");
+        assert_eq!(
+            entry.env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://localhost/dev")
+        );
+        assert_eq!(entry.env.get("OPENAI_API_KEY").map(String::as_str), Some("sk-test"));
+        assert_eq!(entry.mounts.len(), 2);
+        assert_eq!(entry.mounts[0].placement, PlacementSpec::Inside);
+        // Second mount omits `placement` — should default to Inside.
+        assert_eq!(entry.mounts[1].placement, PlacementSpec::Inside);
+        // Now serialize back + parse + compare.
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        let reentry = reparsed.repos.get("tensorzero/tensorzero").unwrap();
+        assert_eq!(reentry.env, entry.env);
+        assert_eq!(reentry.mounts.len(), entry.mounts.len());
+    }
+
+    /// Missing `repos:` section should land as an empty map, not
+    /// an error — additive feature must not break older configs.
+    #[test]
+    fn missing_repos_section_defaults_to_empty() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.repos.is_empty());
+    }
+
+    /// `placement: above` should parse + serialize correctly.
+    #[test]
+    fn placement_above_round_trips() {
+        let yaml = r#"
+repos:
+  o/r:
+    mounts:
+      - source: /shared
+        link_at: side
+        placement: above
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let m = &cfg.repos["o/r"].mounts[0];
+        assert_eq!(m.placement, PlacementSpec::Above);
+        let written = serde_yaml::to_string(&cfg).unwrap();
+        assert!(written.contains("placement: above"));
+    }
+}
