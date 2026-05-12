@@ -378,6 +378,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// current state instead of starting from defaults.
     pub fn cache_persisted_setup(&mut self, persisted: pilot_core::PersistedSetup) {
         self.setup.persisted = Some(persisted);
+        // Mirror narrowed-repo scopes into the sidebar so headers
+        // appear at startup, before the first poll completes.
+        self.refresh_subscribed_repos();
     }
 
     /// Hand in the editors detected at startup. The `E` shortcut
@@ -399,6 +402,21 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         self.sidebar
             .apply_inner_config(attention, collapsed_repos, agent_shortcuts);
+    }
+
+    /// Push the GitHub-style scope ids (e.g. `github:owner/repo`) the
+    /// user is subscribed to into the sidebar so a freshly-added
+    /// repo gets a header even before polling finds workspaces.
+    /// Called at startup with the persisted state and again on
+    /// every wizard Finish.
+    fn refresh_subscribed_repos(&mut self) {
+        let mut scopes = std::collections::BTreeSet::new();
+        if let Some(p) = &self.setup.persisted {
+            for set in p.selected_scopes.values() {
+                scopes.extend(set.iter().cloned());
+            }
+        }
+        self.sidebar.apply_subscribed_scopes(&scopes);
     }
 
     /// Send a command to the daemon, logging failures. Wraps the raw
@@ -956,11 +974,19 @@ impl<T: TerminalAdapter> Model<T> {
                 // flows (Settings → Add a repo) see the latest scopes.
                 self.setup.persisted =
                     Some(crate::setup_flow::outcome_to_persisted(&outcome));
+                // Push the new repo subscriptions into the sidebar so
+                // the user sees a header for the freshly-added repo
+                // even before polling finds workspaces under it.
+                self.refresh_subscribed_repos();
                 if let Some(hook) = self.setup.on_complete.as_ref() {
                     hook(outcome);
                 }
                 self.unmount_setup_modal();
                 self.send_cmd(IpcCommand::Subscribe);
+                // Kick off an immediate poll so a freshly added repo
+                // surfaces its open PRs/issues within seconds instead
+                // of waiting for the long-lived 60s loop tick.
+                self.send_cmd(IpcCommand::Refresh);
                 self.set_focus_attr();
                 if !sources.is_empty() {
                     self.show_polling(sources);

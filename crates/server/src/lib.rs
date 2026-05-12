@@ -397,12 +397,33 @@ impl Server {
                             polling::delete_workspace(&self.config, &key).await;
                         }
                         pilot_ipc::Command::Refresh => {
-                            // No-op for now: the polling loop runs on
-                            // its own interval. Wired so the catch-all
-                            // doesn't trace-log every `g` press as
-                            // "command handler not yet wired" — and so
-                            // a future manual-trigger refactor has the
-                            // arm to slot into.
+                            // Manual poll trigger. Reads the current
+                            // persisted setup off `~/.pilot/config.yaml`
+                            // (so newly-added repos are picked up
+                            // without waiting for the long-lived poll
+                            // loop to tick), builds the matching
+                            // sources, and runs ONE tick. Independent
+                            // of the long-lived poll loop — that one
+                            // keeps its own cadence.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                let setup = match pilot_config::Config::load() {
+                                    Ok(c) => persisted_from_config(&c),
+                                    Err(e) => {
+                                        tracing::warn!("Refresh: config load failed: {e}");
+                                        return;
+                                    }
+                                };
+                                let sources =
+                                    polling::sources_for(&setup, cfg.bus.clone()).await;
+                                if sources.is_empty() {
+                                    tracing::info!(
+                                        "Refresh: no sources configured — nothing to poll"
+                                    );
+                                    return;
+                                }
+                                polling::tick(&cfg, &sources).await;
+                            });
                         }
                         pilot_ipc::Command::PostReply { session_key, body } => {
                             polling::post_reply(&self.config, session_key, body).await;
@@ -450,6 +471,31 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+/// Build a `PersistedSetup` from the YAML's `setup:` section so the
+/// daemon can run a one-off poll (Command::Refresh) using the
+/// latest user-edited subscriptions, without waiting for the long-
+/// lived poll loop's next tick.
+fn persisted_from_config(c: &pilot_config::Config) -> pilot_core::PersistedSetup {
+    pilot_core::PersistedSetup {
+        enabled_providers: c.setup.providers.clone(),
+        enabled_agents: c.setup.agents.clone(),
+        provider_filters: c
+            .setup
+            .filters
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    pilot_core::ProviderConfig {
+                        enabled_keys: v.clone(),
+                    },
+                )
+            })
+            .collect(),
+        selected_scopes: c.setup.scopes.clone(),
     }
 }
 

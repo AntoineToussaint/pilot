@@ -145,6 +145,12 @@ pub struct Sidebar {
     /// Loaded from `~/.pilot/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
     attention: pilot_config::AttentionConfig,
+    /// Repos the user has subscribed to in narrowed form (e.g.
+    /// `tensorzero/tensorzero`) — fed from `selected_scopes` after
+    /// trimming the `github:` prefix and dropping org-level entries.
+    /// Used so a freshly-added repo gets a header in the sidebar
+    /// even before polling finds any open PRs/issues under it.
+    subscribed_repos: BTreeSet<String>,
 }
 
 impl Sidebar {
@@ -169,6 +175,33 @@ impl Sidebar {
             agent_shortcuts,
             running_terminals: HashMap::new(),
             attention: pilot_config::AttentionConfig::default(),
+            subscribed_repos: BTreeSet::new(),
+        }
+    }
+
+    /// Replace the set of "subscribed repo names" the sidebar should
+    /// render as empty headers when no workspaces exist under them.
+    /// Inputs are scope ids like `github:owner/repo`; the prefix is
+    /// stripped, and org-level entries (`github:owner` with no `/`)
+    /// are skipped — those mean "whole org subscription" and the
+    /// repo headers will materialize as polling finds them.
+    pub fn apply_subscribed_scopes(
+        &mut self,
+        scopes: &BTreeSet<String>,
+    ) {
+        let mut out = BTreeSet::new();
+        for id in scopes {
+            // `provider:owner/repo` → "owner/repo". Skip if there's
+            // no `/` after the prefix (org-level subscription).
+            if let Some((_, rest)) = id.split_once(':')
+                && rest.contains('/')
+            {
+                out.insert(rest.to_string());
+            }
+        }
+        if out != self.subscribed_repos {
+            self.subscribed_repos = out;
+            self.recompute_visible();
         }
     }
 
@@ -558,7 +591,7 @@ impl Sidebar {
 
         // Filter to the current mailbox. Each branch encodes ONE
         // semantic bucket — see Mailbox docs for the full picture.
-        let mut filtered: Vec<(&SessionKey, &Workspace)> = self
+        let filtered: Vec<(&SessionKey, &Workspace)> = self
             .workspaces
             .iter()
             .filter(|(_, w)| match mailbox {
@@ -594,31 +627,36 @@ impl Sidebar {
             })
             .collect();
 
-        // Group by repo. Workspaces with no primary task or no repo
-        // string land under a synthetic group so they're still visible.
+        // Group workspaces by repo. Workspaces with no primary task
+        // or no repo string land under a synthetic group so they're
+        // still visible. Within each group sort by updated_at desc
+        // so the most-recently-touched row floats to the top.
         const NO_REPO: &str = "(no repo)";
         let repo_of = |w: &Workspace| -> String {
             w.primary_task()
                 .and_then(|t| t.repo.clone())
                 .unwrap_or_else(|| NO_REPO.to_string())
         };
-        // Sort within each group by updated_at desc; group ordering is
-        // alphabetical so repo headers don't reshuffle on every poll.
-        filtered.sort_by(|(ka, a), (kb, b)| {
-            let ra = repo_of(a);
-            let rb = repo_of(b);
-            ra.cmp(&rb).then_with(|| {
-                let a_ts = a
-                    .primary_task()
-                    .map(|t| t.updated_at)
-                    .unwrap_or(a.created_at);
-                let b_ts = b
-                    .primary_task()
-                    .map(|t| t.updated_at)
-                    .unwrap_or(b.created_at);
+        let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
+        for (k, w) in &filtered {
+            by_repo.entry(repo_of(w)).or_default().push((k, w));
+        }
+        for rows in by_repo.values_mut() {
+            rows.sort_by(|(ka, a), (kb, b)| {
+                let a_ts = a.primary_task().map(|t| t.updated_at).unwrap_or(a.created_at);
+                let b_ts = b.primary_task().map(|t| t.updated_at).unwrap_or(b.created_at);
                 b_ts.cmp(&a_ts).then_with(|| ka.as_str().cmp(kb.as_str()))
-            })
-        });
+            });
+        }
+
+        // Empty-subscribed repos: render a header even when no
+        // workspace has been polled in yet. Only relevant for the
+        // Inbox mailbox — Inactive (merged/closed) and Snoozed are
+        // alternate views over the workspace set, not subscriptions.
+        let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
+        if mailbox == Mailbox::Inbox {
+            all_repos.extend(self.subscribed_repos.iter().cloned());
+        }
 
         let prior_key = self.selected_session_key().cloned();
         let prior_session = self.selected_session_id();
@@ -633,42 +671,39 @@ impl Sidebar {
         } else {
             None
         };
-        let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + 4);
+        let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + all_repos.len() + 4);
         let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
-        let mut current_repo: Option<String> = None;
-        for (k, w) in &filtered {
-            let repo = repo_of(w);
-            if current_repo.as_deref() != Some(&repo) {
-                visible.push(VisibleRow::RepoHeader(repo.clone()));
-                current_repo = Some(repo.clone());
-                summaries.entry(repo.clone()).or_default();
-            }
-            // Update this repo's summary whether or not its rows are
-            // shown — the counters reflect the underlying data, not
-            // the collapse state.
-            let summary = summaries.entry(repo.clone()).or_default();
-            summary.active += 1;
-            if workspace_needs_attention(w, &self.attention) {
-                summary.attention += 1;
-            }
-            // Skip workspace + session rows if the repo is collapsed.
-            // The header is still emitted so the user can re-expand.
-            if self.collapsed_repos.contains(&repo) {
-                continue;
-            }
-            visible.push(VisibleRow::Workspace((*k).clone()));
-            // Session sub-rows appear only when there are 2+ sessions
-            // on a workspace.
-            if w.session_count() >= 2 {
-                let mut sessions: Vec<&pilot_core::WorkspaceSession> = w.sessions.iter().collect();
-                sessions.sort_by_key(|s| s.created_at);
-                for s in sessions {
-                    visible.push(VisibleRow::Session {
-                        workspace: (*k).clone(),
-                        session_id: s.id,
-                    });
+        for repo in &all_repos {
+            visible.push(VisibleRow::RepoHeader(repo.clone()));
+            let mut summary = RepoSummary::default();
+            if let Some(rows) = by_repo.get(repo) {
+                summary.active = rows.len();
+                for (_, w) in rows {
+                    if workspace_needs_attention(w, &self.attention) {
+                        summary.attention += 1;
+                    }
+                }
+                // Skip the workspace/session rows if the repo is
+                // collapsed. Header is still emitted above so the
+                // user can re-expand.
+                if !self.collapsed_repos.contains(repo) {
+                    for (k, w) in rows {
+                        visible.push(VisibleRow::Workspace((*k).clone()));
+                        if w.session_count() >= 2 {
+                            let mut sessions: Vec<&pilot_core::WorkspaceSession> =
+                                w.sessions.iter().collect();
+                            sessions.sort_by_key(|s| s.created_at);
+                            for s in sessions {
+                                visible.push(VisibleRow::Session {
+                                    workspace: (*k).clone(),
+                                    session_id: s.id,
+                                });
+                            }
+                        }
+                    }
                 }
             }
+            summaries.insert(repo.clone(), summary);
         }
         self.visible = visible;
         self.repo_summaries = summaries;

@@ -122,6 +122,16 @@ impl Sidebar {
         self.inner.apply_config(attention, collapsed_repos, agent_shortcuts);
     }
 
+    /// Replace the set of subscribed-repo names that should show up
+    /// as headers even before polling finds anything under them.
+    /// See `Sidebar::apply_subscribed_scopes`.
+    pub fn apply_subscribed_scopes(
+        &mut self,
+        scopes: &std::collections::BTreeSet<String>,
+    ) {
+        self.inner.apply_subscribed_scopes(scopes);
+    }
+
     /// Move the cursor onto the workspace whose key matches.
     /// Returns true if found.
     pub fn focus_workspace_key(&mut self, key: &pilot_core::SessionKey) -> bool {
