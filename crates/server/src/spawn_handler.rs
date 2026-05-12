@@ -158,12 +158,26 @@ pub async fn handle_spawn(
         }
     };
 
+    // Human-readable hint the backend bakes into its session name so
+    // `tmux ls` shows something like `pilot-github-tensorzero-nanogateway-126-claude-NNNN`
+    // instead of `pilot-4`. Backends append their own uniqueness
+    // suffix (PID + counter) so the hint doesn't need to be unique.
+    let kind_label = match &kind {
+        TerminalKind::Agent(id) => id.clone(),
+        TerminalKind::Shell => "shell".into(),
+        TerminalKind::LogTail { path } => {
+            let base = path.rsplit('/').next().unwrap_or(path);
+            format!("log-{base}")
+        }
+    };
+    let hint = format!("{}-{kind_label}", session_key.as_str());
     tracing::info!(
         ?argv,
         cwd_path = ?cwd_path,
+        %hint,
         "handle_spawn: calling backend.spawn"
     );
-    let backend_key = match config.backend.spawn(&argv, cwd_path.as_deref(), &[]).await {
+    let backend_key = match config.backend.spawn(&argv, cwd_path.as_deref(), &[], &hint).await {
         Ok(k) => k,
         Err(e) => {
             tracing::error!("handle_spawn: backend.spawn failed: {e}");

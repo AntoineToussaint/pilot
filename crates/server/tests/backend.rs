@@ -19,16 +19,16 @@ fn shell_argv(cmd: &str) -> Vec<String> {
 // ---------------------------------------------------------------------
 
 async fn scenario_spawn_returns_unique_keys(b: Arc<dyn SessionBackend>) {
-    let a = b.spawn(&shell_argv("sleep 5"), None, &[]).await.unwrap();
-    let z = b.spawn(&shell_argv("sleep 5"), None, &[]).await.unwrap();
+    let a = b.spawn(&shell_argv("sleep 5"), None, &[], "test").await.unwrap();
+    let z = b.spawn(&shell_argv("sleep 5"), None, &[], "test").await.unwrap();
     assert_ne!(a, z, "each spawn yields a fresh key");
     let _ = b.kill(&a).await;
     let _ = b.kill(&z).await;
 }
 
 async fn scenario_list_reflects_live_sessions(b: Arc<dyn SessionBackend>) {
-    let a = b.spawn(&shell_argv("sleep 5"), None, &[]).await.unwrap();
-    let z = b.spawn(&shell_argv("sleep 5"), None, &[]).await.unwrap();
+    let a = b.spawn(&shell_argv("sleep 5"), None, &[], "test").await.unwrap();
+    let z = b.spawn(&shell_argv("sleep 5"), None, &[], "test").await.unwrap();
     let ls = b.list().await.unwrap();
     assert!(ls.contains(&a), "list missing {a}: {ls:?}");
     assert!(ls.contains(&z), "list missing {z}: {ls:?}");
@@ -46,6 +46,7 @@ async fn scenario_subscribe_streams_and_closes(b: Arc<dyn SessionBackend>) {
             &shell_argv("sleep 1; printf 'pilot-marker'; sleep 1"),
             None,
             &[],
+            "test",
         )
         .await
         .unwrap();
@@ -79,7 +80,7 @@ async fn scenario_write_unknown_returns_not_found(b: Arc<dyn SessionBackend>) {
 }
 
 async fn scenario_kill_is_idempotent(b: Arc<dyn SessionBackend>) {
-    let key = b.spawn(&shell_argv("sleep 5"), None, &[]).await.unwrap();
+    let key = b.spawn(&shell_argv("sleep 5"), None, &[], "test").await.unwrap();
     b.kill(&key).await.unwrap();
     // Callers may not know the first kill already happened (race
     // between user input and natural exit) — second kill must succeed.
@@ -89,7 +90,7 @@ async fn scenario_kill_is_idempotent(b: Arc<dyn SessionBackend>) {
 async fn scenario_wait_exit_caches(b: Arc<dyn SessionBackend>) {
     // The pump task in spawn_handler calls wait_exit once; tests +
     // future code may call again. Trait contract: cached, repeatable.
-    let key = b.spawn(&shell_argv("exit 7"), None, &[]).await.unwrap();
+    let key = b.spawn(&shell_argv("exit 7"), None, &[], "test").await.unwrap();
     let first = tokio::time::timeout(Duration::from_secs(5), b.wait_exit(&key))
         .await
         .expect("first wait_exit completes");

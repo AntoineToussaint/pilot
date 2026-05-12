@@ -115,22 +115,23 @@ impl TmuxBackend {
         })
     }
 
-    fn alloc_key(&self) -> String {
+    fn alloc_key(&self, hint: &str) -> String {
         let n = self.next_key.fetch_add(1, Ordering::Relaxed);
-        // Include this pilot process's PID. Without it, a fresh
-        // pilot launch starts counting at 1 and collides with any
-        // tmux session called `pilot-N` left behind by a previous
-        // pilot run that crashed or was killed mid-session —
-        // `tmux new-session -s pilot-N` errors with "duplicate
-        // session", which surfaced as "press s for shell, see
-        // 'Spawning shell…', nothing happens."
+        // Format: `pilot-{hint}-{pid}-{n}`. The hint is a readable
+        // seed (`nanogateway-126-claude`) so `tmux ls` shows what
+        // each session is for; PID + counter guarantee uniqueness
+        // across pilot launches (PIDs aren't reused while in-use)
+        // and within a single process. Recovery is name-agnostic
+        // so old sessions still get reattached by their existing
+        // names on restart.
         //
-        // PID + counter is unique within a process and unique
-        // across processes (PIDs aren't reused while still in use
-        // by surviving tmux sessions). Recovery is name-agnostic
-        // so old `pilot-N` sessions still get reattached on
-        // restart.
-        format!("pilot-{}-{n}", std::process::id())
+        // Sanitize the hint: tmux session names can't contain
+        // '.', ':', or whitespace. Replace any with '-'.
+        let safe: String = hint
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect();
+        format!("pilot-{safe}-{}-{n}", std::process::id())
     }
 
     /// Run `tmux -L <socket> -f <config> ...args`. Captures stdout +
@@ -233,12 +234,13 @@ impl SessionBackend for TmuxBackend {
         argv: &'a [String],
         cwd: Option<&'a Path>,
         env: &'a [(String, String)],
+        hint: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
         Box::pin(async move {
             if argv.is_empty() {
                 return Err(BackendError::Spawn("empty argv".into()));
             }
-            let key = self.alloc_key();
+            let key = self.alloc_key(hint);
 
             // Build `tmux new-session -d -s <key> -x <cols> -y <rows> [-c <cwd>] -- <argv...>`.
             // Detached session — we attach our own client below.

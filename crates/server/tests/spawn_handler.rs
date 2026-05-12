@@ -282,6 +282,7 @@ async fn recover_sessions_reattaches_survivors() {
             &["/bin/sh".into(), "-c".into(), "sleep 30".into()],
             None,
             &[],
+            "preexisting",
         )
         .await
         .unwrap();

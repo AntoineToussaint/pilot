@@ -45,9 +45,15 @@ impl RawPtyBackend {
         }
     }
 
-    fn alloc_key(&self) -> String {
+    fn alloc_key(&self, hint: &str) -> String {
         let n = self.next_key.fetch_add(1, Ordering::Relaxed);
-        format!("raw-{n}")
+        // Sanitize the hint the same way the tmux backend does so
+        // logs reading both backends look consistent.
+        let safe: String = hint
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect();
+        format!("raw-{safe}-{n}")
     }
 }
 
@@ -67,6 +73,7 @@ impl SessionBackend for RawPtyBackend {
         argv: &'a [String],
         cwd: Option<&'a Path>,
         env: &'a [(String, String)],
+        hint: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
         Box::pin(async move {
             let size = PtySize {
@@ -83,7 +90,7 @@ impl SessionBackend for RawPtyBackend {
             )
             .map_err(|e| BackendError::Spawn(e.to_string()))?;
             let pty = Arc::new(pty);
-            let key = self.alloc_key();
+            let key = self.alloc_key(hint);
             let slot = Slot {
                 pty: pty.clone(),
                 exit: Arc::new(Mutex::new(None)),

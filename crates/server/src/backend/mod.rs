@@ -82,11 +82,19 @@ pub trait SessionBackend: Send + Sync + 'static {
     /// Spawn a fresh session. Returns the backend's stable key for
     /// this session — opaque to callers. The server pairs it with a
     /// `TerminalId` for wire use.
+    ///
+    /// `hint` is a short human-readable seed the backend should bake
+    /// into the visible key (`tmux ls` shows this). Typically
+    /// `{workspace_slug}-{kind_label}`. The backend is allowed to
+    /// suffix with a counter / PID to guarantee uniqueness, but the
+    /// hint should remain readable so users grepping their tmux
+    /// session list can see what each one belongs to.
     fn spawn<'a>(
         &'a self,
         argv: &'a [String],
         cwd: Option<&'a Path>,
         env: &'a [(String, String)],
+        hint: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>>;
 
     /// Write bytes to the session's stdin.
