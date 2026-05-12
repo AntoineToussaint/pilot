@@ -117,7 +117,20 @@ impl TmuxBackend {
 
     fn alloc_key(&self) -> String {
         let n = self.next_key.fetch_add(1, Ordering::Relaxed);
-        format!("pilot-{n}")
+        // Include this pilot process's PID. Without it, a fresh
+        // pilot launch starts counting at 1 and collides with any
+        // tmux session called `pilot-N` left behind by a previous
+        // pilot run that crashed or was killed mid-session —
+        // `tmux new-session -s pilot-N` errors with "duplicate
+        // session", which surfaced as "press s for shell, see
+        // 'Spawning shell…', nothing happens."
+        //
+        // PID + counter is unique within a process and unique
+        // across processes (PIDs aren't reused while still in use
+        // by surviving tmux sessions). Recovery is name-agnostic
+        // so old `pilot-N` sessions still get reattached on
+        // restart.
+        format!("pilot-{}-{n}", std::process::id())
     }
 
     /// Run `tmux -L <socket> -f <config> ...args`. Captures stdout +
