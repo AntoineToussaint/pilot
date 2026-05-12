@@ -63,6 +63,11 @@ pub enum Id {
     /// previous component at this id and mounts the next; only one
     /// setup step is ever live.
     Setup,
+    /// Confirm dialog asking the user to remove a workspace that fell
+    /// out of scope while having running terminals. The pending
+    /// workspace_key lives in `pending_removal_prompt` so the
+    /// `Msg::Confirmed(true)` handler knows what to delete.
+    RemoveOutOfScope,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -180,6 +185,15 @@ pub struct Model<T: TerminalAdapter> {
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
     pending_reply: Option<pilot_core::SessionKey>,
+    /// Workspaces that fell out of scope (filter / scope change) but
+    /// have running terminals — the daemon won't auto-remove those.
+    /// Each `WorkspaceOutOfScope` event lands here; one at a time
+    /// gets surfaced as a Confirm modal so the user decides whether
+    /// to kill the running sessions.
+    pending_removal_prompts: std::collections::VecDeque<(pilot_core::WorkspaceKey, String, usize)>,
+    /// Workspace currently being prompted about. Set when the
+    /// RemoveOutOfScope modal mounts; consumed by `Msg::Confirmed`.
+    active_removal_prompt: Option<pilot_core::WorkspaceKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -271,6 +285,8 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
+            pending_removal_prompts: std::collections::VecDeque::new(),
+            active_removal_prompt: None,
             status: StatusCtx::new(),
         }
     }
@@ -873,7 +889,36 @@ impl<T: TerminalAdapter> Model<T> {
                     let step = runner.step_dismissed();
                     self.handle_runner_step(runner, step);
                 } else {
+                    // If the dismissed modal was the out-of-scope
+                    // prompt, that's a "no, keep this workspace"
+                    // answer. Drop the active prompt and surface the
+                    // next queued one (if any).
+                    let dismissing_removal_prompt =
+                        matches!(self.modal_stack.last(), Some(Id::RemoveOutOfScope));
                     self.pop_modal();
+                    if dismissing_removal_prompt {
+                        self.active_removal_prompt = None;
+                        self.maybe_mount_next_removal_prompt();
+                    }
+                }
+            }
+            Msg::Confirmed(yes) => {
+                // Today only the out-of-scope removal prompt uses
+                // this. If a different Confirm modal pops in the
+                // future, dispatch by `self.modal_stack.last()`.
+                let was_removal_prompt =
+                    matches!(self.modal_stack.last(), Some(Id::RemoveOutOfScope));
+                self.pop_modal();
+                if was_removal_prompt {
+                    let target = self.active_removal_prompt.take();
+                    if yes
+                        && let Some(workspace_key) = target
+                    {
+                        // Kill terminals + delete workspace.
+                        let session_key: pilot_core::SessionKey = (&workspace_key).into();
+                        self.send_cmd(IpcCommand::Kill { session_key });
+                    }
+                    self.maybe_mount_next_removal_prompt();
                 }
             }
             Msg::TextareaSubmitted(body) => {
@@ -944,9 +989,6 @@ impl<T: TerminalAdapter> Model<T> {
                 tracing::info!(
                     "polling completed with empty inbox; queries seen: {queries:?}"
                 );
-            }
-            _ => {
-                self.pop_modal();
             }
         }
     }
@@ -1592,6 +1634,37 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// If there's a queued "out-of-scope workspace has active
+    /// sessions" prompt and no modal is currently up, mount it. The
+    /// user's answer (Y → kill, N/Esc → keep) is handled in the
+    /// `Msg::Confirmed` / `Msg::ModalDismissed` arms.
+    fn maybe_mount_next_removal_prompt(&mut self) {
+        use crate::realm::components::confirm::Confirm;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+
+        if !self.modal_stack.is_empty() {
+            return;
+        }
+        let Some((workspace_key, label, count)) = self.pending_removal_prompts.pop_front() else {
+            return;
+        };
+        let runner_label = if count == 1 {
+            format!("{label} is no longer in your filter scope but has 1 running terminal — kill and remove?")
+        } else {
+            format!("{label} is no longer in your filter scope but has {count} running terminals — kill and remove?")
+        };
+        let modal = Confirm::new(runner_label).default_no();
+        self.active_removal_prompt = Some(workspace_key);
+        let _ = self.app.mount(
+            Id::RemoveOutOfScope,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::RemoveOutOfScope);
+        let _ = self.app.active(&Id::RemoveOutOfScope);
+        self.redraw = true;
+    }
+
     /// Push a modal.
     pub fn push_modal(&mut self, id: Id) {
         self.modal_stack.push(id.clone());
@@ -1627,6 +1700,26 @@ impl<T: TerminalAdapter> Model<T> {
         let is_snapshot = matches!(&event, IpcEvent::Snapshot { .. });
         let is_spawn =
             matches!(&event, IpcEvent::TerminalSpawned { .. } | IpcEvent::TerminalFocusRequested { .. });
+
+        // Out-of-scope workspaces with running terminals — queue a
+        // Confirm prompt before killing anything. Don't forward the
+        // event to panes; they'd just ignore it anyway and a queued
+        // prompt is the only reasonable response.
+        if let IpcEvent::WorkspaceOutOfScope {
+            workspace_key,
+            label,
+            active_terminal_count,
+        } = &event
+        {
+            self.pending_removal_prompts.push_back((
+                workspace_key.clone(),
+                label.clone(),
+                *active_terminal_count,
+            ));
+            self.maybe_mount_next_removal_prompt();
+            self.redraw = true;
+            return;
+        }
         self.sidebar.on_daemon_event(&event);
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);

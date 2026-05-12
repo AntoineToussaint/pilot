@@ -571,11 +571,14 @@ pub async fn rescope(config: &ServerConfig, polled: &[WorkspaceKey]) {
         }
     };
 
+    // Per session_key → count of live terminals. Lets us both
+    // detect "has active session" and report the count to the user
+    // when prompting.
     let terminal_meta = config.terminal_meta.lock().await;
-    let active_session_keys: std::collections::HashSet<String> = terminal_meta
-        .values()
-        .map(|(sk, _)| sk.as_str().to_string())
-        .collect();
+    let mut active_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (sk, _) in terminal_meta.values() {
+        *active_counts.entry(sk.as_str().to_string()).or_default() += 1;
+    }
     drop(terminal_meta);
 
     for r in records {
@@ -583,18 +586,43 @@ pub async fn rescope(config: &ServerConfig, polled: &[WorkspaceKey]) {
             continue;
         }
         let key = WorkspaceKey::new(r.key.clone());
-        // Skip workspaces that have an active terminal — removing
-        // them would yank the rug out from under the user's running
-        // agent. Phase 2 will prompt for these.
-        if active_session_keys.contains(r.key.as_str()) {
-            tracing::info!(
-                workspace_key = %r.key,
-                "rescope: out of scope but has active session(s) — kept"
-            );
-            continue;
+        match active_counts.get(r.key.as_str()).copied() {
+            None | Some(0) => {
+                // Safe to remove silently: nothing's running.
+                tracing::info!(
+                    workspace_key = %r.key,
+                    "rescope: removing out-of-scope workspace"
+                );
+                delete_workspace(config, &key).await;
+            }
+            Some(count) => {
+                // Has active sessions — ask the user. Build a short
+                // label from the stored workspace JSON if available;
+                // fall back to the raw key.
+                let label = r
+                    .workspace_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<pilot_core::Workspace>(json).ok())
+                    .and_then(|w| w.primary_task().map(|t| {
+                        match (&t.repo, &t.id.key) {
+                            (Some(repo), num) if !num.is_empty() => format!("{repo}#{num}"),
+                            (Some(repo), _) => repo.clone(),
+                            (None, _) => r.key.clone(),
+                        }
+                    }))
+                    .unwrap_or_else(|| r.key.clone());
+                tracing::info!(
+                    workspace_key = %r.key,
+                    active = count,
+                    "rescope: out of scope with active sessions — prompting"
+                );
+                let _ = config.bus.send(Event::WorkspaceOutOfScope {
+                    workspace_key: key,
+                    label,
+                    active_terminal_count: count,
+                });
+            }
         }
-        tracing::info!(workspace_key = %r.key, "rescope: removing out-of-scope workspace");
-        delete_workspace(config, &key).await;
     }
 }
 

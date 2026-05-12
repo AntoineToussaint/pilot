@@ -397,6 +397,23 @@ pub enum Event {
     /// async-channel overhead.
     WorkspaceUpserted(Box<pilot_core::Workspace>),
     WorkspaceRemoved(pilot_core::WorkspaceKey),
+    /// Daemon detected that this workspace fell out of scope (the
+    /// user removed its repo, narrowed the filter so its task no
+    /// longer matches, etc.) AND it has running terminals. The
+    /// daemon does NOT auto-delete; instead it sends this event so
+    /// the TUI can ask the user whether to kill the running sessions
+    /// or keep the workspace anyway. The TUI responds with either
+    /// `Command::Kill { session_key }` (drop everything) or by doing
+    /// nothing (workspace stays out-of-scope but visible).
+    WorkspaceOutOfScope {
+        workspace_key: pilot_core::WorkspaceKey,
+        /// Human-readable label for the confirm modal (e.g.
+        /// `tensorzero/foo#42`).
+        label: String,
+        /// Number of live terminals (Claude/codex/shell/…) the user
+        /// would lose if they confirm removal.
+        active_terminal_count: usize,
+    },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and
     /// also when the daemon auto-creates a session for a workspace-
