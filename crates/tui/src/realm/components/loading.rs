@@ -98,16 +98,39 @@ impl Loading {
         self
     }
 
-    fn take_result(&mut self) -> Option<LoadingPayload> {
-        let rx = self.rx.as_ref()?;
+    fn take_result(&mut self) -> TakeOutcome {
+        let Some(rx) = self.rx.as_ref() else {
+            return TakeOutcome::Done;
+        };
         match rx.try_recv() {
             Ok(v) => {
                 self.rx = None;
-                Some(v)
+                TakeOutcome::Got(v)
             }
-            Err(_) => None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => TakeOutcome::Pending,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // Producer task dropped its sender without sending —
+                // most commonly because it panicked. Without this
+                // branch the modal stayed up forever and the user
+                // had to press Esc. Treat as cancel so the caller
+                // (setup runner / partial flow) gets a chance to
+                // back out gracefully.
+                self.rx = None;
+                TakeOutcome::Cancelled
+            }
         }
     }
+}
+
+enum TakeOutcome {
+    Got(LoadingPayload),
+    /// No data yet; channel still open. Caller keeps ticking.
+    Pending,
+    /// Producer dropped its sender without delivering. Modal should
+    /// dismiss so the user isn't stuck staring at a spinner.
+    Cancelled,
+    /// Already-resolved on a prior tick; nothing to do.
+    Done,
 }
 
 impl Component for Loading {
@@ -185,12 +208,24 @@ impl AppComponent<Msg, UserEvent> for Loading {
             // emits `Event::Tick` based on `EventListenerCfg::tick_interval`.
             Event::Tick => {
                 self.spinner_idx = self.spinner_idx.wrapping_add(1);
-                if let Some(payload) = self.take_result() {
-                    return Some(Msg::LoadingResolved(crate::realm::model::PayloadCarrier(
-                        std::sync::Arc::new(std::sync::Mutex::new(Some(payload))),
-                    )));
+                match self.take_result() {
+                    TakeOutcome::Got(payload) => {
+                        Some(Msg::LoadingResolved(crate::realm::model::PayloadCarrier(
+                            std::sync::Arc::new(std::sync::Mutex::new(Some(payload))),
+                        )))
+                    }
+                    TakeOutcome::Cancelled => {
+                        // Producer task died (panic, dropped sender,
+                        // etc.) — dismiss the modal so the user
+                        // isn't stuck on a forever spinner.
+                        tracing::warn!(
+                            label = %self.label,
+                            "Loading modal producer dropped sender without delivering — dismissing"
+                        );
+                        Some(Msg::ModalDismissed)
+                    }
+                    TakeOutcome::Pending | TakeOutcome::Done => None,
                 }
-                None
             }
             _ => None,
         }
