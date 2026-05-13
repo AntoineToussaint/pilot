@@ -751,7 +751,27 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
         .filter_map(|r| r.submitted_at)
         .max();
     if let Some(other) = last_others_review {
-        let my_latest = my_last_comment;
+        // "Our last review/comment" — a user who reviewed but never
+        // commented previously fell through `my_last_comment = None`
+        // and got falsely flagged as owing a reply.
+        let my_last_review = pr
+            .reviews
+            .nodes
+            .iter()
+            .filter(|r| {
+                r.author
+                    .as_ref()
+                    .map(|a| a.login == my_username)
+                    .unwrap_or(false)
+            })
+            .filter_map(|r| r.submitted_at)
+            .max();
+        let my_latest = match (my_last_comment, my_last_review) {
+            (Some(c), Some(r)) => Some(c.max(r)),
+            (Some(c), None) => Some(c),
+            (None, Some(r)) => Some(r),
+            (None, None) => None,
+        };
         if my_latest.map(|m| other > m).unwrap_or(true) {
             return true;
         }
@@ -1252,6 +1272,106 @@ mod tests {
         let task = issue_to_task(&issue, "alice");
         assert!(task.needs_reply);
         assert_eq!(task.last_commenter.as_deref(), Some("bob"));
+    }
+
+    fn make_pr(number: u64, author: &str) -> GqlPr {
+        GqlPr {
+            id: Some(format!("PR_{number}")),
+            number,
+            title: "test".into(),
+            body: None,
+            url: format!("https://github.com/o/r/pull/{number}"),
+            updated_at: chrono::Utc::now(),
+            is_draft: false,
+            state: "OPEN".into(),
+            merged: false,
+            additions: 0,
+            deletions: 0,
+            head_ref_name: "feature".into(),
+            base_ref_name: "main".into(),
+            mergeable: None,
+            merge_state_status: None,
+            review_decision: None,
+            auto_merge_request: None,
+            is_in_merge_queue: false,
+            author: Some(GqlAuthor {
+                login: author.into(),
+            }),
+            labels: GqlLabels { nodes: vec![] },
+            assignees: GqlAssignees { nodes: vec![] },
+            review_requests: GqlReviewRequests { nodes: vec![] },
+            comments: GqlComments { nodes: vec![] },
+            reviews: GqlReviews { nodes: vec![] },
+            review_threads: GqlReviewThreads { nodes: vec![] },
+            commits: GqlCommits { nodes: vec![] },
+        }
+    }
+
+    fn ts(secs_offset: i64) -> DateTime<Utc> {
+        chrono::Utc::now() + chrono::Duration::seconds(secs_offset)
+    }
+
+    /// Regression: a user who reviewed-but-didn't-comment was falsely
+    /// flagged as owing a reply because `my_latest` only looked at the
+    /// comment timestamp. Their review should count as a response.
+    #[test]
+    fn needs_reply_false_when_my_review_supersedes_others_review() {
+        let mut pr = make_pr(1, "bob");
+        pr.reviews = GqlReviews {
+            nodes: vec![
+                GqlReview {
+                    author: Some(GqlAuthor {
+                        login: "bob".into(),
+                    }),
+                    body: Some("please review".into()),
+                    state: "COMMENTED".into(),
+                    submitted_at: Some(ts(-100)),
+                },
+                GqlReview {
+                    author: Some(GqlAuthor {
+                        login: "alice".into(),
+                    }),
+                    body: Some("looks good".into()),
+                    state: "APPROVED".into(),
+                    submitted_at: Some(ts(-10)),
+                },
+            ],
+        };
+        assert!(
+            !needs_reply_check(&pr, "alice"),
+            "alice reviewed after bob — should NOT need reply even though she never commented"
+        );
+    }
+
+    /// Inverse: if their review is newer than my review AND I never
+    /// commented, I do owe a reply.
+    #[test]
+    fn needs_reply_true_when_others_review_supersedes_mine() {
+        let mut pr = make_pr(2, "bob");
+        pr.reviews = GqlReviews {
+            nodes: vec![
+                GqlReview {
+                    author: Some(GqlAuthor {
+                        login: "alice".into(),
+                    }),
+                    body: Some("approve".into()),
+                    state: "APPROVED".into(),
+                    submitted_at: Some(ts(-100)),
+                },
+                GqlReview {
+                    author: Some(GqlAuthor {
+                        login: "bob".into(),
+                    }),
+                    body: Some("nit found".into()),
+                    state: "CHANGES_REQUESTED".into(),
+                    submitted_at: Some(ts(-10)),
+                },
+            ],
+        };
+        assert!(
+            needs_reply_check(&pr, "alice"),
+            "bob reviewed after alice — alice owes a reply"
+        );
     }
 
     #[test]
