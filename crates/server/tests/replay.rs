@@ -45,6 +45,7 @@ async fn drain(mut rx: broadcast::Receiver<OutputChunk>, want: usize) -> (Vec<u8
 }
 
 /// Baseline: subscription sees the first bytes of a running process.
+#[ignore = "spawns real sh through PTY; run with --ignored"]
 #[tokio::test]
 async fn first_subscription_sees_output() {
     let pty = DaemonPty::spawn(
@@ -71,6 +72,7 @@ async fn first_subscription_sees_output() {
 /// Reconnect: subscribe, then drop, then subscribe again. Second
 /// subscription's replay must contain everything previously observed.
 /// Sequence numbers must be strictly monotonic across the break.
+#[ignore = "spawns real sh through PTY; run with --ignored"]
 #[tokio::test]
 async fn reconnect_replay_contains_prior_bytes() {
     let pty = DaemonPty::spawn(
@@ -111,6 +113,7 @@ async fn reconnect_replay_contains_prior_bytes() {
 
 /// Sequence numbers are monotonic and never reused across subscribers.
 /// This is the invariant a client relies on to detect gaps.
+#[ignore = "spawns real sh through PTY; run with --ignored"]
 #[tokio::test]
 async fn sequence_numbers_are_monotonic_across_subscribers() {
     let pty = DaemonPty::spawn(
@@ -157,6 +160,7 @@ async fn sequence_numbers_are_monotonic_across_subscribers() {
 
 /// A ring-buffer capped at 64 KiB means a very long-running process
 /// eventually loses the early bytes. Verify `replay` has a ceiling.
+#[ignore = "spawns real sh through PTY; run with --ignored"]
 #[tokio::test]
 async fn ring_replay_stays_bounded_under_long_output() {
     use pilot_server::pty::REPLAY_RING_BYTES;

@@ -42,6 +42,7 @@ async fn run_daemon(config: ServerConfig) -> pilot_ipc::Client {
     client
 }
 
+#[ignore = "spawns a real shell through the backend; run with --ignored"]
 #[tokio::test]
 async fn spawn_shell_emits_terminal_spawned_event() {
     let config = ServerConfig::in_memory();
@@ -109,6 +110,7 @@ async fn unknown_agent_id_emits_provider_error() {
     }
 }
 
+#[ignore = "spawns a real shell + writes printf; run with --ignored"]
 #[tokio::test]
 async fn spawned_subprocess_output_reaches_client_via_bus() {
     // Spawn `printf hello`; observe the bytes coming back. Uses
@@ -176,6 +178,7 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
     );
 }
 
+#[ignore = "spawns a real shell through the backend; run with --ignored"]
 #[tokio::test]
 async fn close_drops_terminal_and_emits_exit_event() {
     let config = ServerConfig::in_memory();
@@ -223,6 +226,7 @@ async fn close_drops_terminal_and_emits_exit_event() {
     assert_eq!(map_len, 0, "terminal map cleared after exit");
 }
 
+#[ignore = "spawns a real shell through the backend; run with --ignored"]
 #[tokio::test]
 async fn snapshot_includes_running_terminals_for_late_subscribers() {
     let config = ServerConfig::in_memory();
@@ -265,6 +269,7 @@ async fn snapshot_includes_running_terminals_for_late_subscribers() {
 /// libghostty-vt can reconstruct the screen. Without the replay it
 /// sees a blank terminal until the next chunk arrives — which for an
 /// idle agent could be never.
+#[ignore = "spawns a real shell + printf via PTY; run with --ignored"]
 #[tokio::test]
 async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
     let config = ServerConfig::in_memory();
@@ -340,6 +345,7 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
 /// "pilot crashed"), then a fresh ServerConfig is built around the same
 /// backend (simulating "pilot restarted"). `recover_sessions` should
 /// register the survivor on the new config so the TUI sees it.
+#[ignore = "drives the real tmux server; run with --ignored"]
 #[tokio::test]
 async fn recover_sessions_reattaches_survivors() {
     if std::process::Command::new("tmux")

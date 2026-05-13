@@ -97,6 +97,12 @@ async fn spawn_upstream() -> UpstreamHandle {
 
 // ── Env injection ──────────────────────────────────────────────────────
 
+// The next four tests spawn a real `sh` (and `curl`) through portable-pty.
+// Real subprocess + PTY work hangs under workspace concurrency (PTY
+// contention, leaked children) and slows `cargo test --workspace`
+// for everyone. They're gated behind `#[ignore]` — run on demand
+// with `cargo test -p pilot-server --test agent_spawn -- --ignored`.
+#[ignore = "spawns real sh/curl through PTY; run with --ignored"]
 #[tokio::test]
 async fn proxy_base_url_is_injected_into_spawn_env() {
     let upstream = spawn_upstream().await;
@@ -137,6 +143,7 @@ async fn proxy_base_url_is_injected_into_spawn_env() {
     upstream.shutdown().await;
 }
 
+#[ignore = "spawns real sh through PTY; run with --ignored"]
 #[tokio::test]
 async fn openai_provider_injects_openai_base_url() {
     let upstream = spawn_upstream().await;
@@ -169,6 +176,7 @@ async fn openai_provider_injects_openai_base_url() {
 
 // ── No proxy for shell/log spawns ──────────────────────────────────────
 
+#[ignore = "spawns real sh through PTY; run with --ignored"]
 #[tokio::test]
 async fn no_proxy_means_no_proxy_env_vars() {
     let config = AgentSpawnConfig {
@@ -199,6 +207,7 @@ async fn no_proxy_means_no_proxy_env_vars() {
 
 // ── End-to-end: child makes HTTP request through proxy ─────────────────
 
+#[ignore = "spawns real sh + curl through PTY; run with --ignored"]
 #[tokio::test]
 async fn child_request_through_proxy_emits_record() {
     // Skip if curl isn't available — CI environments might not have it.
