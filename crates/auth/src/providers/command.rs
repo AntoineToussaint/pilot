@@ -46,8 +46,13 @@ impl CredentialProvider for CommandProvider {
         // this, the daemon's polling task blocks indefinitely on
         // first launch — pilot looks frozen.
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        // kill_on_drop so a timeout actually kills the child. Without
+        // this, every hung `gh auth token` leaks a process that lives
+        // until it exits on its own — and on a flaky network they can
+        // pile up.
         let run = tokio::process::Command::new(&self.program)
             .args(&self.args)
+            .kill_on_drop(true)
             .output();
         let output = match tokio::time::timeout(TIMEOUT, run).await {
             Ok(Ok(out)) => out,
