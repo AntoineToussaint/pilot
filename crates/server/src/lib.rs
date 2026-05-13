@@ -439,18 +439,26 @@ impl Server {
                                 };
                                 let sources =
                                     polling::sources_for(&setup, cfg.bus.clone()).await;
-                                if sources.is_empty() {
-                                    tracing::info!(
-                                        "Refresh: no sources configured — nothing to poll"
-                                    );
-                                    return;
-                                }
                                 // Share TickState with the long-lived
                                 // poll loop so a prompt dismissed here
                                 // stays dismissed there (and vice versa).
                                 let mut state = cfg.poll_state.lock().await;
-                                let outcome =
-                                    polling::tick_with_state(&cfg, &sources, &mut state).await;
+                                let outcome = if sources.is_empty() {
+                                    // User just disabled every provider.
+                                    // Treat as a deliberately empty
+                                    // result so existing workspaces
+                                    // get rescoped out instead of
+                                    // frozen in the sidebar.
+                                    tracing::info!(
+                                        "Refresh: no sources configured — rescoping with empty result"
+                                    );
+                                    polling::TickOutcome {
+                                        polled: vec![],
+                                        any_source_succeeded: true,
+                                    }
+                                } else {
+                                    polling::tick_with_state(&cfg, &sources, &mut state).await
+                                };
                                 polling::rescope_with_state(&cfg, &outcome, &mut state).await;
                             });
                         }

@@ -745,10 +745,21 @@ pub async fn run_one_tick(config: &ServerConfig) {
         }
     };
     let sources = sources_for(&setup, config.bus.clone()).await;
+    let mut state = config.poll_state.lock().await;
     if sources.is_empty() {
+        // User disabled every provider (or credentials all
+        // failed to resolve). Treat as "deliberately empty
+        // result" — rescope so existing workspaces actually
+        // disappear from the sidebar. Without this, unchecking
+        // every provider leaves the inbox frozen with stale
+        // rows that no current poll source could produce.
+        let outcome = TickOutcome {
+            polled: vec![],
+            any_source_succeeded: true,
+        };
+        rescope_with_state(config, &outcome, &mut state).await;
         return;
     }
-    let mut state = config.poll_state.lock().await;
     let outcome = tick_with_state(config, &sources, &mut state).await;
     rescope_with_state(config, &outcome, &mut state).await;
 }
