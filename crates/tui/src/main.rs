@@ -309,6 +309,7 @@ async fn run_embedded_realm(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
             agent_shortcuts,
+            user_config.setup.default_agent.clone(),
         );
         model = model.with_splits(
             user_config.ui.sidebar_pct,

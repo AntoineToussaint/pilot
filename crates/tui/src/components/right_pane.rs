@@ -79,6 +79,14 @@ pub struct RightPane {
     /// by index because activity ordering is stable within a workspace
     /// (newest-first); cleared on workspace change.
     expanded_activities: HashSet<usize>,
+    /// Activity rows the user has multi-selected with `v`. `f` reads
+    /// this set to build the "address these comments" prompt. Cleared
+    /// on workspace change. Empty set = `f` falls back to the row
+    /// under the cursor.
+    selected_activities: HashSet<usize>,
+    /// Agent the `f` (fix) shortcut spawns. Configurable via YAML
+    /// (`setup.default_agent`); defaults to `"claude"`.
+    default_agent: String,
 }
 
 /// How long the cursor has to sit on an unread row before we
@@ -101,7 +109,21 @@ impl RightPane {
             mark_armed_at: None,
             last_marked_read: None,
             expanded_activities: HashSet::new(),
+            selected_activities: HashSet::new(),
+            default_agent: "claude".to_string(),
         }
+    }
+
+    /// Override the agent the `f` (fix) shortcut spawns. AppRoot
+    /// wires this from `setup.default_agent` in YAML.
+    pub fn with_default_agent(mut self, agent: impl Into<String>) -> Self {
+        self.default_agent = agent.into();
+        self
+    }
+
+    /// Replace the default agent at runtime (used by `apply_config`).
+    pub fn set_default_agent(&mut self, agent: impl Into<String>) {
+        self.default_agent = agent.into();
     }
 
     /// Returns the auto-mark progress as `(elapsed_ratio, label)` if
@@ -265,6 +287,7 @@ impl RightPane {
             // Indices are workspace-relative; an "expanded row 3" on
             // PR A points at a wholly different comment on PR B.
             self.expanded_activities.clear();
+            self.selected_activities.clear();
         }
         self.auto_collapse_for_workspace();
     }
@@ -548,6 +571,17 @@ impl RightPane {
                 bar_glyph,
                 Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
             ));
+            // Multi-select indicator. Drawn before the kind glyph so
+            // the user can see at-a-glance which rows are in the `f`
+            // batch even when the cursor sits elsewhere.
+            if self.selected_activities.contains(&i) {
+                header_spans.push(Span::styled(
+                    "● ",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             header_spans.push(Span::styled(
                 format!("{kind_icon}  {kind_label}  "),
                 Style::default().fg(theme.text_dim),
@@ -673,6 +707,8 @@ impl RightPane {
             Binding { keys: "j/k", label: "scroll" },
             Binding { keys: "→/←", label: "expand/collapse" },
             Binding { keys: "r", label: "reply" },
+            Binding { keys: "v", label: "select" },
+            Binding { keys: "f", label: "fix selected" },
             Binding { keys: "g/G", label: "top/bottom" },
             Binding { keys: "Enter/o", label: "toggle section" },
             Binding { keys: "Tab", label: "next pane" },
@@ -782,6 +818,41 @@ impl RightPane {
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
+            // `v` toggles the focused activity row into / out of the
+            // selection set. `f` consumes the set (or the cursor row
+            // when it's empty) and spawns the default agent with a
+            // pre-built "address these comments" prompt.
+            (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                if !workspace.activity.is_empty() {
+                    if !self.selected_activities.remove(&self.comment_cursor) {
+                        self.selected_activities.insert(self.comment_cursor);
+                    }
+                }
+                PaneOutcome::Consumed
+            }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                let indices: Vec<usize> = if self.selected_activities.is_empty() {
+                    if workspace.activity.is_empty() {
+                        return PaneOutcome::Consumed;
+                    }
+                    vec![self.comment_cursor]
+                } else {
+                    let mut v: Vec<usize> = self.selected_activities.iter().copied().collect();
+                    v.sort();
+                    v
+                };
+                let prompt = build_address_comments_prompt(workspace, &indices);
+                let session_key = pilot_core::SessionKey::from(&workspace.key);
+                cmds.push(Command::Spawn {
+                    session_key,
+                    session_id: None,
+                    kind: pilot_ipc::TerminalKind::Agent(self.default_agent.clone()),
+                    cwd: None,
+                    initial_prompt: Some(prompt),
+                });
+                self.selected_activities.clear();
+                PaneOutcome::Consumed
+            }
             // `m` marks the focused activity row as read — the
             // explicit per-row counterpart to the sidebar's bulk
             // `m` (which marks the whole workspace). Auto-mark-on-
@@ -863,5 +934,53 @@ impl RightPane {
 
         let _ = self.render_activity(chunks[2], frame, focused);
     }
+}
+
+/// Build the agent prompt for the `f`-on-selection flow. The agent
+/// lands in the workspace's worktree, so it has `gh` and `git` and
+/// the checked-out branch right there — the prompt focuses on what
+/// the work is rather than how to fetch context.
+fn build_address_comments_prompt(workspace: &Workspace, indices: &[usize]) -> String {
+    let pr_summary = workspace
+        .pr
+        .as_ref()
+        .map(|pr| {
+            let n = pr
+                .id
+                .key
+                .rsplit_once('#')
+                .map(|(_, n)| n)
+                .unwrap_or(&pr.id.key);
+            let repo = pr.repo.as_deref().unwrap_or("unknown");
+            let branch = pr.branch.as_deref().unwrap_or("unknown");
+            format!("PR #{n} in {repo} (branch `{branch}`)")
+        })
+        .unwrap_or_else(|| format!("workspace {}", workspace.key));
+
+    let mut comments = String::new();
+    for (i, idx) in indices.iter().enumerate() {
+        let Some(act) = workspace.activity.get(*idx) else {
+            continue;
+        };
+        comments.push_str(&format!("\n[{}] {} on {}:\n", i + 1, act.author, act.created_at));
+        if let Some(path) = &act.path {
+            if let Some(line) = act.line {
+                comments.push_str(&format!("    file: {path}:{line}\n"));
+            } else {
+                comments.push_str(&format!("    file: {path}\n"));
+            }
+        }
+        for line in act.body.lines() {
+            comments.push_str(&format!("    {line}\n"));
+        }
+    }
+
+    format!(
+        "Address the following review comments on {pr_summary}:{comments}\n\n\
+         For each comment: investigate, fix the code (or push back with a clear \
+         technical rationale), then commit. When all the comments are addressed and \
+         local checks pass, push the branch. After the push lands, reply to each \
+         comment with the commit SHA and a one-line explanation of the change."
+    )
 }
 

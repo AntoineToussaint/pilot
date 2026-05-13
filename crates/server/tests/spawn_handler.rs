@@ -56,6 +56,7 @@ async fn spawn_shell_emits_terminal_spawned_event() {
             session_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
+            initial_prompt: None,
         })
         .unwrap();
 
@@ -88,6 +89,7 @@ async fn unknown_agent_id_emits_provider_error() {
             session_id: None,
             kind: TerminalKind::Agent("does-not-exist".into()),
             cwd: None,
+            initial_prompt: None,
         })
         .unwrap();
 
@@ -125,6 +127,7 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
             session_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
+            initial_prompt: None,
         })
         .unwrap();
 
@@ -186,6 +189,7 @@ async fn close_drops_terminal_and_emits_exit_event() {
             session_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
+            initial_prompt: None,
         })
         .unwrap();
 
@@ -232,6 +236,7 @@ async fn snapshot_includes_running_terminals_for_late_subscribers() {
             session_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
+            initial_prompt: None,
         })
         .unwrap();
     let _ = wait_for(
@@ -273,6 +278,7 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
             session_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
+            initial_prompt: None,
         })
         .unwrap();
     let spawned = wait_for(

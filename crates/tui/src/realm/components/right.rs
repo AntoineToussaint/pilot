@@ -42,6 +42,12 @@ impl Right {
         self.inner.set_workspace(workspace);
     }
 
+    /// Forward the YAML-configured `setup.default_agent` to the inner
+    /// pane so `f`-on-selection spawns the user's preferred agent.
+    pub fn set_default_agent(&mut self, agent: impl Into<String>) {
+        self.inner.set_default_agent(agent);
+    }
+
     /// Drain queued IPC commands.
     pub fn drain_cmds(&mut self) -> Vec<IpcCommand> {
         std::mem::take(&mut self.pending_cmds)

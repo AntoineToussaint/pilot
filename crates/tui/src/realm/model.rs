@@ -415,9 +415,15 @@ impl<T: TerminalAdapter> Model<T> {
         attention: pilot_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
         agent_shortcuts: std::collections::HashMap<char, String>,
+        default_agent: Option<String>,
     ) {
+        // Both panes consume the configured agent: sidebar `f` for
+        // CI-fail, right pane `f` for selected comments.
+        if let Some(agent) = default_agent.clone().filter(|s| !s.is_empty()) {
+            self.right.set_default_agent(agent);
+        }
         self.sidebar
-            .apply_inner_config(attention, collapsed_repos, agent_shortcuts);
+            .apply_inner_config(attention, collapsed_repos, agent_shortcuts, default_agent);
     }
 
     /// Push the GitHub-style scope ids (e.g. `github:owner/repo`) the
@@ -496,6 +502,7 @@ impl<T: TerminalAdapter> Model<T> {
                     session_id: None,
                     kind: pilot_ipc::TerminalKind::Shell,
                     cwd: None,
+                    initial_prompt: None,
                 });
                 self.status.notice = Some(Notice::new(
                     format!(
@@ -816,6 +823,7 @@ impl<T: TerminalAdapter> Model<T> {
                             session_id: None,
                             kind: pilot_ipc::TerminalKind::Shell,
                             cwd: None,
+                            initial_prompt: None,
                         });
                         use crate::realm::components::footer::{
                             Notice, NoticeSeverity,

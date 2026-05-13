@@ -252,6 +252,13 @@ pub enum Command {
         session_id: Option<pilot_core::SessionId>,
         kind: TerminalKind,
         cwd: Option<String>,
+        /// Optional initial prompt the daemon should inject after the
+        /// agent reaches its ready state. Drives the `f`-for-fix flow:
+        /// sidebar/activity panes pre-build the agent instruction so
+        /// the user doesn't have to retype it. Ignored for `Shell` —
+        /// shells don't define `Agent::inject_prompt`.
+        #[serde(default)]
+        initial_prompt: Option<String>,
     },
     Write {
         terminal_id: TerminalId,

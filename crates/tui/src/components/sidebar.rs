@@ -151,6 +151,9 @@ pub struct Sidebar {
     /// Used so a freshly-added repo gets a header in the sidebar
     /// even before polling finds any open PRs/issues under it.
     subscribed_repos: BTreeSet<String>,
+    /// Agent the `f` (fix) shortcut spawns. Defaults to `claude`; the
+    /// AppRoot can override from YAML (`setup.default_agent`).
+    default_agent: String,
 }
 
 impl Sidebar {
@@ -176,7 +179,15 @@ impl Sidebar {
             running_terminals: HashMap::new(),
             attention: pilot_config::AttentionConfig::default(),
             subscribed_repos: BTreeSet::new(),
+            default_agent: "claude".to_string(),
         }
+    }
+
+    /// Override the agent the `f` (fix) shortcut spawns. Defaults to
+    /// `claude` when not configured; AppRoot wires this from YAML.
+    pub fn with_default_agent(mut self, agent: impl Into<String>) -> Self {
+        self.default_agent = agent.into();
+        self
     }
 
     /// Replace the set of "subscribed repo names" the sidebar should
@@ -214,11 +225,15 @@ impl Sidebar {
         attention: pilot_config::AttentionConfig,
         collapsed_repos: BTreeSet<String>,
         agent_shortcuts: HashMap<char, String>,
+        default_agent: Option<String>,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
         if !agent_shortcuts.is_empty() {
             self.agent_shortcuts = agent_shortcuts;
+        }
+        if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
+            self.default_agent = agent;
         }
     }
 
@@ -257,6 +272,47 @@ impl Sidebar {
             VisibleRow::Session { session_id, .. } => Some(*session_id),
             _ => None,
         }
+    }
+
+    /// If the row under the cursor is a PR with `ci == Fail`, return
+    /// `(session_key, fix_prompt)` ready for `Command::Spawn`. None
+    /// otherwise — used both by the `f` keybinding match guard and
+    /// by the hint bar so the key only advertises when it'll fire.
+    pub fn fix_target_for_cursor(&self) -> Option<(SessionKey, String)> {
+        let workspace = self.selected_workspace()?;
+        let pr = workspace.pr.as_ref()?;
+        if pr.ci != pilot_core::CiStatus::Failure {
+            return None;
+        }
+        let session_key = SessionKey::from(&workspace.key);
+
+        let pr_number = pr
+            .id
+            .key
+            .rsplit_once('#')
+            .map(|(_, n)| n)
+            .unwrap_or(&pr.id.key);
+        let repo = pr.repo.as_deref().unwrap_or("unknown");
+        let branch = pr.branch.as_deref().unwrap_or("unknown");
+        let failing_checks: Vec<&str> = pr
+            .checks
+            .iter()
+            .filter(|c| c.status == pilot_core::CiStatus::Failure)
+            .map(|c| c.name.as_str())
+            .collect();
+        let checks_block = if failing_checks.is_empty() {
+            "Run `gh pr checks` to enumerate the failing checks.".to_string()
+        } else {
+            format!("Failing checks: {}.", failing_checks.join(", "))
+        };
+        let prompt = format!(
+            "CI is failing on PR #{pr_number} in {repo} (branch `{branch}`). \
+             {checks_block} \
+             Investigate via `gh pr checks {pr_number}` and `gh run view --log-failed` for each failing run, \
+             reproduce the failure locally where possible, fix it, run the relevant local checks until they pass, \
+             then commit and `git push`. Reply when CI is green again."
+        );
+        Some((session_key, prompt))
     }
 
     /// Read-only view of the rendered rows. Tests + the layout helper
@@ -788,6 +844,7 @@ impl Sidebar {
             Binding { keys: "c", label: "claude" },
             Binding { keys: "x", label: "codex" },
             Binding { keys: "u", label: "cursor" },
+            Binding { keys: "f", label: "fix CI" },
             Binding { keys: "m", label: "mark all read" },
             Binding { keys: "/", label: "search" },
         ]
@@ -872,6 +929,7 @@ impl Sidebar {
                         session_id: self.selected_session_id(),
                         kind: TerminalKind::Agent(agent_id),
                         cwd: None,
+                        initial_prompt: None,
                     });
                 } else {
                     tracing::warn!(
@@ -881,6 +939,29 @@ impl Sidebar {
                 }
                 PaneOutcome::Consumed
             }
+            // `f` for fix — spawn the default agent in the focused
+            // workspace's worktree, pre-loaded with a prompt asking it
+            // to fix the current CI failure. Only active when the
+            // primary task has `ci == CiStatus::Fail`; otherwise we
+            // hide the binding so the hint bar doesn't lie about it.
+            (KeyCode::Char('f'), KeyModifiers::NONE)
+                if self.fix_target_for_cursor().is_some() =>
+            {
+                let Some((session_key, prompt)) = self.fix_target_for_cursor() else {
+                    return PaneOutcome::Consumed;
+                };
+                let agent_id = self.default_agent.clone();
+                tracing::info!(%session_key, %agent_id, "sidebar: emitting Spawn(Agent) with fix prompt");
+                cmds.push(Command::Spawn {
+                    session_key,
+                    session_id: self.selected_session_id(),
+                    kind: TerminalKind::Agent(agent_id),
+                    cwd: None,
+                    initial_prompt: Some(prompt),
+                });
+                PaneOutcome::Consumed
+            }
+
             // `s` for shell — used to be `b` (for "bash") but the
             // hint bar reads better as "S shell / C claude / X codex /
             // U cursor" all-lowercase, and `s` is mnemonic.
@@ -892,6 +973,7 @@ impl Sidebar {
                         session_id: self.selected_session_id(),
                         kind: TerminalKind::Shell,
                         cwd: None,
+                        initial_prompt: None,
                     });
                 } else {
                     tracing::warn!(

@@ -75,6 +75,10 @@ pub struct SetupSection {
     pub filters: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Per-provider scope ids (orgs / repos).
     pub scopes: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Agent id the `f` (fix) shortcut spawns. Empty / unset →
+    /// pilot falls back to `"claude"`.
+    #[serde(default)]
+    pub default_agent: Option<String>,
 }
 
 /// One entry under `editors:`. Args support `{path}` for the

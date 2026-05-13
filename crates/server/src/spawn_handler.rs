@@ -98,12 +98,14 @@ pub async fn handle_spawn(
     session_id: Option<SessionId>,
     kind: TerminalKind,
     cwd: Option<String>,
+    initial_prompt: Option<String>,
 ) {
     tracing::info!(
         %session_key,
         ?session_id,
         ?kind,
         cwd = ?cwd,
+        has_initial_prompt = initial_prompt.is_some(),
         "handle_spawn: entry"
     );
     // Singleton enforcement at the daemon (the source of truth for
@@ -246,6 +248,9 @@ pub async fn handle_spawn(
         TerminalKind::Agent(id) => config.agents.get(id),
         _ => None,
     };
+    // Clone before the pump task takes ownership of `agent_for_pump`;
+    // the post-spawn `initial_prompt` injector needs its own handle.
+    let agent_for_inject = agent_for_pump.clone();
     let session_key_for_pump = session_key.clone();
     // Broadcast BEFORE spawning the pump task. Otherwise a
     // fast-exiting terminal (e.g. a command that immediately
@@ -368,6 +373,53 @@ pub async fn handle_spawn(
         terminal_meta_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
     });
+
+    // Schedule prompt injection. Drives the `f`-for-fix flow: the
+    // sidebar / activity pane spawn an agent with a pre-built
+    // instruction so the user doesn't have to retype it.
+    //
+    // Wait for the agent to start `Asking` (its first prompt screen)
+    // before writing. Typing into Claude during its banner boot drops
+    // keystrokes onto the wrong UI surface and the prompt ends up
+    // half-eaten. Timeout after 10s and write anyway — better a
+    // garbled prompt than a silently-lost one.
+    if let (Some(prompt), Some(agent)) = (initial_prompt, &agent_for_inject) {
+        let agent = agent.clone();
+        let bytes = agent.inject_prompt(&prompt);
+        let backend = config.backend.clone();
+        let states = config.agent_states.clone();
+        let backend_key = backend_key.clone();
+        let id = terminal_id;
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let ready = states
+                    .lock()
+                    .await
+                    .get(&id)
+                    .copied()
+                    .map(|s| s == pilot_ipc::AgentState::Asking)
+                    .unwrap_or(false);
+                if ready {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        terminal_id = ?id,
+                        "initial_prompt: agent never reached Asking within 10s — writing anyway"
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            if let Err(e) = backend.write(&backend_key, &bytes).await {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    "initial_prompt: backend.write failed: {e}"
+                );
+            }
+        });
+    }
 }
 
 /// Look up the session whose worktree this Spawn should land in.
@@ -1156,7 +1208,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 "restoring session {:?} in workspace {}",
                 kind, workspace.key
             );
-            handle_spawn(config, session_key.clone(), Some(session.id), kind, None).await;
+            handle_spawn(config, session_key.clone(), Some(session.id), kind, None, None).await;
         }
     }
 }

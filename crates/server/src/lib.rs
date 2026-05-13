@@ -266,13 +266,20 @@ impl Server {
                                 terminals,
                             });
                         }
-                        pilot_ipc::Command::Spawn { session_key, session_id, kind, cwd } => {
+                        pilot_ipc::Command::Spawn {
+                            session_key,
+                            session_id,
+                            kind,
+                            cwd,
+                            initial_prompt,
+                        } => {
                             spawn_handler::handle_spawn(
                                 &self.config,
                                 session_key,
                                 session_id,
                                 kind,
                                 cwd,
+                                initial_prompt,
                             )
                             .await;
                         }

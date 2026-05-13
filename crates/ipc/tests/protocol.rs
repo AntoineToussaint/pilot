@@ -59,12 +59,14 @@ fn all_commands() -> Vec<Command> {
             session_id: None,
             kind: TerminalKind::Agent("claude".into()),
             cwd: Some("/tmp".into()),
+            initial_prompt: None,
         },
         Command::Spawn {
             session_key: key.clone(),
             session_id: Some(pilot_core::SessionId::new()),
             kind: TerminalKind::Shell,
             cwd: None,
+            initial_prompt: None,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -73,6 +75,7 @@ fn all_commands() -> Vec<Command> {
                 path: "/var/log/x.log".into(),
             },
             cwd: None,
+            initial_prompt: Some("fix the failing CI".into()),
         },
         Command::CreateSession {
             session_key: key.clone(),

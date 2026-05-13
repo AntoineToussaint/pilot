@@ -1001,6 +1001,7 @@ impl TerminalStack {
             session_id: None,
             kind: TerminalKind::Shell,
             cwd: None,
+            initial_prompt: None,
         });
     }
 
