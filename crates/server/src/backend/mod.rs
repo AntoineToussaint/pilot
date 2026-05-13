@@ -29,8 +29,10 @@ use std::path::Path;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 
+pub mod mock;
 pub mod raw_pty;
 pub mod tmux;
+pub use mock::MockBackend;
 pub use raw_pty::RawPtyBackend;
 pub use tmux::TmuxBackend;
 

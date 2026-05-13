@@ -97,6 +97,22 @@ pub enum AgentSpawnError {
 ///   `Event::ProxyRecord` through the IPC server channel.
 /// - Shutting down the returned `ProxyServer` when the PTY exits
 ///   (otherwise the proxy keeps its port bound forever).
+/// Inject the proxy base-URL env var when a proxy was attached.
+/// Pure helper — pulled out of `spawn_with_proxy` so tests can verify
+/// env injection without starting a real PTY or proxy.
+///
+/// `extra_env` is mutated in place; the function returns it for
+/// fluency.
+pub fn inject_proxy_env(
+    extra_env: &mut HashMap<String, String>,
+    proxy: Option<&ProxyTarget>,
+    proxy_listen_url: Option<&str>,
+) {
+    if let (Some(target), Some(url)) = (proxy, proxy_listen_url) {
+        extra_env.insert(target.provider.env_var().to_string(), url.to_string());
+    }
+}
+
 pub async fn spawn_with_proxy(mut config: AgentSpawnConfig) -> Result<AgentSpawn, AgentSpawnError> {
     let (proxy, records) = match &config.proxy {
         Some(target) => {
@@ -111,10 +127,7 @@ pub async fn spawn_with_proxy(mut config: AgentSpawnConfig) -> Result<AgentSpawn
                 config.session_key.as_str(),
                 target.upstream
             );
-            // Inject the base-URL env var for the agent.
-            config
-                .extra_env
-                .insert(target.provider.env_var().to_string(), url);
+            inject_proxy_env(&mut config.extra_env, Some(target), Some(&url));
             (Some(server), Some(rx))
         }
         None => (None, None),

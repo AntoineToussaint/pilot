@@ -65,8 +65,11 @@ run-test: ## Run pilot with --test (tempdir + seeded session, no GitHub).
 run-connect: ## Connect to a running daemon socket. Usage: make run-connect SOCKET=/path
 	@$(MAKE) run ARGS="--connect $(SOCKET)"
 
-test: ## Run all tests.
-	@PATH="$(PINNED_PATH)" cargo test --workspace
+test: ## Run all tests (cargo-nextest enforces a 10s per-test deadline).
+	@PATH="$(PINNED_PATH)" cargo nextest run --workspace
+
+test-ignored: ## Run #[ignore]'d real-backend integration tests on demand.
+	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --run-ignored only
 
 lint: ## Run clippy with workspace lint config (vendored crates excluded).
 	@PATH="$(PINNED_PATH)" cargo clippy --workspace --tests

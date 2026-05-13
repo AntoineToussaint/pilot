@@ -212,9 +212,27 @@ impl ServerConfig {
         }
     }
 
-    /// Convenience: in-memory config. Never touches the filesystem.
+    /// Convenience: in-memory store + `MockBackend`. Never touches
+    /// the filesystem, never spawns a real subprocess. The default
+    /// for unit tests — see `in_memory_with_mock` when the test
+    /// needs to drive the backend (inject output, finish a session).
     pub fn in_memory() -> Self {
-        Self::with_store(Arc::new(MemoryStore::new()))
+        Self::with_store_and_backend(
+            Arc::new(MemoryStore::new()),
+            Arc::new(backend::MockBackend::new()),
+        )
+    }
+
+    /// Like `in_memory`, but also returns the typed `MockBackend`
+    /// handle so the test can call `emit`, `finish`, `writes_for`,
+    /// etc. against the same backend the daemon is using.
+    pub fn in_memory_with_mock() -> (Self, backend::MockBackend) {
+        let mock = backend::MockBackend::new();
+        let config = Self::with_store_and_backend(
+            Arc::new(MemoryStore::new()),
+            Arc::new(mock.clone()),
+        );
+        (config, mock)
     }
 }
 

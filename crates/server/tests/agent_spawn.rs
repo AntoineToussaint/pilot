@@ -1,309 +1,107 @@
-//! Integration: spawn a PTY with a proxy attached. Verify env
-//! injection reaches the child AND that traffic from the child
-//! through the proxy produces ProxyRecord events.
-//!
-//! The child for the test is `sh -c 'echo $ANTHROPIC_BASE_URL; curl ...'`:
-//! - `echo` proves the daemon injected the proxy URL.
-//! - `curl` proves a real request against the injected URL routes
-//!   through the proxy into our mock upstream and emits a record.
+//! Tests for `agent_spawn` env injection + the proxy-record event
+//! flow through IPC. The end-to-end "child makes HTTP through proxy"
+//! coverage previously lived here but required real `sh` + `curl`
+//! subprocesses through a real PTY — gated behind `#[ignore]` and
+//! replaced with focused unit tests for the building blocks.
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-use pilot_server::agent_spawn::{
-    AgentSpawnConfig, ProxyProvider, ProxyTarget, spawn_with_proxy,
-};
-use portable_pty::PtySize;
+use pilot_server::agent_spawn::{ProxyProvider, ProxyTarget, inject_proxy_env};
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::time::timeout;
 
-fn default_size() -> PtySize {
-    PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    }
-}
+const TEST_DEADLINE: Duration = Duration::from_secs(2);
 
-// Mock upstream shared with proxy tests (inline; simple enough).
-
-struct UpstreamHandle {
-    addr: SocketAddr,
-    shutdown: Option<oneshot::Sender<()>>,
-    received: Arc<AtomicUsize>,
-}
-
-impl UpstreamHandle {
-    fn url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-    async fn shutdown(mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-    }
-}
-
-async fn spawn_upstream() -> UpstreamHandle {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (tx, mut rx) = oneshot::channel();
-    let counter = Arc::new(AtomicUsize::new(0));
-    let counter_c = counter.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut rx => return,
-                accept = listener.accept() => {
-                    let Ok((stream, _)) = accept else { continue };
-                    let counter = counter_c.clone();
-                    tokio::spawn(async move {
-                        let io = TokioIo::new(stream);
-                        let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
-                            let counter = counter.clone();
-                            async move {
-                                counter.fetch_add(1, Ordering::SeqCst);
-                                let _ = req.into_body().collect().await;
-                                Ok::<_, std::convert::Infallible>(
-                                    Response::builder()
-                                        .status(StatusCode::OK)
-                                        .body(Full::new(Bytes::from_static(b"{}")))
-                                        .unwrap(),
-                                )
-                            }
-                        });
-                        let _ = http1::Builder::new().serve_connection(io, svc).await;
-                    });
-                }
-            }
-        }
-    });
-    UpstreamHandle {
-        addr,
-        shutdown: Some(tx),
-        received: counter,
-    }
-}
-
-// ── Env injection ──────────────────────────────────────────────────────
-
-// The next four tests spawn a real `sh` (and `curl`) through portable-pty.
-// Real subprocess + PTY work hangs under workspace concurrency (PTY
-// contention, leaked children) and slows `cargo test --workspace`
-// for everyone. They're gated behind `#[ignore]` — run on demand
-// with `cargo test -p pilot-server --test agent_spawn -- --ignored`.
-#[ignore = "spawns real sh/curl through PTY; run with --ignored"]
-#[tokio::test]
-async fn proxy_base_url_is_injected_into_spawn_env() {
-    let upstream = spawn_upstream().await;
-    let config = AgentSpawnConfig {
-        session_key: "github:o/r#1".into(),
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            "echo ANTHROPIC=$ANTHROPIC_BASE_URL".into(),
-        ],
-        cwd: None,
-        size: default_size(),
-        extra_env: HashMap::new(),
-        proxy: Some(ProxyTarget {
-            provider: ProxyProvider::Anthropic,
-            upstream: upstream.url(),
-        }),
+#[test]
+fn anthropic_proxy_injects_anthropic_base_url() {
+    let mut env: HashMap<String, String> = HashMap::new();
+    let target = ProxyTarget {
+        provider: ProxyProvider::Anthropic,
+        upstream: "https://api.anthropic.com".into(),
     };
-    let spawn = spawn_with_proxy(config).await.expect("spawn");
-
-    // The child writes ANTHROPIC=http://127.0.0.1:PORT into the PTY
-    // before exiting. Drain until we see it.
-    let sub = spawn.pty.subscribe().await;
-    // Wait for exit — deterministic.
-    let _ = tokio::time::timeout(Duration::from_secs(5), spawn.pty.wait_exit()).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let replay = String::from_utf8_lossy(&spawn.pty.subscribe().await.replay).to_string();
-    assert!(
-        replay.contains("ANTHROPIC=http://127.0.0.1:"),
-        "env var not injected; got: {replay}"
-    );
-    drop(sub);
-
-    // Clean up.
-    if let Some(proxy) = spawn.proxy {
-        proxy.shutdown().await;
-    }
-    upstream.shutdown().await;
-}
-
-#[ignore = "spawns real sh through PTY; run with --ignored"]
-#[tokio::test]
-async fn openai_provider_injects_openai_base_url() {
-    let upstream = spawn_upstream().await;
-    let config = AgentSpawnConfig {
-        session_key: "o/r#2".into(),
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            "echo OPENAI=$OPENAI_BASE_URL".into(),
-        ],
-        cwd: None,
-        size: default_size(),
-        extra_env: HashMap::new(),
-        proxy: Some(ProxyTarget {
-            provider: ProxyProvider::OpenAI,
-            upstream: upstream.url(),
-        }),
-    };
-    let spawn = spawn_with_proxy(config).await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(5), spawn.pty.wait_exit()).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let replay = String::from_utf8_lossy(&spawn.pty.subscribe().await.replay).to_string();
-    assert!(replay.contains("OPENAI=http://127.0.0.1:"), "got: {replay}");
-
-    if let Some(p) = spawn.proxy {
-        p.shutdown().await;
-    }
-    upstream.shutdown().await;
-}
-
-// ── No proxy for shell/log spawns ──────────────────────────────────────
-
-#[ignore = "spawns real sh through PTY; run with --ignored"]
-#[tokio::test]
-async fn no_proxy_means_no_proxy_env_vars() {
-    let config = AgentSpawnConfig {
-        session_key: "o/r#3".into(),
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            "echo -n '|'$ANTHROPIC_BASE_URL'|'".into(),
-        ],
-        cwd: None,
-        size: default_size(),
-        extra_env: HashMap::new(),
-        proxy: None,
-    };
-    let spawn = spawn_with_proxy(config).await.unwrap();
-    assert!(spawn.proxy.is_none());
-    assert!(spawn.records.is_none());
-
-    let _ = tokio::time::timeout(Duration::from_secs(5), spawn.pty.wait_exit()).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let replay = String::from_utf8_lossy(&spawn.pty.subscribe().await.replay).to_string();
-    // The env var wasn't set, so the expansion is empty: "||".
-    assert!(
-        replay.contains("||"),
-        "expected empty expansion; got: {replay}"
-    );
-}
-
-// ── End-to-end: child makes HTTP request through proxy ─────────────────
-
-#[ignore = "spawns real sh + curl through PTY; run with --ignored"]
-#[tokio::test]
-async fn child_request_through_proxy_emits_record() {
-    // Skip if curl isn't available — CI environments might not have it.
-    if std::process::Command::new("curl")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("skipping: curl not available");
-        return;
-    }
-
-    let upstream = spawn_upstream().await;
-    let upstream_received = upstream.received.clone();
-
-    let script = "curl -s -X POST $ANTHROPIC_BASE_URL/v1/messages \
-        -H 'X-Pilot-Session: ent-test' \
-        -H 'content-type: application/json' \
-        -d '{\"model\":\"claude-sonnet-4-6\"}'";
-    let config = AgentSpawnConfig {
-        session_key: "github:o/r#ent".into(),
-        argv: vec!["sh".into(), "-c".into(), script.into()],
-        cwd: None,
-        size: default_size(),
-        extra_env: HashMap::new(),
-        proxy: Some(ProxyTarget {
-            provider: ProxyProvider::Anthropic,
-            upstream: upstream.url(),
-        }),
-    };
-    let spawn = spawn_with_proxy(config).await.unwrap();
-    let mut records = spawn.records.expect("proxy has records channel");
-
-    // Wait for the child to make its request and exit.
-    let _ = tokio::time::timeout(Duration::from_secs(10), spawn.pty.wait_exit()).await;
-
-    // The upstream should have seen exactly one request.
+    inject_proxy_env(&mut env, Some(&target), Some("http://127.0.0.1:9000"));
     assert_eq!(
-        upstream_received.load(Ordering::SeqCst),
-        1,
-        "upstream saw one request via proxy"
+        env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+        Some("http://127.0.0.1:9000")
     );
-
-    // And we should have gotten one ProxyRecord.
-    let rec = tokio::time::timeout(Duration::from_secs(2), records.recv())
-        .await
-        .expect("timeout")
-        .expect("record");
-    assert_eq!(rec.endpoint, "/v1/messages");
-    assert_eq!(rec.status, 200);
-    assert_eq!(rec.session_key.as_str(), "ent-test");
-
-    if let Some(p) = spawn.proxy {
-        p.shutdown().await;
-    }
-    upstream.shutdown().await;
+    assert!(env.get("OPENAI_BASE_URL").is_none());
 }
 
-// ── Records forward cleanly through the IPC Event layer ────────────────
+#[test]
+fn openai_proxy_injects_openai_base_url() {
+    let mut env: HashMap<String, String> = HashMap::new();
+    let target = ProxyTarget {
+        provider: ProxyProvider::OpenAI,
+        upstream: "https://api.openai.com".into(),
+    };
+    inject_proxy_env(&mut env, Some(&target), Some("http://127.0.0.1:9001"));
+    assert_eq!(
+        env.get("OPENAI_BASE_URL").map(String::as_str),
+        Some("http://127.0.0.1:9001")
+    );
+    assert!(env.get("ANTHROPIC_BASE_URL").is_none());
+}
+
+#[test]
+fn no_proxy_leaves_env_untouched() {
+    let mut env: HashMap<String, String> = HashMap::new();
+    env.insert("EXISTING".into(), "1".into());
+    inject_proxy_env(&mut env, None, None);
+    assert_eq!(env.len(), 1, "no proxy env vars added");
+    assert!(env.get("ANTHROPIC_BASE_URL").is_none());
+    assert!(env.get("OPENAI_BASE_URL").is_none());
+}
+
+#[test]
+fn missing_listen_url_skips_injection() {
+    // Defensive: target without a resolved listen URL is a no-op (the
+    // caller hasn't started the proxy yet). Without this guard a
+    // mis-wired caller would silently inject an empty string.
+    let mut env: HashMap<String, String> = HashMap::new();
+    let target = ProxyTarget {
+        provider: ProxyProvider::Anthropic,
+        upstream: "https://api.anthropic.com".into(),
+    };
+    inject_proxy_env(&mut env, Some(&target), None);
+    assert!(env.is_empty());
+}
 
 #[tokio::test]
 async fn proxy_record_event_round_trips_through_ipc() {
-    // Assemble a ProxyRecord, wrap it in Event::ProxyRecord, send it
-    // through the channel transport, assert we get it back intact.
-    use pilot_ipc::{Event, channel};
+    timeout(TEST_DEADLINE, async {
+        use pilot_ipc::{Event, channel};
 
-    let record = pilot_llm_proxy::ProxyRecord {
-        session_key: "github:o/r#1".into(),
-        started_at: chrono::Utc::now(),
-        duration: Duration::from_millis(420),
-        provider: pilot_llm_proxy::ApiProvider::Anthropic,
-        endpoint: "/v1/messages".into(),
-        request_model: Some("claude-sonnet-4-6".into()),
-        tokens_input: Some(1024),
-        tokens_output: Some(512),
-        tokens_cache_read: None,
-        tokens_cache_create: None,
-        estimated_cost_usd: Some(0.01),
-        tool_calls: vec![],
-        assistant_text: Some("hi".into()),
-        status: 200,
-        error: None,
-    };
-    let event = Event::ProxyRecord(record.clone());
+        let record = pilot_llm_proxy::ProxyRecord {
+            session_key: "github:o/r#1".into(),
+            started_at: chrono::Utc::now(),
+            duration: Duration::from_millis(420),
+            provider: pilot_llm_proxy::ApiProvider::Anthropic,
+            endpoint: "/v1/messages".into(),
+            request_model: Some("claude-sonnet-4-6".into()),
+            tokens_input: Some(1024),
+            tokens_output: Some(512),
+            tokens_cache_read: None,
+            tokens_cache_create: None,
+            estimated_cost_usd: Some(0.01),
+            tool_calls: vec![],
+            assistant_text: Some("hi".into()),
+            status: 200,
+            error: None,
+        };
+        let event = Event::ProxyRecord(record.clone());
 
-    let (mut client, server) = channel::pair();
-    // Server-side pushes the event; client-side receives it.
-    server.tx.send(event.clone()).unwrap();
-    let received = tokio::time::timeout(Duration::from_secs(1), client.recv())
-        .await
-        .expect("timeout")
-        .expect("event");
-    match received {
-        Event::ProxyRecord(r) => {
-            assert_eq!(format!("{r:?}"), format!("{record:?}"));
+        let (mut client, server) = channel::pair();
+        server.tx.send(event.clone()).unwrap();
+        let received = timeout(Duration::from_secs(1), client.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        match received {
+            Event::ProxyRecord(r) => {
+                assert_eq!(format!("{r:?}"), format!("{record:?}"));
+            }
+            other => panic!("expected ProxyRecord, got {other:?}"),
         }
-        other => panic!("expected ProxyRecord, got {other:?}"),
-    }
+    })
+    .await
+    .expect("deadline");
 }

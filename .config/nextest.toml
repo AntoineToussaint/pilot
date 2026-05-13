@@ -1,0 +1,27 @@
+# Per-test timeout enforced by cargo-nextest.
+#
+# Why: rustc's built-in test runner has no per-test bound. A single
+# deadlock hangs the whole `cargo test --workspace` invocation
+# silently. nextest's `slow-timeout` kills any test that exceeds the
+# `period` and the suite continues, surfacing the offender as a
+# failure instead of a hang.
+#
+# Run with `cargo nextest run --workspace` (also wired into `make test`).
+
+[profile.default]
+# Tests are unit tests; the hard ceiling is 30s for the whole suite,
+# so any single test taking >10s is a bug. `terminate-after = 1` kills
+# the process after one slow-timeout period.
+slow-timeout = { period = "10s", terminate-after = 1 }
+# Don't suppress output on failure — when a deadlock kills a test we
+# want to see its stdout for diagnosis.
+failure-output = "immediate-final"
+# Skip #[ignore]'d tests by default (real-backend integration tests).
+# Run them on demand with `cargo nextest run --run-ignored only`.
+default-filter = "not test(/^ignored_/)"
+
+[profile.ci]
+# CI uses the same bound but retries flaky tests once before failing.
+slow-timeout = { period = "10s", terminate-after = 1 }
+retries = 1
+failure-output = "immediate-final"

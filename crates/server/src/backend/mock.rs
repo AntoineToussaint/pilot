@@ -1,0 +1,495 @@
+//! In-memory `SessionBackend` for tests.
+//!
+//! Drop-in replacement for `RawPtyBackend` / `TmuxBackend` that does
+//! NOT spawn any real subprocess. Tests inject synthetic output via
+//! [`MockBackend::emit`] and trigger exit via [`MockBackend::finish`].
+//!
+//! Why this exists: the daemon's spawn pipeline (handle_spawn, the
+//! per-PTY pump task, snapshot replay, kill-on-out-of-scope, …) is
+//! the unit we care about. With real PTYs in tests, 13 `sleep 5`
+//! shells running in parallel exhausted FD/PTY budgets and deadlocked
+//! the workspace test run. Mocking the backend keeps every test in
+//! milliseconds and removes the platform dependency on `sh`, `tmux`,
+//! `curl`, etc.
+//!
+//! Coverage: this fake honors the same `SessionBackend` contract the
+//! real backends do. Tests using it exercise the daemon end-to-end.
+//! Backend-impl integration tests (the `RawPtyBackend` / `TmuxBackend`
+//! contract themselves) live behind `#[ignore]` in
+//! `crates/server/tests/backend.rs` and run via `cargo test -- --ignored`.
+
+use crate::backend::{BackendError, OutputChunk, SessionBackend, Subscription};
+use std::collections::HashMap;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc, oneshot};
+
+/// In-memory backend. Cheap to clone (it's just an `Arc<Mutex<...>>`).
+#[derive(Default, Clone)]
+pub struct MockBackend {
+    inner: Arc<MockInner>,
+}
+
+#[derive(Default)]
+struct MockInner {
+    sessions: Mutex<HashMap<String, MockSession>>,
+    counter: AtomicU64,
+}
+
+struct MockSession {
+    /// Arguments captured for assertions.
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    cwd: Option<std::path::PathBuf>,
+    /// Bytes the daemon wrote to this session.
+    writes: Vec<Vec<u8>>,
+    /// Resize calls captured: (cols, rows).
+    resizes: Vec<(u16, u16)>,
+    /// Replay buffer — everything emitted so far. New subscribers get
+    /// this in their `Subscription.replay`.
+    replay: Vec<u8>,
+    /// Monotonic chunk counter — matches real backend semantics.
+    last_seq: u64,
+    /// Fan-out to live subscribers. Each `subscribe()` registers one
+    /// `mpsc::UnboundedSender`; `emit()` sends to all of them.
+    subscribers: Vec<mpsc::UnboundedSender<OutputChunk>>,
+    /// Exit code once `finish()` (or `kill()`) fires. None until then.
+    exit_code: Option<i32>,
+    /// Waiters parked in `wait_exit()`.
+    exit_waiters: Vec<oneshot::Sender<Option<i32>>>,
+    /// Whether `freeze` was called (last call wins). Visible to tests
+    /// asserting the migration-freeze path runs.
+    frozen: bool,
+}
+
+impl MockBackend {
+    /// Construct a fresh, empty backend.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// As an `Arc<dyn SessionBackend>` — drop-in for the daemon.
+    pub fn as_backend(&self) -> Arc<dyn SessionBackend> {
+        Arc::new(self.clone())
+    }
+
+    /// Inject synthetic output. Each call becomes one chunk delivered
+    /// to every active subscriber AND appended to the replay buffer.
+    pub async fn emit(&self, key: &str, bytes: impl AsRef<[u8]>) {
+        let bytes = bytes.as_ref().to_vec();
+        let mut map = self.inner.sessions.lock().await;
+        let Some(session) = map.get_mut(key) else {
+            return;
+        };
+        session.last_seq += 1;
+        let chunk = OutputChunk {
+            seq: session.last_seq,
+            bytes: bytes.clone(),
+        };
+        session.replay.extend_from_slice(&bytes);
+        // Drop disconnected subscribers as we go.
+        session.subscribers.retain(|tx| tx.send(chunk.clone()).is_ok());
+    }
+
+    /// Mark the session exited with `code`. Subsequent `wait_exit`
+    /// calls resolve to `Some(code)`. Mirrors a child-exit event.
+    pub async fn finish(&self, key: &str, code: i32) {
+        let mut map = self.inner.sessions.lock().await;
+        let Some(session) = map.get_mut(key) else {
+            return;
+        };
+        session.exit_code = Some(code);
+        // Close subscribers so the pump task sees the live channel
+        // close — same as a real session ending.
+        session.subscribers.clear();
+        for waiter in std::mem::take(&mut session.exit_waiters) {
+            let _ = waiter.send(Some(code));
+        }
+    }
+
+    /// Bytes the daemon wrote to this session, oldest first. Tests
+    /// use this to assert the prompt-injection path delivered the
+    /// expected bytes, etc.
+    pub async fn writes_for(&self, key: &str) -> Vec<Vec<u8>> {
+        let map = self.inner.sessions.lock().await;
+        map.get(key)
+            .map(|s| s.writes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resize calls captured for this session, oldest first.
+    pub async fn resizes_for(&self, key: &str) -> Vec<(u16, u16)> {
+        let map = self.inner.sessions.lock().await;
+        map.get(key)
+            .map(|s| s.resizes.clone())
+            .unwrap_or_default()
+    }
+
+    /// argv passed to `spawn()` for this session.
+    pub async fn argv_for(&self, key: &str) -> Option<Vec<String>> {
+        let map = self.inner.sessions.lock().await;
+        map.get(key).map(|s| s.argv.clone())
+    }
+
+    /// Environment passed to `spawn()` for this session.
+    pub async fn env_for(&self, key: &str) -> Option<Vec<(String, String)>> {
+        let map = self.inner.sessions.lock().await;
+        map.get(key).map(|s| s.env.clone())
+    }
+
+    /// CWD passed to `spawn()` for this session.
+    pub async fn cwd_for(&self, key: &str) -> Option<std::path::PathBuf> {
+        let map = self.inner.sessions.lock().await;
+        map.get(key).and_then(|s| s.cwd.clone())
+    }
+
+    /// True if `freeze()` was called for this session and `resume()`
+    /// hasn't been called since.
+    pub async fn is_frozen(&self, key: &str) -> bool {
+        let map = self.inner.sessions.lock().await;
+        map.get(key).map(|s| s.frozen).unwrap_or(false)
+    }
+}
+
+impl SessionBackend for MockBackend {
+    fn id(&self) -> &'static str {
+        "mock"
+    }
+
+    fn spawn<'a>(
+        &'a self,
+        argv: &'a [String],
+        cwd: Option<&'a Path>,
+        env: &'a [(String, String)],
+        hint: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let n = self.inner.counter.fetch_add(1, Ordering::SeqCst);
+            // Safe-ish hint substring — keeps test output readable.
+            let safe_hint: String = hint
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+                .collect();
+            let key = format!("mock-{safe_hint}-{n}");
+            let session = MockSession {
+                argv: argv.to_vec(),
+                env: env.to_vec(),
+                cwd: cwd.map(|p| p.to_path_buf()),
+                writes: Vec::new(),
+                resizes: Vec::new(),
+                replay: Vec::new(),
+                last_seq: 0,
+                subscribers: Vec::new(),
+                exit_code: None,
+                exit_waiters: Vec::new(),
+                frozen: false,
+            };
+            self.inner.sessions.lock().await.insert(key.clone(), session);
+            Ok(key)
+        })
+    }
+
+    fn write<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut map = self.inner.sessions.lock().await;
+            let session = map
+                .get_mut(key)
+                .ok_or_else(|| BackendError::NotFound(key.into()))?;
+            session.writes.push(bytes.to_vec());
+            Ok(())
+        })
+    }
+
+    fn resize<'a>(
+        &'a self,
+        key: &'a str,
+        cols: u16,
+        rows: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut map = self.inner.sessions.lock().await;
+            let session = map
+                .get_mut(key)
+                .ok_or_else(|| BackendError::NotFound(key.into()))?;
+            session.resizes.push((cols, rows));
+            Ok(())
+        })
+    }
+
+    fn kill<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Idempotent: missing key is fine.
+            let mut map = self.inner.sessions.lock().await;
+            if let Some(session) = map.get_mut(key)
+                && session.exit_code.is_none()
+            {
+                session.exit_code = Some(-1);
+                session.subscribers.clear();
+                for waiter in std::mem::take(&mut session.exit_waiters) {
+                    let _ = waiter.send(Some(-1));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn list<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let map = self.inner.sessions.lock().await;
+            Ok(map.keys().cloned().collect())
+        })
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Subscription, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut map = self.inner.sessions.lock().await;
+            let session = map
+                .get_mut(key)
+                .ok_or_else(|| BackendError::NotFound(key.into()))?;
+            let replay = session.replay.clone();
+            let last_seq = session.last_seq;
+            let (tx, rx) = mpsc::unbounded_channel();
+            // If the session has already exited, close the channel
+            // immediately so the subscriber's `recv()` returns None
+            // straight away — matches the real backend's contract.
+            if session.exit_code.is_none() {
+                session.subscribers.push(tx);
+            } else {
+                drop(tx);
+            }
+            Ok(Subscription {
+                replay,
+                last_seq,
+                live: rx,
+            })
+        })
+    }
+
+    fn snapshot<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let map = self.inner.sessions.lock().await;
+            let session = map
+                .get(key)
+                .ok_or_else(|| BackendError::NotFound(key.into()))?;
+            Ok((session.replay.clone(), session.last_seq))
+        })
+    }
+
+    fn wait_exit<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<i32>> + Send + 'a>> {
+        Box::pin(async move {
+            let rx = {
+                let mut map = self.inner.sessions.lock().await;
+                let Some(session) = map.get_mut(key) else {
+                    return None;
+                };
+                if let Some(code) = session.exit_code {
+                    return Some(code);
+                }
+                let (tx, rx) = oneshot::channel();
+                session.exit_waiters.push(tx);
+                rx
+            };
+            // Mutex dropped — now we can await without blocking
+            // emit/finish/kill on the same backend.
+            rx.await.ok().flatten()
+        })
+    }
+
+    fn freeze<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut map = self.inner.sessions.lock().await;
+            if let Some(session) = map.get_mut(key) {
+                session.frozen = true;
+            }
+            Ok(())
+        })
+    }
+
+    fn resume<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut map = self.inner.sessions.lock().await;
+            if let Some(session) = map.get_mut(key) {
+                session.frozen = false;
+            }
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    /// Outer bound for every test in this module. Per the project
+    /// rule: every async test wraps its body in `timeout(...)` so a
+    /// deadlock surfaces as a failed test, not a hung suite.
+    async fn run<F: std::future::Future<Output = ()>>(f: F) {
+        timeout(Duration::from_secs(5), f)
+            .await
+            .expect("test deadline exceeded — likely a deadlock");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_unique_keys() {
+        run(async {
+            let b = MockBackend::new();
+            let a = b.spawn(&argv("echo a"), None, &[], "t").await.unwrap();
+            let z = b.spawn(&argv("echo z"), None, &[], "t").await.unwrap();
+            assert_ne!(a, z);
+            assert!(a.contains("mock-"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_reflects_live_sessions() {
+        run(async {
+            let b = MockBackend::new();
+            let a = b.spawn(&argv("a"), None, &[], "alpha").await.unwrap();
+            let z = b.spawn(&argv("z"), None, &[], "zulu").await.unwrap();
+            let mut got = b.list().await.unwrap();
+            got.sort();
+            let mut want = vec![a, z];
+            want.sort();
+            assert_eq!(got, want);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn emit_then_subscribe_returns_replay_and_no_live_chunks() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            b.emit(&k, b"hello").await;
+            b.emit(&k, b"world").await;
+            let mut sub = b.subscribe(&k).await.unwrap();
+            assert_eq!(sub.replay, b"helloworld");
+            assert_eq!(sub.last_seq, 2);
+            // No subscribers were registered before the emits; live
+            // channel is open but holds nothing.
+            assert!(
+                timeout(Duration::from_millis(20), sub.live.recv())
+                    .await
+                    .is_err()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_then_emit_streams_live_chunks() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            let mut sub = b.subscribe(&k).await.unwrap();
+            b.emit(&k, b"hi").await;
+            let chunk = sub.live.recv().await.expect("chunk");
+            assert_eq!(chunk.bytes, b"hi");
+            assert_eq!(chunk.seq, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn finish_closes_subscribers_and_unblocks_wait_exit() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            let mut sub = b.subscribe(&k).await.unwrap();
+            // Park wait_exit in another task; finish should unblock it.
+            let b2 = b.clone();
+            let k2 = k.clone();
+            let wait = tokio::spawn(async move { b2.wait_exit(&k2).await });
+            b.finish(&k, 7).await;
+            assert_eq!(wait.await.unwrap(), Some(7));
+            // Subscriber sees channel close.
+            assert!(sub.live.recv().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn write_and_resize_are_recorded() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            b.write(&k, b"prompt\n").await.unwrap();
+            b.resize(&k, 100, 30).await.unwrap();
+            assert_eq!(b.writes_for(&k).await, vec![b"prompt\n".to_vec()]);
+            assert_eq!(b.resizes_for(&k).await, vec![(100, 30)]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn write_resize_on_missing_session_errors() {
+        run(async {
+            let b = MockBackend::new();
+            let err = b.write("nope", b"x").await.expect_err("not found");
+            assert!(matches!(err, BackendError::NotFound(_)));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn kill_is_idempotent() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            b.kill(&k).await.unwrap();
+            // Second kill on a closed session must not error.
+            b.kill(&k).await.unwrap();
+            // Missing key also fine.
+            b.kill("nope").await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn freeze_resume_toggle_observable() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            assert!(!b.is_frozen(&k).await);
+            b.freeze(&k).await.unwrap();
+            assert!(b.is_frozen(&k).await);
+            b.resume(&k).await.unwrap();
+            assert!(!b.is_frozen(&k).await);
+        })
+        .await;
+    }
+}
