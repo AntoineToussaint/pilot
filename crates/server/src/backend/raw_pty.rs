@@ -177,6 +177,21 @@ impl SessionBackend for RawPtyBackend {
         })
     }
 
+    fn snapshot<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|s| s.pty.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            Ok(pty.snapshot_only().await)
+        })
+    }
+
     fn subscribe<'a>(
         &'a self,
         key: &'a str,

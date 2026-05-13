@@ -1039,28 +1039,61 @@ async fn load_terminal_meta(
 /// and kind, not the empty-string placeholders an earlier version
 /// returned.
 pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> {
-    let map = config.terminals.lock().await;
-    let meta = config.terminal_meta.lock().await;
-    let mut out = Vec::with_capacity(map.len());
-    for (id, _key) in map.iter() {
-        // Skip orphaned ids (terminals map says yes, terminal_meta
-        // says no) — they should never exist in steady state, only
-        // in a window during teardown. Emitting a default-valued
-        // snapshot would feed the TUI an empty-session-key
-        // workspace which the sidebar would render as `(no repo)`.
-        let Some((session_key, kind)) = meta.get(id).cloned() else {
-            tracing::warn!(
-                terminal_id = ?id,
-                "snapshot_terminals: terminal_id has no terminal_meta entry — skipping"
-            );
-            continue;
+    // Snapshot the two maps under their locks, then drop the locks
+    // before any await on the backend — `backend.snapshot(key)` takes
+    // its own lock on the backend's session map, and holding the
+    // terminals/meta locks across that await would serialize every
+    // backend op behind a Subscribe call.
+    let entries: Vec<(TerminalId, String, SessionKey, TerminalKind)> = {
+        let map = config.terminals.lock().await;
+        let meta = config.terminal_meta.lock().await;
+        map.iter()
+            .filter_map(|(id, key)| {
+                // Skip orphaned ids (terminals map says yes,
+                // terminal_meta says no) — they should never exist in
+                // steady state, only in a window during teardown.
+                // Emitting a default-valued snapshot would feed the
+                // TUI an empty-session-key workspace which the
+                // sidebar would render as `(no repo)`.
+                match meta.get(id).cloned() {
+                    Some((sk, kind)) => Some((*id, key.clone(), sk, kind)),
+                    None => {
+                        tracing::warn!(
+                            terminal_id = ?id,
+                            "snapshot_terminals: terminal_id has no terminal_meta entry — skipping"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    };
+
+    let mut out = Vec::with_capacity(entries.len());
+    for (id, key, session_key, kind) in entries {
+        // Reconnecting `--connect` clients need the ring buffer so
+        // their libghostty-vt can reconstruct the screen — without
+        // it they see a blank terminal until the next chunk arrives.
+        // Failure here is non-fatal: the snapshot is best-effort,
+        // missing replay just degrades to the legacy behavior.
+        let (replay, last_seq) = match config.backend.snapshot(&key).await {
+            Ok(snap) => snap,
+            Err(e) => {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    key = %key,
+                    error = %e,
+                    "snapshot_terminals: backend.snapshot failed — replay will be empty"
+                );
+                (Vec::new(), 0)
+            }
         };
         out.push(TerminalSnapshot {
-            terminal_id: *id,
+            terminal_id: id,
             session_key,
             kind,
-            replay: Vec::new(),
-            last_seq: 0,
+            replay,
+            last_seq,
         });
     }
     out

@@ -132,6 +132,23 @@ pub trait SessionBackend: Send + Sync + 'static {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Subscription, BackendError>> + Send + 'a>>;
 
+    /// Cheap ring snapshot + last_seq for `key`. Used by `Subscribe`
+    /// to seed reconnecting `--connect` clients without spawning a
+    /// pump task per snapshot call (`subscribe` allocates a broadcast
+    /// receiver + pump). Default impl errors so backends opt in
+    /// explicitly; both bundled backends implement it.
+    fn snapshot<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+        let key = key.to_string();
+        Box::pin(async move {
+            Err(BackendError::NotFound(format!(
+                "snapshot unimplemented for {key}"
+            )))
+        })
+    }
+
     /// Wait for the session to exit. Returns the exit code if known.
     /// Implementations should be safe to call repeatedly; subsequent
     /// calls return the cached code.

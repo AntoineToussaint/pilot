@@ -399,6 +399,24 @@ impl SessionBackend for TmuxBackend {
         })
     }
 
+    fn snapshot<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Only return a snapshot if a client is already bound — we
+            // don't want a snapshot probe to lazily spin up a tmux
+            // client for a session that no one is subscribed to.
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|slot| slot.client.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            Ok(pty.snapshot_only().await)
+        })
+    }
+
     fn subscribe<'a>(
         &'a self,
         key: &'a str,

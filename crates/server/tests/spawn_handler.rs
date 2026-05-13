@@ -255,6 +255,81 @@ async fn snapshot_includes_running_terminals_for_late_subscribers() {
     }
 }
 
+/// Regression: a `--connect` client reconnecting mid-session needs
+/// the PTY ring buffer in `TerminalSnapshot.replay` so its
+/// libghostty-vt can reconstruct the screen. Without the replay it
+/// sees a blank terminal until the next chunk arrives — which for an
+/// idle agent could be never.
+#[tokio::test]
+async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
+    let config = ServerConfig::in_memory();
+    let mut producer = run_daemon(config.clone()).await;
+    producer.send(Command::Subscribe).unwrap();
+    let _ = producer.recv().await;
+
+    producer
+        .send(Command::Spawn {
+            session_key: "test:ws-1".into(),
+            session_id: None,
+            kind: TerminalKind::Shell,
+            cwd: None,
+        })
+        .unwrap();
+    let spawned = wait_for(
+        &mut producer,
+        |e| matches!(e, Event::TerminalSpawned { .. }),
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("spawned");
+    let terminal_id = match spawned {
+        Event::TerminalSpawned { terminal_id, .. } => terminal_id,
+        _ => unreachable!(),
+    };
+
+    // Drive some output into the PTY and wait for it to land in the
+    // ring buffer. Without this the snapshot's replay would legitimately
+    // be empty and we couldn't tell whether the fix is working.
+    producer
+        .send(Command::Write {
+            terminal_id,
+            bytes: b"printf 'pilot-replay-marker'\n".to_vec(),
+        })
+        .unwrap();
+    let _ = wait_for(
+        &mut producer,
+        |e| match e {
+            Event::TerminalOutput { bytes, .. } => std::str::from_utf8(bytes)
+                .unwrap_or("")
+                .contains("pilot-replay-marker"),
+            _ => false,
+        },
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("marker output reached bus");
+
+    // Fresh client subscribes after the output landed.
+    let mut consumer = run_daemon(config.clone()).await;
+    consumer.send(Command::Subscribe).unwrap();
+    let evt = consumer.recv().await.expect("snapshot");
+    match evt {
+        Event::Snapshot { terminals, .. } => {
+            let term = terminals
+                .iter()
+                .find(|t| t.terminal_id == terminal_id)
+                .expect("our terminal in snapshot");
+            let replay = std::str::from_utf8(&term.replay).unwrap_or("");
+            assert!(
+                replay.contains("pilot-replay-marker"),
+                "snapshot replay should contain pre-subscription PTY output; got {replay:?}"
+            );
+            assert!(term.last_seq > 0, "last_seq advanced past 0");
+        }
+        _ => panic!("expected Snapshot first"),
+    }
+}
+
 /// Recovery scenario: a TmuxBackend has a session running (simulating
 /// "pilot crashed"), then a fresh ServerConfig is built around the same
 /// backend (simulating "pilot restarted"). `recover_sessions` should

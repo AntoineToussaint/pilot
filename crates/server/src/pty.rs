@@ -315,16 +315,22 @@ impl DaemonPty {
 
     /// Fire up a subscription: the current ring snapshot + a live feed.
     pub async fn subscribe(&self) -> Subscription {
-        let (replay, last_seq) = {
-            let ring = self.ring.lock().await;
-            (ring.snapshot(), self.last_seq.load(Ordering::SeqCst))
-        };
+        let (replay, last_seq) = self.snapshot_only().await;
         let live = self.output_tx.subscribe();
         Subscription {
             replay,
             last_seq,
             live,
         }
+    }
+
+    /// Just the ring snapshot + last_seq, no new broadcast subscriber.
+    /// Used by `Subscribe` snapshot path so reconnecting `--connect`
+    /// clients can reconstruct their terminals without leaking a
+    /// drainless broadcast receiver + pump task per snapshot call.
+    pub async fn snapshot_only(&self) -> (Vec<u8>, u64) {
+        let ring = self.ring.lock().await;
+        (ring.snapshot(), self.last_seq.load(Ordering::SeqCst))
     }
 
     pub async fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
