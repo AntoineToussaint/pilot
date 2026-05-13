@@ -190,7 +190,8 @@ pub struct Model<T: TerminalAdapter> {
     /// Each `WorkspaceOutOfScope` event lands here; one at a time
     /// gets surfaced as a Confirm modal so the user decides whether
     /// to kill the running sessions.
-    pending_removal_prompts: std::collections::VecDeque<(pilot_core::WorkspaceKey, String, usize)>,
+    pending_removal_prompts:
+        std::collections::VecDeque<(pilot_core::WorkspaceKey, String, Option<String>, usize)>,
     /// Workspace currently being prompted about. Set when the
     /// RemoveOutOfScope modal mounts; consumed by `Msg::Confirmed`.
     active_removal_prompt: Option<pilot_core::WorkspaceKey>,
@@ -1672,13 +1673,34 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.modal_stack.is_empty() {
             return;
         }
-        let Some((workspace_key, label, count)) = self.pending_removal_prompts.pop_front() else {
+        let Some((workspace_key, label, title, count)) =
+            self.pending_removal_prompts.pop_front()
+        else {
             return;
         };
-        let runner_label = if count == 1 {
-            format!("{label} is no longer in your filter scope but has 1 running terminal — kill and remove?")
+        let terminals_phrase = if count == 1 {
+            "1 running terminal".to_string()
         } else {
-            format!("{label} is no longer in your filter scope but has {count} running terminals — kill and remove?")
+            format!("{count} running terminals")
+        };
+        // Trim the title so a verbose PR description doesn't make the
+        // modal three lines tall. 80 chars + an ellipsis fits within
+        // the dynamic-height Confirm modal cleanly.
+        let runner_label = match title.as_deref().filter(|s| !s.is_empty()) {
+            Some(t) => {
+                let title_short = if t.chars().count() > 80 {
+                    let truncated: String = t.chars().take(79).collect();
+                    format!("{truncated}…")
+                } else {
+                    t.to_string()
+                };
+                format!(
+                    "{label} \"{title_short}\" is no longer in your filter scope but has {terminals_phrase} — kill and remove?"
+                )
+            }
+            None => format!(
+                "{label} is no longer in your filter scope but has {terminals_phrase} — kill and remove?"
+            ),
         };
         let modal = Confirm::new(runner_label).default_no();
         self.active_removal_prompt = Some(workspace_key);
@@ -1735,6 +1757,7 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::WorkspaceOutOfScope {
             workspace_key,
             label,
+            title,
             active_terminal_count,
         } = &event
         {
@@ -1751,11 +1774,12 @@ impl<T: TerminalAdapter> Model<T> {
             let already_queued = self
                 .pending_removal_prompts
                 .iter()
-                .any(|(k, _, _)| k == workspace_key);
+                .any(|(k, _, _, _)| k == workspace_key);
             if !already_active && !already_queued {
                 self.pending_removal_prompts.push_back((
                     workspace_key.clone(),
                     label.clone(),
+                    title.clone(),
                     *active_terminal_count,
                 ));
                 self.maybe_mount_next_removal_prompt();

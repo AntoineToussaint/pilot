@@ -414,9 +414,14 @@ pub enum Event {
     /// nothing (workspace stays out-of-scope but visible).
     WorkspaceOutOfScope {
         workspace_key: pilot_core::WorkspaceKey,
-        /// Human-readable label for the confirm modal (e.g.
-        /// `tensorzero/foo#42`).
+        /// Compact identifier for the confirm modal — `owner/repo#N`
+        /// for PRs/issues, the workspace key otherwise.
         label: String,
+        /// Primary task title (PR/issue subject) when known. The TUI
+        /// renders it inline so the user can recognize which work is
+        /// about to be killed without memorizing PR numbers.
+        #[serde(default)]
+        title: Option<String>,
         /// Number of live terminals (Claude/codex/shell/…) the user
         /// would lose if they confirm removal.
         active_terminal_count: usize,

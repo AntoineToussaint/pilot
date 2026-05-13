@@ -280,6 +280,7 @@ fn out_of_scope_with_active_session_queues_a_prompt() {
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: pilot_core::WorkspaceKey::new(target),
         label: "owner/repo#42".into(),
+        title: None,
         active_terminal_count: 1,
     });
     assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
@@ -295,11 +296,13 @@ fn out_of_scope_prompts_queue_one_at_a_time() {
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: pilot_core::WorkspaceKey::new("github:o/a#1"),
         label: "o/a#1".into(),
+        title: None,
         active_terminal_count: 1,
     });
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: pilot_core::WorkspaceKey::new("github:o/b#2"),
         label: "o/b#2".into(),
+        title: None,
         active_terminal_count: 2,
     });
     assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
@@ -329,6 +332,7 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: pilot_core::WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
+        title: None,
         active_terminal_count: 1,
     });
     // Help still on top — the queued prompt hasn't surfaced yet.

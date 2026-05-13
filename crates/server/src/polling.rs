@@ -648,20 +648,38 @@ pub async fn rescope_with_state(
                     continue;
                 }
                 state.prompted_out_of_scope.insert(r.key.clone());
-                // Build a short label from the stored workspace JSON
-                // if available; fall back to the raw key.
-                let label = r
+                // Build a short label + title from the stored workspace
+                // JSON if available; fall back to the raw key.
+                //
+                // `task.id.key` is already `owner/repo#N` (e.g.
+                // `tensorzero/tensorzero#7307`) — concatenating `repo`
+                // in front of it previously produced
+                // `tensorzero/tensorzero#tensorzero/tensorzero#7307`.
+                // Trust `id.key` and only fall back to `repo` when the
+                // key is missing.
+                let task_ref = r
                     .workspace_json
                     .as_deref()
                     .and_then(|json| serde_json::from_str::<pilot_core::Workspace>(json).ok())
-                    .and_then(|w| w.primary_task().map(|t| {
-                        match (&t.repo, &t.id.key) {
-                            (Some(repo), num) if !num.is_empty() => format!("{repo}#{num}"),
-                            (Some(repo), _) => repo.clone(),
-                            (None, _) => r.key.clone(),
-                        }
-                    }))
-                    .unwrap_or_else(|| r.key.clone());
+                    .and_then(|w| w.primary_task().cloned());
+                let (label, title) = match task_ref {
+                    Some(t) => {
+                        let label = if !t.id.key.is_empty() {
+                            t.id.key.clone()
+                        } else if let Some(repo) = &t.repo {
+                            repo.clone()
+                        } else {
+                            r.key.clone()
+                        };
+                        let title = if !t.title.is_empty() {
+                            Some(t.title.clone())
+                        } else {
+                            None
+                        };
+                        (label, title)
+                    }
+                    None => (r.key.clone(), None),
+                };
                 tracing::info!(
                     workspace_key = %r.key,
                     active = count,
@@ -670,6 +688,7 @@ pub async fn rescope_with_state(
                 let _ = config.bus.send(Event::WorkspaceOutOfScope {
                     workspace_key: key,
                     label,
+                    title,
                     active_terminal_count: count,
                 });
             }
