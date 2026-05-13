@@ -241,7 +241,22 @@ impl Workspace {
     /// Merge a slice of activity items into the feed, de-duping by
     /// (author, body, created_at) and re-sorting. Cheap to call
     /// repeatedly — provider polls produce overlapping feeds.
+    ///
+    /// Remaps `read_indices` across the sort: read state stores
+    /// positions, but the activity list reshuffles newest-first when
+    /// new items arrive. Without the remap, a new item landing at
+    /// index 0 inherits the read flag the user set on a different
+    /// item — every poll that introduced a new activity item could
+    /// silently flip random older marks onto fresh content.
     pub fn merge_activity(&mut self, incoming: &[Activity]) {
+        // Snapshot the read items by content key BEFORE we mutate.
+        let read_keys: HashSet<(String, String, DateTime<Utc>)> = self
+            .read_indices
+            .iter()
+            .filter_map(|i| self.activity.get(*i))
+            .map(|a| (a.author.clone(), a.body.clone(), a.created_at))
+            .collect();
+
         for act in incoming {
             let already = self.activity.iter().any(|a| {
                 a.author == act.author && a.body == act.body && a.created_at == act.created_at
@@ -251,6 +266,22 @@ impl Workspace {
             }
         }
         self.sort_activity();
+
+        // Rebuild read_indices against the post-sort positions so
+        // each previously-read item keeps its mark.
+        self.read_indices = self
+            .activity
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| {
+                let key = (a.author.clone(), a.body.clone(), a.created_at);
+                if read_keys.contains(&key) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
     }
 
     /// The "headline" task for this workspace — the one components
@@ -1001,6 +1032,46 @@ mod tests {
         assert_eq!(ws.activity[0].body, "third");
         assert_eq!(ws.activity[1].body, "second");
         assert_eq!(ws.activity[2].body, "first");
+    }
+
+    /// Regression: read-marks lived as Vec indices and got silently
+    /// reattached to whichever activity sorted into that slot after a
+    /// new item arrived. Mark the second-newest item read, then have
+    /// the poll discover a newer item — the mark should follow the
+    /// original content, not stay glued to index 1.
+    #[test]
+    fn merge_activity_preserves_read_marks_across_resort() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_at(20, "third"), activity_at(10, "second")]);
+        // Sanity: [third, second] in newest-first order.
+        assert_eq!(ws.activity[0].body, "third");
+        assert_eq!(ws.activity[1].body, "second");
+
+        // Mark "second" (index 1) read.
+        ws.mark_activity_read(1);
+        assert!(ws.read_indices.contains(&1));
+
+        // Poll discovers a brand-new activity item. After merge+sort,
+        // "fresh" is index 0 → "third" shifts to 1 → "second" to 2.
+        ws.merge_activity(&[activity_at(30, "fresh")]);
+        assert_eq!(ws.activity[0].body, "fresh");
+        assert_eq!(ws.activity[1].body, "third");
+        assert_eq!(ws.activity[2].body, "second");
+
+        // The read mark must follow "second" (now at index 2), not
+        // stay on index 1 (which would falsely mark "third" read).
+        assert!(
+            !ws.read_indices.contains(&0),
+            "fresh inherited a read mark"
+        );
+        assert!(
+            !ws.read_indices.contains(&1),
+            "third inherited second's read mark"
+        );
+        assert!(
+            ws.read_indices.contains(&2),
+            "second's read mark followed it to its new position"
+        );
     }
 
     #[test]
