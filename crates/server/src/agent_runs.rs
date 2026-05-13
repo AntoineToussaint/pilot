@@ -104,7 +104,15 @@ pub async fn handle_start_agent_run(
     let runs = config.agent_runs.clone();
     let session_key_for_task = session_key.clone();
     let agent_for_event = agent.clone();
+    // Gate the spawned task on a oneshot so it can't reach the
+    // post-completion `runs.remove(&run_id)` before the outer code
+    // has inserted the handle. Without the gate, a child process
+    // that exits immediately (bad argv, missing binary) could let
+    // `drive_claude_stream` return before the insert lands, leaving
+    // a stale orphan handle in the map.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
+        let _ = ready_rx.await;
         drive_claude_stream(run_id, child, input_rx, bus.clone()).await;
         runs.lock().await.remove(&run_id);
     });
@@ -117,6 +125,7 @@ pub async fn handle_start_agent_run(
             abort,
         },
     );
+    let _ = ready_tx.send(());
 
     let _ = config.bus.send(Event::AgentRunStarted {
         run_id,
