@@ -2049,20 +2049,52 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                         let _ = model
                             .modal_event_tx
                             .send(RealmEvent::Keyboard(realm_key));
-                        // Drain the event we just pushed in *this*
-                        // iteration. ChannelPort is polled by the
-                        // listener thread every 10ms, so a
-                        // `tick(Once(ZERO))` at the top of the next
-                        // iteration races with the listener and often
-                        // returns empty — the modal's mutation
-                        // (Choice cursor, Input buffer) lands a frame
-                        // late, which the user sees as "down didn't
-                        // move; second down moved by one; up went
-                        // down; …". `TryFor(15ms)` gives the listener
-                        // a guaranteed window to pick up the event
-                        // and dispatch it before we render below.
-                        if let Ok(messages) =
-                            model.app.tick(PollStrategy::TryFor(Duration::from_millis(15)))
+                        // ChannelPort is polled by the listener thread
+                        // every 10ms, so a tight 15ms window often
+                        // expires before the listener delivers the
+                        // event we just pushed — the keypress sits in
+                        // the channel and isn't acted on until the
+                        // user presses another key. The Confirm modal
+                        // showed this loudly: "Y not responsive; Esc
+                        // worked after a few tries".
+                        //
+                        // Poll in a short loop with a 150ms deadline
+                        // so we keep checking until messages arrive or
+                        // the user perceives latency. 150ms is well
+                        // under the human-noticeable threshold for
+                        // key feedback but long enough to absorb the
+                        // 10ms listener cadence + system jitter.
+                        let deadline = std::time::Instant::now()
+                            + Duration::from_millis(150);
+                        let mut handled = false;
+                        loop {
+                            match model
+                                .app
+                                .tick(PollStrategy::Once(Duration::ZERO))
+                            {
+                                Ok(messages) if !messages.is_empty() => {
+                                    for msg in messages {
+                                        model.update(msg);
+                                    }
+                                    handled = true;
+                                    break;
+                                }
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        // After the first tick lands, drain anything
+                        // else the modal pushed in the same window —
+                        // a single tuirealm `Cmd` can fan out into
+                        // multiple `Msg`s and we don't want them to
+                        // straggle into the next keypress.
+                        if handled
+                            && let Ok(messages) =
+                                model.app.tick(PollStrategy::Once(Duration::ZERO))
                         {
                             for msg in messages {
                                 model.update(msg);
