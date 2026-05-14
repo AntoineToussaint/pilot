@@ -176,7 +176,7 @@ pub struct Model<T: TerminalAdapter> {
     modal_event_tx: mpsc::Sender<RealmEvent<UserEvent>>,
     /// First-press time of the q-q double-tap. The first `q` outside
     /// a terminal arms the latch; a second `q` within
-    /// `Q_DOUBLE_TAP_WINDOW` quits. Any other key disarms.
+    /// `ui_defaults.quit_double_tap_window` quits. Any other key disarms.
     q_armed_at: Option<std::time::Instant>,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char is recorded; a second within the window kicks focus
@@ -232,6 +232,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
+    /// Resolved values for the magic-number knobs that used to be
+    /// module-level `const`s — read from `~/.pilot/config.yaml::ui`,
+    /// or `UiDefaults::default()` when unset / not loaded.
+    ui_defaults: pilot_config::UiDefaults,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -269,17 +273,21 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{pane_areas, LayoutCtx, SPLIT_STEP};
+use crate::realm::layout::{pane_areas, LayoutCtx};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 
 /// How long the first `q` stays armed waiting for the second tap.
-const Q_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(800);
+// `Q_DOUBLE_TAP_WINDOW` retired — value lives on `ui_defaults`
+// now, sourced from `~/.pilot/config.yaml::ui.quit_double_tap_window`
+// with `pilot_config::UiDefaults::default()` as the fallback.
 
 /// Escape-char for the terminal-pane breakout sequence. Two
 /// consecutive presses (with no intervening non-`]` key) returns
 /// focus to the sidebar instead of forwarding to the PTY.
-const TERMINAL_ESCAPE_CHAR: char = ']';
+// `TERMINAL_ESCAPE_CHAR` retired — value lives on `ui_defaults`,
+// sourced from `~/.pilot/config.yaml::ui.terminal_escape_char`
+// (default `]`).
 
 impl<T: TerminalAdapter> Model<T> {
     /// Backend-independent constructor — both `new` (crossterm) and
@@ -327,6 +335,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
             status: StatusCtx::new(),
+            ui_defaults: pilot_config::UiDefaults::default(),
         }
     }
 }
@@ -471,6 +480,7 @@ impl<T: TerminalAdapter> Model<T> {
         agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
         display: &pilot_config::DisplayConfig,
+        ui: &pilot_config::UiDefaults,
     ) {
         // Both panes consume the configured agent: sidebar `f` for
         // CI-fail, right pane `f` for selected comments.
@@ -483,7 +493,13 @@ impl<T: TerminalAdapter> Model<T> {
             agent_shortcuts,
             default_agent,
             display,
+            ui,
         );
+        // Stash resolved defaults for model-level knobs (`q-q`
+        // window, terminal-escape char, split step) that used to be
+        // hardcoded consts.
+        self.ui_defaults = ui.clone();
+        self.right.apply_ui_defaults(ui);
     }
 
     /// Push the GitHub-style scope ids (e.g. `github:owner/repo`) the
@@ -1259,10 +1275,10 @@ impl<T: TerminalAdapter> Model<T> {
                 if key.modifiers.is_empty() && self.focus != PaneFocus::Terminals =>
             {
                 // q-q double-tap: first q outside a terminal arms the
-                // latch; second q within Q_DOUBLE_TAP_WINDOW quits.
+                // latch; second q within `ui.quit_double_tap_window` quits.
                 let now = std::time::Instant::now();
                 if let Some(armed_at) = self.q_armed_at
-                    && now.duration_since(armed_at) <= Q_DOUBLE_TAP_WINDOW
+                    && now.duration_since(armed_at) <= self.ui_defaults.quit_double_tap_window
                 {
                     self.quit = true;
                     return;
@@ -1302,10 +1318,10 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.q_armed_at = None;
                 let (dx, dy) = match key.code {
-                    Key::Left => (-SPLIT_STEP, 0),
-                    Key::Right => (SPLIT_STEP, 0),
-                    Key::Up => (0, -SPLIT_STEP),
-                    Key::Down => (0, SPLIT_STEP),
+                    Key::Left => (-self.ui_defaults.split_step_percent, 0),
+                    Key::Right => (self.ui_defaults.split_step_percent, 0),
+                    Key::Up => (0, -self.ui_defaults.split_step_percent),
+                    Key::Down => (0, self.ui_defaults.split_step_percent),
                     _ => (0, 0),
                 };
                 if self.layout.nudge_splits(dx, dy) {
@@ -1422,7 +1438,8 @@ impl<T: TerminalAdapter> Model<T> {
         // first so the user's `]` isn't silently swallowed.
         if self.focus == PaneFocus::Terminals
             && key.modifiers.is_empty()
-            && matches!(key.code, Key::Char(c) if c == TERMINAL_ESCAPE_CHAR)
+            && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
+        // (escape-char dispatch reads from `ui_defaults.terminal_escape_char`)
         {
             if self.escape_armed_at.is_some() {
                 // Second `]` — break out to sidebar.
@@ -1441,7 +1458,7 @@ impl<T: TerminalAdapter> Model<T> {
             // like `]a` aren't lost.
             let mut held_cmds: Vec<IpcCommand> = Vec::new();
             let held = crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(TERMINAL_ESCAPE_CHAR),
+                crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),
                 crossterm::event::KeyModifiers::NONE,
             );
             self.terminals.handle_key_direct(held, &mut held_cmds);
@@ -1497,7 +1514,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// hint bar to show "press q again" briefly).
     pub fn q_arm_pending(&self) -> bool {
         self.q_armed_at
-            .is_some_and(|t| t.elapsed() <= Q_DOUBLE_TAP_WINDOW)
+            .is_some_and(|t| t.elapsed() <= self.ui_defaults.quit_double_tap_window)
     }
 
     /// Read-only accessor — which pane currently has focus. Used by

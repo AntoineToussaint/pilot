@@ -1364,6 +1364,7 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
         HashMap::new(),
         None,
         &display,
+        &pilot_config::UiDefaults::default(),
     );
 
     let now = Utc::now();

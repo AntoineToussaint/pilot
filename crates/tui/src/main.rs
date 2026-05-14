@@ -67,18 +67,30 @@ mod tests {
     }
 }
 
-/// Where pilot's log file goes.
-const LOG_PATH: &str = "/tmp/pilot.log";
+/// Fallback log path when the config can't be read. Matches the old
+/// hardcoded constant so existing operators / docs that reference
+/// `/tmp/pilot.log` still find what they expect.
+const LOG_PATH_FALLBACK: &str = "/tmp/pilot.log";
 
-/// Initialize tracing to write to `/tmp/pilot.log` instead of stderr.
+/// Resolve the log path: prefer `~/.pilot/config.yaml::ui.log_path`,
+/// fall back to `LOG_PATH_FALLBACK` when the config can't be loaded.
+fn resolve_log_path() -> std::path::PathBuf {
+    pilot_config::Config::load()
+        .map(|c| c.ui.resolved().log_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(LOG_PATH_FALLBACK))
+}
+
+/// Initialize tracing to write to the configured log file instead of
+/// stderr.
 fn init_tracing() -> anyhow::Result<()> {
     use std::fs::OpenOptions;
 
+    let log_path = resolve_log_path();
     let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(LOG_PATH)
-        .map_err(|e| anyhow::anyhow!("open {LOG_PATH}: {e}"))?;
+        .open(&log_path)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", log_path.display()))?;
 
     // Route the OS stderr into the same log file so native logs from
     // below the Rust layer (libghostty-vt Zig log, libgit2 stderr,
@@ -345,12 +357,14 @@ async fn run_embedded_realm(
             .clone()
             .into_iter()
             .collect();
+        let ui_defaults = user_config.ui.resolved();
         model.apply_sidebar_config(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
             agent_shortcuts,
             user_config.setup.default_agent.clone(),
             &user_config.display,
+            &ui_defaults,
         );
         model = model.with_splits(
             user_config.ui.sidebar_pct,

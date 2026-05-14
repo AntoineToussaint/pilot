@@ -128,6 +128,7 @@ impl Sidebar {
         agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
         display: &pilot_config::DisplayConfig,
+        ui: &pilot_config::UiDefaults,
     ) {
         self.inner.apply_config(
             attention,
@@ -135,6 +136,7 @@ impl Sidebar {
             agent_shortcuts,
             default_agent,
             display,
+            ui,
         );
     }
 

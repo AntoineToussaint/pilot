@@ -139,6 +139,12 @@ pub struct Sidebar {
     /// the latch, a single fat-fingered keypress muted the
     /// workspace for 365 days with no undo affordance.
     long_snooze_pending: Option<SessionKey>,
+    /// `z` snooze duration. Configurable via
+    /// `~/.pilot/config.yaml::ui.short_snooze` (default 4h).
+    short_snooze: std::time::Duration,
+    /// `Shift-Z` long-snooze duration. Configurable via
+    /// `ui.long_snooze` (default 1 year).
+    long_snooze: std::time::Duration,
     /// If set, `Shift-X` has been pressed once on this row. A
     /// second press executes the kill. Any other key clears.
     kill_pending: Option<SessionKey>,
@@ -192,6 +198,8 @@ impl Sidebar {
             kill_pending: None,
             merge_pending: None,
             long_snooze_pending: None,
+            short_snooze: pilot_config::UiDefaults::default().short_snooze,
+            long_snooze: pilot_config::UiDefaults::default().long_snooze,
             agent_shortcuts,
             running_terminals: HashMap::new(),
             attention: pilot_config::AttentionConfig::default(),
@@ -257,6 +265,7 @@ impl Sidebar {
         agent_shortcuts: HashMap<char, String>,
         default_agent: Option<String>,
         display: &pilot_config::DisplayConfig,
+        ui: &pilot_config::UiDefaults,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
@@ -266,6 +275,8 @@ impl Sidebar {
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
+        self.short_snooze = ui.short_snooze;
+        self.long_snooze = ui.long_snooze;
         self.set_show_inactive_in_inbox(display.show_inactive_in_inbox);
     }
 
@@ -1145,10 +1156,10 @@ impl Sidebar {
                 if already {
                     cmds.push(Command::Unsnooze { session_key });
                 } else {
-                    cmds.push(Command::Snooze {
-                        session_key,
-                        until: now + chrono::Duration::hours(4),
-                    });
+                    let until = now
+                        + chrono::Duration::from_std(self.short_snooze)
+                            .unwrap_or(chrono::Duration::hours(4));
+                    cmds.push(Command::Snooze { session_key, until });
                 }
                 PaneOutcome::Consumed
             }
@@ -1162,10 +1173,10 @@ impl Sidebar {
                 if self.long_snooze_pending.as_ref() == Some(&session_key) {
                     self.long_snooze_pending = None;
                     let now = chrono::Utc::now();
-                    cmds.push(Command::Snooze {
-                        session_key,
-                        until: now + chrono::Duration::days(365),
-                    });
+                    let until = now
+                        + chrono::Duration::from_std(self.long_snooze)
+                            .unwrap_or(chrono::Duration::days(365));
+                    cmds.push(Command::Snooze { session_key, until });
                 } else {
                     self.long_snooze_pending = Some(session_key);
                 }

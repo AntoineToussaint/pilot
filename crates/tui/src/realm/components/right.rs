@@ -101,6 +101,13 @@ impl Right {
         self.inner.contextual_bindings()
     }
 
+    /// Apply resolved `UiDefaults` (auto-mark delay, task body cap,
+    /// etc.) to the inner pane. Called once at startup from the
+    /// model's `apply_sidebar_config`.
+    pub fn apply_ui_defaults(&mut self, ui: &pilot_config::UiDefaults) {
+        self.inner.apply_ui_defaults(ui);
+    }
+
     /// Forward to the inner pane's detach spec, if any.
     pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
         self.inner.detachable()

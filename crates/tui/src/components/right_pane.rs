@@ -93,12 +93,16 @@ pub struct RightPane {
     /// when they need it. Without this default a 200-line PR
     /// description squeezed the activity feed off-screen.
     task_body_collapsed: bool,
+    /// Resolved cap on the task-body expanded height, sourced from
+    /// `~/.pilot/config.yaml::ui.task_body_max_rows` (default 8).
+    task_body_max_rows: u16,
+    /// Resolved auto-mark-read timer, sourced from
+    /// `ui.auto_mark_delay` (default 1 s).
+    auto_mark_delay: std::time::Duration,
 }
 
-/// How long the cursor has to sit on an unread row before we
-/// auto-mark it. yazi-ish: long enough to scan past, short enough
-/// that the user feels in control.
-const MARK_READ_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
+// `MARK_READ_DELAY` retired — value lives on `self.auto_mark_delay`
+// now, sourced from `~/.pilot/config.yaml::ui.auto_mark_delay`.
 
 impl RightPane {
     pub fn new(id: PaneId) -> Self {
@@ -118,7 +122,16 @@ impl RightPane {
             selected_activities: HashSet::new(),
             default_agent: "claude".to_string(),
             task_body_collapsed: true,
+            task_body_max_rows: pilot_config::UiDefaults::default().task_body_max_rows,
+            auto_mark_delay: pilot_config::UiDefaults::default().auto_mark_delay,
         }
+    }
+
+    /// Apply resolved `UiDefaults` once at startup. Subsequent
+    /// hot-reload of the YAML would call this again; idempotent.
+    pub fn apply_ui_defaults(&mut self, ui: &pilot_config::UiDefaults) {
+        self.task_body_max_rows = ui.task_body_max_rows;
+        self.auto_mark_delay = ui.auto_mark_delay;
     }
 
     /// Override the agent the `f` (fix) shortcut spawns. AppRoot
@@ -139,7 +152,7 @@ impl RightPane {
     pub fn auto_mark_progress(&self) -> Option<f32> {
         let armed = self.mark_armed_at?;
         let elapsed = armed.elapsed();
-        let ratio = elapsed.as_secs_f32() / MARK_READ_DELAY.as_secs_f32();
+        let ratio = elapsed.as_secs_f32() / self.auto_mark_delay.as_secs_f32();
         Some(ratio.clamp(0.0, 1.0))
     }
 
@@ -224,7 +237,7 @@ impl RightPane {
             return None;
         }
         let armed = self.mark_armed_at?;
-        if armed.elapsed() < MARK_READ_DELAY {
+        if armed.elapsed() < self.auto_mark_delay {
             return None;
         }
         self.fire_auto_mark()
@@ -1067,19 +1080,19 @@ impl RightPane {
     /// `Constraint::Max(...)` upper bound. The renderer itself caps
     /// at the same number so the body never overflows.
     fn task_body_content_rows(&self) -> u16 {
-        const TASK_BODY_MAX_ROWS: u16 = 8;
         let Some(body) = self.task_body_str() else {
             return 0;
         };
+        let cap = self.task_body_max_rows;
         // Width-aware render so wrapping affects the count. 80 is a
         // conservative default — actual render uses `area.width`,
         // which is always ≥ this for any practical terminal.
         let rendered = crate::components::comment_render::render_body(
             body,
             80,
-            TASK_BODY_MAX_ROWS as usize,
+            cap as usize,
         );
-        (rendered.len() as u16).min(TASK_BODY_MAX_ROWS)
+        (rendered.len() as u16).min(cap)
     }
 
     fn has_task_body(&self) -> bool {

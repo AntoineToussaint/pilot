@@ -18,8 +18,12 @@ pub(crate) const DEFAULT_RIGHT_TOP_PCT: u16 = 25;
 /// usable — no zero-height activity feed, no sliver sidebar.
 pub(crate) const SPLIT_MIN: u16 = 15;
 pub(crate) const SPLIT_MAX: u16 = 80;
-/// Step size per Shift-arrow tap. Picked so 4-5 taps cover a useful
-/// range and a single tap is visibly more than a shimmer.
+/// Default step size per Shift-arrow tap. Picked so 4-5 taps cover
+/// a useful range and a single tap is visibly more than a shimmer.
+/// Live value reads from `ui.split_step_percent` (via
+/// `pilot_config::UiDefaults`) — kept here so the tests below stay
+/// readable.
+#[cfg(test)]
 pub(crate) const SPLIT_STEP: i16 = 3;
 
 /// Which splitter the user is currently dragging.

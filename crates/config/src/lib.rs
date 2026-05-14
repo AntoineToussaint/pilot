@@ -130,6 +130,88 @@ pub struct UiSection {
     /// Right-top (activity) row height as a percentage of the
     /// right column. None = use the default (25%).
     pub right_top_pct: Option<u16>,
+    /// How long the cursor must sit on an unread activity row
+    /// before the daemon auto-marks it read. None = 1 second (the
+    /// historical default). Yazi-ish: long enough to scan past,
+    /// short enough that the user feels in control.
+    #[serde(with = "duration_secs_opt", default)]
+    pub auto_mark_delay: Option<Duration>,
+    /// How long the first `q` stays armed waiting for the second
+    /// tap. None = 800 ms.
+    #[serde(with = "duration_secs_opt", default)]
+    pub quit_double_tap_window: Option<Duration>,
+    /// Two consecutive presses of this character return focus from
+    /// the terminal pane back to the sidebar (tmux-style prefix).
+    /// None = `]`.
+    pub terminal_escape_char: Option<char>,
+    /// Shift-arrow nudges the focused splitter by this many
+    /// percent. None = 3.
+    pub split_step_percent: Option<i16>,
+    /// Cap on the description / task-body section's expanded
+    /// height (in rows) when `b` toggles it open. None = 8.
+    pub task_body_max_rows: Option<u16>,
+    /// `z` snooze duration. None = 4 hours.
+    #[serde(with = "duration_secs_opt", default)]
+    pub short_snooze: Option<Duration>,
+    /// `Shift-Z` long-snooze duration. None = ~1 year (365 days).
+    #[serde(with = "duration_secs_opt", default)]
+    pub long_snooze: Option<Duration>,
+    /// Where the pilot client writes its log file. None =
+    /// `/tmp/pilot.log`. Future: respect `$XDG_STATE_HOME` /
+    /// `~/.pilot/logs/pilot.log` as a smarter default.
+    pub log_path: Option<std::path::PathBuf>,
+}
+
+/// Concrete UI settings with every `Option<T>` from `UiSection`
+/// resolved to its default. Consumers (panes, model) read this
+/// instead of duplicating defaults inline. Pure data — clone-cheap.
+#[derive(Debug, Clone)]
+pub struct UiDefaults {
+    pub auto_mark_delay: Duration,
+    pub quit_double_tap_window: Duration,
+    pub terminal_escape_char: char,
+    pub split_step_percent: i16,
+    pub task_body_max_rows: u16,
+    pub short_snooze: Duration,
+    pub long_snooze: Duration,
+    pub log_path: std::path::PathBuf,
+}
+
+impl Default for UiDefaults {
+    fn default() -> Self {
+        Self {
+            auto_mark_delay: Duration::from_millis(1000),
+            quit_double_tap_window: Duration::from_millis(800),
+            terminal_escape_char: ']',
+            split_step_percent: 3,
+            task_body_max_rows: 8,
+            short_snooze: Duration::from_secs(4 * 60 * 60),
+            long_snooze: Duration::from_secs(365 * 24 * 60 * 60),
+            log_path: std::path::PathBuf::from("/tmp/pilot.log"),
+        }
+    }
+}
+
+impl UiSection {
+    /// Resolve every optional knob to a concrete value, filling
+    /// missing entries with `UiDefaults::default()`. Call once at
+    /// startup; share the result with whichever component reads
+    /// each field.
+    pub fn resolved(&self) -> UiDefaults {
+        let d = UiDefaults::default();
+        UiDefaults {
+            auto_mark_delay: self.auto_mark_delay.unwrap_or(d.auto_mark_delay),
+            quit_double_tap_window: self
+                .quit_double_tap_window
+                .unwrap_or(d.quit_double_tap_window),
+            terminal_escape_char: self.terminal_escape_char.unwrap_or(d.terminal_escape_char),
+            split_step_percent: self.split_step_percent.unwrap_or(d.split_step_percent),
+            task_body_max_rows: self.task_body_max_rows.unwrap_or(d.task_body_max_rows),
+            short_snooze: self.short_snooze.unwrap_or(d.short_snooze),
+            long_snooze: self.long_snooze.unwrap_or(d.long_snooze),
+            log_path: self.log_path.clone().unwrap_or(d.log_path),
+        }
+    }
 }
 
 /// Worktree-layout configuration — mount points, mostly. The daemon
@@ -523,6 +605,39 @@ mod duration_secs {
     }
 }
 
+/// Optional-Duration variant: accepts a `"30s"`-style YAML value or
+/// the absence of the key. Used by `UiSection` for timing knobs
+/// whose default lives in the consumer (so the helper here is just
+/// "wire the string ↔ Duration").
+mod duration_secs_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(
+        d: &Option<Duration>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match d {
+            Some(d) => s.serialize_str(&format!("{}s", d.as_secs())),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Duration>, D::Error> {
+        let s: Option<String> = Option::deserialize(d)?;
+        match s {
+            Some(s) => {
+                let trimmed = s.trim_end_matches('s');
+                let secs: u64 = trimmed.parse().map_err(serde::de::Error::custom)?;
+                Ok(Some(Duration::from_secs(secs)))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -592,5 +707,43 @@ repos:
         assert_eq!(m.placement, PlacementSpec::Above);
         let written = serde_yaml::to_string(&cfg).unwrap();
         assert!(written.contains("placement: above"));
+    }
+
+    #[test]
+    fn ui_resolved_falls_back_to_defaults_when_section_is_empty() {
+        let ui = UiSection::default();
+        let r = ui.resolved();
+        let d = UiDefaults::default();
+        assert_eq!(r.auto_mark_delay, d.auto_mark_delay);
+        assert_eq!(r.quit_double_tap_window, d.quit_double_tap_window);
+        assert_eq!(r.terminal_escape_char, d.terminal_escape_char);
+        assert_eq!(r.split_step_percent, d.split_step_percent);
+        assert_eq!(r.task_body_max_rows, d.task_body_max_rows);
+        assert_eq!(r.short_snooze, d.short_snooze);
+        assert_eq!(r.long_snooze, d.long_snooze);
+        assert_eq!(r.log_path, d.log_path);
+    }
+
+    #[test]
+    fn ui_resolved_honors_explicit_values() {
+        // Pin the contract: a user setting in YAML wins over the
+        // default. The whole point of moving these from `const` to
+        // `Option<T>` is that this assertion can hold.
+        let ui = UiSection {
+            terminal_escape_char: Some('}'),
+            task_body_max_rows: Some(20),
+            split_step_percent: Some(7),
+            short_snooze: Some(Duration::from_secs(15 * 60)),
+            long_snooze: Some(Duration::from_secs(7 * 24 * 3600)),
+            log_path: Some(std::path::PathBuf::from("/var/log/pilot.log")),
+            ..Default::default()
+        };
+        let r = ui.resolved();
+        assert_eq!(r.terminal_escape_char, '}');
+        assert_eq!(r.task_body_max_rows, 20);
+        assert_eq!(r.split_step_percent, 7);
+        assert_eq!(r.short_snooze, Duration::from_secs(15 * 60));
+        assert_eq!(r.long_snooze, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(r.log_path, std::path::PathBuf::from("/var/log/pilot.log"));
     }
 }
