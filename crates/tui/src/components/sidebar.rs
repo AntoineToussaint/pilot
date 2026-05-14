@@ -583,69 +583,38 @@ impl Sidebar {
             .sum()
     }
 
-    /// Number of visible workspaces with at least one session whose
-    /// agent is currently waiting on the user (`SessionRunState::Asking`).
-    /// Drives the `? N input` indicator in the top header — a quick
-    /// "agents stuck on prompts" tally.
-    fn input_pending_count(&self) -> usize {
+    /// Number of visible workspaces currently carrying `signal`. All
+    /// per-signal header counters go through this helper so the
+    /// `? N input` / `N CI` / `N review` totals agree with the
+    /// per-repo "needs attention" badge — they read the same
+    /// producer (`workspace_attention_signals`).
+    fn count_visible_with_signal(&self, signal: AttentionSignal) -> usize {
         self.visible
             .iter()
             .filter_map(|r| match r {
                 VisibleRow::Workspace(k) => self.workspaces.get(k),
                 _ => None,
             })
-            .filter(|w| {
-                w.sessions
-                    .iter()
-                    .any(|s| matches!(s.state, pilot_core::SessionRunState::Asking))
-            })
+            .filter(|w| workspace_attention_signals(w).contains(&signal))
             .count()
     }
 
-    /// Visible workspaces with a failing CI on the primary task.
+    /// Drives the `? N input` indicator in the top header — a quick
+    /// "agents stuck on prompts" tally.
+    fn input_pending_count(&self) -> usize {
+        self.count_visible_with_signal(AttentionSignal::AgentAsking)
+    }
+
     /// Drives the `N CI` summary — at-a-glance "how many of my PRs
     /// are broken right now."
     fn ci_failing_count(&self) -> usize {
-        self.visible
-            .iter()
-            .filter_map(|r| match r {
-                VisibleRow::Workspace(k) => self.workspaces.get(k),
-                _ => None,
-            })
-            .filter(|w| {
-                w.primary_task()
-                    .map(|t| {
-                        matches!(
-                            t.ci,
-                            pilot_core::CiStatus::Failure | pilot_core::CiStatus::Mixed
-                        )
-                    })
-                    .unwrap_or(false)
-            })
-            .count()
+        self.count_visible_with_signal(AttentionSignal::CiFailing)
     }
 
     /// Visible workspaces where a reviewer is requested or a review
     /// is pending — the "N review" half of the stats row.
     fn review_pending_count(&self) -> usize {
-        self.visible
-            .iter()
-            .filter_map(|r| match r {
-                VisibleRow::Workspace(k) => self.workspaces.get(k),
-                _ => None,
-            })
-            .filter(|w| {
-                w.primary_task()
-                    .map(|t| {
-                        matches!(
-                            t.review,
-                            pilot_core::ReviewStatus::Pending
-                                | pilot_core::ReviewStatus::ChangesRequested
-                        ) || !t.reviewers.is_empty()
-                    })
-                    .unwrap_or(false)
-            })
-            .count()
+        self.count_visible_with_signal(AttentionSignal::ReviewPending)
     }
 
     /// Stable single-letter key for a runner kind. Drives the workspace
@@ -2134,40 +2103,90 @@ pub fn mailbox_membership(
     }
 }
 
-fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig) -> bool {
-    if cfg.unread && w.unread_count() > 0 {
-        return true;
+/// One reason a workspace might want the user's attention. Single
+/// vocabulary used by `workspace_attention_signals` (pure producer),
+/// `workspace_needs_attention` (gated by config), and the per-
+/// signal header counters (`Unread`/`AgentAsking`/`CiFailing`/…).
+///
+/// Adding a new signal means: add a variant here, add a producer
+/// branch in `workspace_attention_signals`, add a config flag, and
+/// — because the gate match below is exhaustive — the compiler
+/// catches the missing wiring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionSignal {
+    Unread,
+    AgentAsking,
+    CiFailing,
+    ReviewPending,
+    Mentioned,
+}
+
+/// Pure: every attention signal currently active for `w`. Order is
+/// stable (matches the producer below) so callers that want
+/// priority-aware behavior can read the first hit.
+///
+/// **Single source of truth.** The per-repo `needs attention`
+/// counter, the header signal totals (`? N input`, `N CI`,
+/// `N review`), and the row pill all derive from this one
+/// producer. Before unification, each consumer had its own ad-hoc
+/// check: `review_pending_count` counted "reviewers requested"
+/// (even without ChangesRequested), `workspace_needs_attention`
+/// didn't — so a repo with reviewers-only PRs lit the header
+/// counter but not the repo badge.
+pub fn workspace_attention_signals(w: &Workspace) -> Vec<AttentionSignal> {
+    let mut out = Vec::new();
+    if w.unread_count() > 0 {
+        out.push(AttentionSignal::Unread);
     }
-    if cfg.agent_asking
-        && w.sessions
-            .iter()
-            .any(|s| matches!(s.state, pilot_core::SessionRunState::Asking))
+    if w.sessions
+        .iter()
+        .any(|s| matches!(s.state, pilot_core::SessionRunState::Asking))
     {
-        return true;
+        out.push(AttentionSignal::AgentAsking);
     }
     if let Some(t) = w.primary_task() {
-        if cfg.ci_failing
-            && matches!(
-                t.ci,
-                pilot_core::CiStatus::Failure | pilot_core::CiStatus::Mixed
-            )
-        {
-            return true;
+        if matches!(
+            t.ci,
+            pilot_core::CiStatus::Failure | pilot_core::CiStatus::Mixed
+        ) {
+            out.push(AttentionSignal::CiFailing);
         }
-        if cfg.review_pending
-            && matches!(
-                t.review,
-                pilot_core::ReviewStatus::ChangesRequested
-                    | pilot_core::ReviewStatus::Pending
-            )
+        // ReviewPending unifies: explicit ReviewStatus + reviewers
+        // requested. The previous split (header counter had the
+        // `reviewers.is_empty()` extra, attention badge didn't) led
+        // to "1 review" in the header next to a repo header with no
+        // attention dot — confusing.
+        if matches!(
+            t.review,
+            pilot_core::ReviewStatus::Pending | pilot_core::ReviewStatus::ChangesRequested,
+        ) || !t.reviewers.is_empty()
         {
-            return true;
+            out.push(AttentionSignal::ReviewPending);
         }
-        if cfg.mentioned && matches!(t.role, pilot_core::TaskRole::Mentioned) {
-            return true;
+        if matches!(t.role, pilot_core::TaskRole::Mentioned) {
+            out.push(AttentionSignal::Mentioned);
         }
     }
-    false
+    out
+}
+
+/// Is `signal` enabled in the user's attention config? Exhaustive
+/// match so a new `AttentionSignal` variant fails to compile until
+/// it's wired up here AND in `AttentionConfig`.
+fn attention_gate(signal: AttentionSignal, cfg: &pilot_config::AttentionConfig) -> bool {
+    match signal {
+        AttentionSignal::Unread => cfg.unread,
+        AttentionSignal::AgentAsking => cfg.agent_asking,
+        AttentionSignal::CiFailing => cfg.ci_failing,
+        AttentionSignal::ReviewPending => cfg.review_pending,
+        AttentionSignal::Mentioned => cfg.mentioned,
+    }
+}
+
+fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig) -> bool {
+    workspace_attention_signals(w)
+        .iter()
+        .any(|s| attention_gate(*s, cfg))
 }
 
 /// Render the right-trailer pill for a task. **Pure mapping** from
@@ -2981,5 +3000,172 @@ mod mailbox_membership_tests {
     fn unsnoozed_open_pr_is_not_in_snoozed() {
         let w = ws(Some(TaskState::Open));
         assert!(!mailbox_membership(&w, Mailbox::Snoozed, Utc::now(), false));
+    }
+}
+
+#[cfg(test)]
+mod attention_signal_tests {
+    //! Single-source-of-truth contract: every "needs attention"
+    //! signal flows through `workspace_attention_signals`. The
+    //! per-repo badge (`workspace_needs_attention`) and the header
+    //! counters (`input_pending_count` / `ci_failing_count` /
+    //! `review_pending_count`) used to compute their own predicates
+    //! and drifted — a workspace with reviewers requested but no
+    //! ChangesRequested/Pending status used to bump the `N review`
+    //! header counter but NOT the repo attention dot. Now both
+    //! read the same signals.
+
+    use super::*;
+    use super::status_pill_tests::base_task;
+    use pilot_core::{ReviewStatus, SessionRunState, SessionKind, TaskRole, Workspace, WorkspaceKey, WorkspaceSession};
+    use std::path::PathBuf;
+
+    fn ws_from_pr(mut task: pilot_core::Task) -> Workspace {
+        // The classifier slots tasks based on URL — `/pull/N` lands in
+        // the PR slot, everything else falls through to gh_issues.
+        // Force a PR URL so `primary_task` returns this task.
+        if !task.url.contains("/pull/") {
+            task.url = "https://github.com/o/r/pull/1".into();
+        }
+        Workspace::from_task(task, chrono::Utc::now())
+    }
+
+    fn agent_session(state: SessionRunState) -> WorkspaceSession {
+        WorkspaceSession {
+            id: pilot_core::SessionId::new(),
+            workspace_key: WorkspaceKey::new("k"),
+            name: "claude".into(),
+            kind: SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            state,
+            worktree_path: PathBuf::from("/tmp/x"),
+            created_at: chrono::Utc::now(),
+            last_output_at: None,
+            layout: Default::default(),
+        }
+    }
+
+    #[test]
+    fn no_signals_when_quiet() {
+        // Plain open PR, no review, no CI, no unread: no signals.
+        let w = ws_from_pr(base_task());
+        assert!(workspace_attention_signals(&w).is_empty());
+    }
+
+    #[test]
+    fn ci_failure_emits_ci_failing_signal() {
+        let mut t = base_task();
+        t.ci = pilot_core::CiStatus::Failure;
+        let w = ws_from_pr(t);
+        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::CiFailing));
+    }
+
+    #[test]
+    fn ci_mixed_also_emits_ci_failing_signal() {
+        // CI Mixed is a "partial failure" — treated the same as
+        // Failure for attention purposes. Pinned because the
+        // matches!() body easily drifts.
+        let mut t = base_task();
+        t.ci = pilot_core::CiStatus::Mixed;
+        let w = ws_from_pr(t);
+        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::CiFailing));
+    }
+
+    #[test]
+    fn reviewers_requested_emits_review_signal_even_without_pending_status() {
+        // The pre-unification bug: a PR with reviewers but
+        // ReviewStatus::None bumped the header counter but not the
+        // repo badge. Now both see the same signal.
+        let mut t = base_task();
+        t.review = ReviewStatus::None;
+        t.reviewers = vec!["alice".into()];
+        let w = ws_from_pr(t);
+        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::ReviewPending));
+    }
+
+    #[test]
+    fn changes_requested_emits_review_signal() {
+        let mut t = base_task();
+        t.review = ReviewStatus::ChangesRequested;
+        let w = ws_from_pr(t);
+        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::ReviewPending));
+    }
+
+    #[test]
+    fn mentioned_role_emits_mentioned_signal() {
+        let mut t = base_task();
+        t.role = TaskRole::Mentioned;
+        let w = ws_from_pr(t);
+        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::Mentioned));
+    }
+
+    #[test]
+    fn agent_asking_session_emits_signal() {
+        let mut w = ws_from_pr(base_task());
+        w.sessions = vec![agent_session(SessionRunState::Asking)];
+        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::AgentAsking));
+    }
+
+    #[test]
+    fn agent_active_session_does_not_emit_asking_signal() {
+        let mut w = ws_from_pr(base_task());
+        w.sessions = vec![agent_session(SessionRunState::Active)];
+        assert!(!workspace_attention_signals(&w).contains(&AttentionSignal::AgentAsking));
+    }
+
+    // ── needs_attention vs the gate ───────────────────────────────
+
+    #[test]
+    fn needs_attention_returns_false_when_all_signals_gated_off() {
+        // All gates off → no attention even with active signals.
+        let mut t = base_task();
+        t.ci = pilot_core::CiStatus::Failure;
+        t.review = ReviewStatus::ChangesRequested;
+        let w = ws_from_pr(t);
+        let cfg = pilot_config::AttentionConfig {
+            unread: false,
+            ci_failing: false,
+            review_pending: false,
+            agent_asking: false,
+            mentioned: false,
+        };
+        assert!(!workspace_needs_attention(&w, &cfg));
+    }
+
+    #[test]
+    fn needs_attention_returns_true_when_any_gated_on_signal_active() {
+        let mut t = base_task();
+        t.ci = pilot_core::CiStatus::Failure;
+        let w = ws_from_pr(t);
+        let mut cfg = pilot_config::AttentionConfig {
+            unread: false,
+            ci_failing: false,
+            review_pending: false,
+            agent_asking: false,
+            mentioned: false,
+        };
+        assert!(!workspace_needs_attention(&w, &cfg), "all gates off → false");
+        cfg.ci_failing = true;
+        assert!(workspace_needs_attention(&w, &cfg), "CI gate on → true");
+    }
+
+    // ── consistency contract: badge vs counter ─────────────────────
+
+    #[test]
+    fn reviewers_requested_workspace_lights_both_counter_and_attention() {
+        // Regression for the pre-audit divergence: this exact
+        // shape (reviewers requested, status None) used to
+        // contribute to `review_pending_count` but not
+        // `workspace_needs_attention`. Now both see the same
+        // ReviewPending signal.
+        let mut t = base_task();
+        t.review = ReviewStatus::None;
+        t.reviewers = vec!["alice".into()];
+        let w = ws_from_pr(t);
+        let signals = workspace_attention_signals(&w);
+        assert!(signals.contains(&AttentionSignal::ReviewPending));
+        let cfg = pilot_config::AttentionConfig::default();
+        assert!(workspace_needs_attention(&w, &cfg));
     }
 }
