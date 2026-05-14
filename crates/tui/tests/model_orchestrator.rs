@@ -69,6 +69,38 @@ fn remapped_quit_binding_fires_on_single_key_chord() {
 }
 
 #[test]
+fn remapped_reply_binding_mounts_reply_modal() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    // Seed a workspace so reply has something to target.
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![Workspace::empty(
+            WorkspaceKey::new("github:o/r#1"),
+            "main",
+            Utc::now(),
+        )],
+        terminals: vec![],
+    });
+    m.apply_keybindings(pilot_config::Keybindings {
+        reply: "Ctrl-r".into(),
+        ..pilot_config::Keybindings::default()
+    });
+    m.dispatch_key(key_with(Key::Char('r'), KeyModifiers::CONTROL));
+    assert_eq!(m.top_modal(), Some(&Id::Reply));
+}
+
+#[test]
+fn remapped_new_workspace_binding_mounts_input() {
+    let mut m = build_model();
+    m.apply_keybindings(pilot_config::Keybindings {
+        new_workspace: "Ctrl-n".into(),
+        ..pilot_config::Keybindings::default()
+    });
+    m.dispatch_key(key_with(Key::Char('n'), KeyModifiers::CONTROL));
+    assert_eq!(m.top_modal(), Some(&Id::NewWorkspace));
+}
+
+#[test]
 fn remapped_help_binding_mounts_help_modal() {
     // Remap help to lowercase `h` and verify the modal opens.
     let mut m = build_model();

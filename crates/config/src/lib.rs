@@ -180,6 +180,18 @@ pub enum Action {
     Help,
     /// `,` — open the Settings palette.
     Settings,
+    /// `r` — open the reply textarea targeting the focused workspace.
+    Reply,
+    /// `e` — open the focused workspace's worktree in an editor.
+    OpenEditor,
+    /// `n` — input the name for a brand-new pre-PR workspace.
+    NewWorkspace,
+    /// `Enter` (from the sidebar) — focus the Activity pane to read
+    /// the workspace's comments.
+    FocusActivity,
+    /// `Shift-A` — open the "adopt sessions" picker for the focused
+    /// workspace.
+    AdoptSessions,
 }
 
 /// One keystroke pattern: `code` (a single char or named key) plus
@@ -281,6 +293,11 @@ pub struct Keybindings {
     pub quit: String,
     pub help: String,
     pub settings: String,
+    pub reply: String,
+    pub open_editor: String,
+    pub new_workspace: String,
+    pub focus_activity: String,
+    pub adopt_sessions: String,
 }
 
 impl Default for Keybindings {
@@ -289,6 +306,11 @@ impl Default for Keybindings {
             quit: "q q".into(),
             help: "?".into(),
             settings: ",".into(),
+            reply: "r".into(),
+            open_editor: "e".into(),
+            new_workspace: "n".into(),
+            focus_activity: "Enter".into(),
+            adopt_sessions: "Shift-A".into(),
         }
     }
 }
@@ -303,12 +325,22 @@ impl Keybindings {
             Action::Quit => &self.quit,
             Action::Help => &self.help,
             Action::Settings => &self.settings,
+            Action::Reply => &self.reply,
+            Action::OpenEditor => &self.open_editor,
+            Action::NewWorkspace => &self.new_workspace,
+            Action::FocusActivity => &self.focus_activity,
+            Action::AdoptSessions => &self.adopt_sessions,
         };
         KeySpec::parse_chord(user).unwrap_or_else(|| {
             let fallback = match action {
                 Action::Quit => "q q",
                 Action::Help => "?",
                 Action::Settings => ",",
+                Action::Reply => "r",
+                Action::OpenEditor => "e",
+                Action::NewWorkspace => "n",
+                Action::FocusActivity => "Enter",
+                Action::AdoptSessions => "Shift-A",
             };
             KeySpec::parse_chord(fallback)
                 .expect("fallback chord must parse — code-only constant")

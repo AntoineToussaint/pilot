@@ -1315,15 +1315,13 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_help();
                 return;
             }
-            // Enter on the sidebar = "open this row" → focus the
+            // `Enter` on the sidebar = "open this row" → focus the
             // Activity pane so the user can read comments / reply.
-            // Used to be a dead binding (advertised in the keymap
-            // but never matched anywhere), which surprised users
-            // looking for an "open" action. Right pane keeps its own
-            // Enter meaning (toggle section); terminals forward
-            // Enter as `\r` to the PTY.
-            Key::Enter
-                if key.modifiers.is_empty() && self.focus == PaneFocus::Sidebar =>
+            // Used to be a dead binding before this migration; right
+            // pane keeps its own Enter meaning (toggle section);
+            // terminals forward Enter as `\r` to the PTY.
+            _ if self.focus == PaneFocus::Sidebar
+                && self.matches_action(&key, pilot_config::Action::FocusActivity) =>
             {
                 self.q_armed_at = None;
                 self.focus = PaneFocus::Right;
@@ -1369,8 +1367,8 @@ impl<T: TerminalAdapter> Model<T> {
             // — replying is more naturally "an action on the thing
             // I'm reading" than "an action on the row". Disabled in
             // Terminals where `r` belongs to the PTY.
-            Key::Char('r')
-                if key.modifiers.is_empty() && self.focus != PaneFocus::Terminals =>
+            _ if self.focus != PaneFocus::Terminals
+                && self.matches_action(&key, pilot_config::Action::Reply) =>
             {
                 self.q_armed_at = None;
                 if let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() {
@@ -1380,21 +1378,17 @@ impl<T: TerminalAdapter> Model<T> {
             }
             // `e` from the sidebar: open the focused workspace's
             // worktree in an editor (Zed / VS Code / Cursor / …).
-            // Detection happens at startup; users add custom editors
-            // in `~/.pilot/config.yaml::editors`.
-            Key::Char('e')
-                if key.modifiers.is_empty() && self.focus == PaneFocus::Sidebar =>
+            _ if self.focus == PaneFocus::Sidebar
+                && self.matches_action(&key, pilot_config::Action::OpenEditor) =>
             {
                 self.q_armed_at = None;
                 self.open_editor();
                 return;
             }
             // `n` from the sidebar: prompt for a workspace name and
-            // create a brand-new pre-PR workspace. Lets the user
-            // start work in a fresh worktree before opening a PR
-            // (e.g. exploration / spike / experiments).
-            Key::Char('n')
-                if key.modifiers.is_empty() && self.focus == PaneFocus::Sidebar =>
+            // create a brand-new pre-PR workspace.
+            _ if self.focus == PaneFocus::Sidebar
+                && self.matches_action(&key, pilot_config::Action::NewWorkspace) =>
             {
                 self.q_armed_at = None;
                 self.mount_new_workspace_input();
@@ -1419,9 +1413,8 @@ impl<T: TerminalAdapter> Model<T> {
             // auto-merge prompt got rejected and they want to do it
             // manually later. Only fires when the focused workspace
             // actually has sessions to move.
-            Key::Char('A')
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && self.focus == PaneFocus::Sidebar =>
+            _ if self.focus == PaneFocus::Sidebar
+                && self.matches_action(&key, pilot_config::Action::AdoptSessions) =>
             {
                 self.q_armed_at = None;
                 let source = self.sidebar.selected_workspace().and_then(|w| {
