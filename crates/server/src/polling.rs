@@ -486,6 +486,16 @@ pub struct TickState {
     /// workspace can produce a fresh prompt later if it falls out
     /// of scope again.
     prompted_out_of_scope: std::collections::HashSet<String>,
+    /// Issue workspace keys we've already broadcast
+    /// `WorkspaceMergePending` for. Stays set until the matching
+    /// `Command::ConfirmMerge` lands (or the daemon restarts) so a
+    /// user staring at the modal doesn't get a stream of duplicate
+    /// prompts on every poll tick.
+    pub(crate) prompted_merge: std::collections::HashSet<String>,
+    /// Issue workspace keys for which the user replied "no" to the
+    /// merge prompt. We don't re-prompt this session — the user can
+    /// always merge by hand via the future adopt-sessions flow.
+    pub(crate) rejected_merge: std::collections::HashSet<String>,
 }
 
 pub async fn tick_with_state(
@@ -937,6 +947,15 @@ fn pr_workspace_claiming_issue(
 /// running); `terminal_meta` is rewritten so wire-side events for
 /// the old session_key flow to the new one.
 ///
+/// Safety net: when the issue workspace has live sessions, we DON'T
+/// merge silently — auto-absorbing a user's running Claude/codex
+/// session into a different workspace key is too easy to miss. We
+/// emit `WorkspaceMergePending` instead and stash the candidate;
+/// the TUI prompts and replies via `Command::ConfirmMerge`. Empty
+/// issue workspaces still merge silently and emit a
+/// `WorkspaceMerged` notice so the user sees the row disappear
+/// with context.
+///
 /// No-op when there's no PR, no `closes_issues`, or no matching
 /// issue workspace exists yet.
 async fn merge_closing_issue_workspaces(
@@ -950,99 +969,52 @@ async fn merge_closing_issue_workspaces(
         return;
     }
 
-    let pr_session_key: pilot_core::SessionKey = (&workspace.key).into();
     let mut closed_ids: Vec<pilot_core::TaskId> = pr.closes_issues.clone();
     closed_ids.dedup();
 
     for issue_id in closed_ids {
-        // The issue's standalone workspace key is whatever
-        // workspace_key_for() would have produced when the issue was
-        // first upserted. We synthesize that with a Task fragment
-        // since we only have the TaskId here — the slug logic uses
-        // source + key.
-        let stub = Task {
-            id: issue_id.clone(),
-            title: String::new(),
-            body: None,
-            state: pilot_core::TaskState::Open,
-            role: pilot_core::TaskRole::Author,
-            ci: pilot_core::CiStatus::None,
-            review: pilot_core::ReviewStatus::None,
-            checks: vec![],
-            unread_count: 0,
-            url: String::new(),
-            repo: None,
-            branch: None,
-            base_branch: None,
-            updated_at: Utc::now(),
-            labels: vec![],
-            reviewers: vec![],
-            assignees: vec![],
-            auto_merge_enabled: false,
-            is_in_merge_queue: false,
-            has_conflicts: false,
-            is_behind_base: false,
-            node_id: None,
-            needs_reply: false,
-            last_commenter: None,
-            recent_activity: vec![],
-            additions: 0,
-            deletions: 0,
-            closes_issues: vec![],
-        };
-        let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&stub));
+        let issue_key = issue_id_to_workspace_key(&issue_id);
         if issue_key == workspace.key {
             // Self-link — nothing to merge.
             continue;
         }
-        let Some(record) = config.store.get_workspace(&issue_key).ok().flatten() else {
-            continue;
-        };
-        let Some(json) = record.workspace_json else {
-            continue;
-        };
-        let Ok(issue_ws) = serde_json::from_str::<Workspace>(&json) else {
+        let Some(issue_ws) = load_workspace(config, &issue_key) else {
             continue;
         };
 
-        // 1. Move sessions. Each session carries its own
-        // workspace_key; rewrite it so future `worktree_slug` /
-        // path-migration sees the PR as the owner.
-        let issue_session_key: pilot_core::SessionKey = (&issue_key).into();
-        for mut session in issue_ws.sessions {
-            session.workspace_key = workspace.key.clone();
-            workspace.add_session(session);
-        }
-
-        // 2. Carry the issue Task data forward so the PR row shows
-        // a "linked issue: …" entry. If the issue workspace had its
-        // own gh_issues / linear_issues lists, splice those in too.
-        for issue_task in &issue_ws.gh_issues {
-            workspace.attach_task(issue_task.clone());
-        }
-        for issue_task in &issue_ws.linear_issues {
-            workspace.attach_task(issue_task.clone());
-        }
-
-        // 3. Rewrite terminal_meta so any terminals previously
-        // bound to the issue's session_key now route to the PR's
-        // session_key. Without this, reconnecting TUI clients would
-        // see orphan terminals (workspace gone, terminal still wired
-        // to its old key).
-        let mut meta = config.terminal_meta.lock().await;
-        for (_tid, entry) in meta.iter_mut() {
-            if entry.0 == issue_session_key {
-                entry.0 = pr_session_key.clone();
+        // Live-session safety net: stall and prompt rather than
+        // silently absorbing the user's running work. `prompted_merge`
+        // dedupes so a user staring at the modal doesn't see fresh
+        // copies every 60s; `rejected_merge` is the "no, leave them
+        // separate" pin until pilot restarts.
+        if !issue_ws.sessions.is_empty() {
+            let issue_key_str = issue_key.as_str().to_string();
+            let should_prompt = {
+                let mut state = config.poll_state.lock().await;
+                if state.rejected_merge.contains(&issue_key_str) {
+                    false
+                } else {
+                    state.prompted_merge.insert(issue_key_str)
+                }
+            };
+            if should_prompt {
+                let _ = config.bus.send(Event::WorkspaceMergePending {
+                    issue_workspace_key: issue_key.clone(),
+                    pr_workspace_key: workspace.key.clone(),
+                    issue_label: workspace_label_for(&issue_ws, &issue_key),
+                    pr_label: workspace_label_for(workspace, &workspace.key),
+                    active_terminal_count: issue_ws.sessions.len(),
+                });
             }
+            continue;
         }
-        drop(meta);
 
-        // 4. Drop the issue workspace from the store + broadcast
-        // its removal. We call `store.delete_workspace` directly
-        // (not `delete_workspace(config, ..)`) so we DON'T trigger
-        // the kill-loop in that helper — the terminals are alive
-        // and well, just rebadged. A bus broadcast keeps every
-        // connected TUI in sync without going through the kill path.
+        // Empty issue workspace — safe to merge silently. Emit a
+        // notice so the user sees the row collapse rather than
+        // mysteriously vanish.
+        let issue_label = workspace_label_for(&issue_ws, &issue_key);
+        let pr_label = workspace_label_for(workspace, &workspace.key);
+        absorb_issue_workspace(config, workspace, issue_ws).await;
         if let Err(e) = config.store.delete_workspace(&issue_key) {
             tracing::warn!(
                 issue_workspace = %issue_key,
@@ -1052,6 +1024,12 @@ async fn merge_closing_issue_workspaces(
         let _ = config
             .bus
             .send(Event::WorkspaceRemoved(issue_key.clone()));
+        let _ = config.bus.send(Event::WorkspaceMerged {
+            issue_workspace_key: issue_key.clone(),
+            pr_workspace_key: workspace.key.clone(),
+            issue_label,
+            pr_label,
+        });
 
         tracing::info!(
             issue_workspace = %issue_key,
@@ -1059,6 +1037,170 @@ async fn merge_closing_issue_workspaces(
             "merged issue workspace into PR (closingIssuesReferences)"
         );
     }
+}
+
+/// The TUI replied to a `WorkspaceMergePending` prompt. Accept → run
+/// the merge, persist + broadcast the absorbed PR workspace, drop the
+/// stash. Reject → drop the stash + pin the issue key into
+/// `rejected_merge` so we don't re-prompt this session.
+pub async fn handle_confirm_merge(
+    config: &ServerConfig,
+    issue_workspace_key: WorkspaceKey,
+    pr_workspace_key: WorkspaceKey,
+    accept: bool,
+) {
+    {
+        let mut state = config.poll_state.lock().await;
+        state.prompted_merge.remove(issue_workspace_key.as_str());
+        if !accept {
+            state
+                .rejected_merge
+                .insert(issue_workspace_key.as_str().to_string());
+        }
+    }
+    if !accept {
+        tracing::info!(
+            issue_workspace = %issue_workspace_key,
+            "user rejected workspace merge; pinned for this session"
+        );
+        return;
+    }
+
+    let Some(mut pr_ws) = load_workspace(config, &pr_workspace_key) else {
+        tracing::warn!(
+            pr_workspace = %pr_workspace_key,
+            "ConfirmMerge: PR workspace missing — aborting"
+        );
+        return;
+    };
+    let Some(issue_ws) = load_workspace(config, &issue_workspace_key) else {
+        tracing::warn!(
+            issue_workspace = %issue_workspace_key,
+            "ConfirmMerge: issue workspace missing — aborting"
+        );
+        return;
+    };
+    let issue_label = workspace_label_for(&issue_ws, &issue_workspace_key);
+    let pr_label = workspace_label_for(&pr_ws, &pr_workspace_key);
+
+    absorb_issue_workspace(config, &mut pr_ws, issue_ws).await;
+    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut pr_ws).await;
+
+    if let Err(e) = config.store.delete_workspace(&issue_workspace_key) {
+        tracing::warn!(
+            issue_workspace = %issue_workspace_key,
+            "delete_workspace during ConfirmMerge failed: {e}"
+        );
+    }
+    if let Ok(json) = serde_json::to_string(&pr_ws) {
+        let record = WorkspaceRecord {
+            key: pr_ws.key.as_str().to_string(),
+            created_at: pr_ws.created_at,
+            workspace_json: Some(json),
+        };
+        if let Err(e) = config.store.save_workspace(&record) {
+            tracing::error!(
+                workspace_key = %record.key,
+                "save_workspace during ConfirmMerge failed: {e}"
+            );
+        }
+    }
+
+    let _ = config
+        .bus
+        .send(Event::WorkspaceRemoved(issue_workspace_key.clone()));
+    let _ = config.bus.send(Event::WorkspaceMerged {
+        issue_workspace_key,
+        pr_workspace_key: pr_ws.key.clone(),
+        issue_label,
+        pr_label,
+    });
+    let _ = config
+        .bus
+        .send(Event::WorkspaceUpserted(Box::new(pr_ws)));
+}
+
+/// Move `issue_ws`'s sessions, gh/linear-issue tasks, and any
+/// terminal_meta entries onto `pr_workspace`. Caller is responsible
+/// for deleting the issue workspace from the store and broadcasting
+/// the `WorkspaceRemoved` / `WorkspaceUpserted` / `WorkspaceMerged`
+/// events around the call.
+async fn absorb_issue_workspace(
+    config: &ServerConfig,
+    pr_workspace: &mut Workspace,
+    issue_ws: Workspace,
+) {
+    let issue_session_key: pilot_core::SessionKey = (&issue_ws.key).into();
+    let pr_session_key: pilot_core::SessionKey = (&pr_workspace.key).into();
+
+    for mut session in issue_ws.sessions {
+        session.workspace_key = pr_workspace.key.clone();
+        pr_workspace.add_session(session);
+    }
+    for issue_task in &issue_ws.gh_issues {
+        pr_workspace.attach_task(issue_task.clone());
+    }
+    for issue_task in &issue_ws.linear_issues {
+        pr_workspace.attach_task(issue_task.clone());
+    }
+
+    let mut meta = config.terminal_meta.lock().await;
+    for (_tid, entry) in meta.iter_mut() {
+        if entry.0 == issue_session_key {
+            entry.0 = pr_session_key.clone();
+        }
+    }
+}
+
+/// Synthesize the workspace key an issue TaskId would have produced
+/// when first upserted as a standalone workspace.
+fn issue_id_to_workspace_key(issue_id: &pilot_core::TaskId) -> WorkspaceKey {
+    let stub = Task {
+        id: issue_id.clone(),
+        title: String::new(),
+        body: None,
+        state: pilot_core::TaskState::Open,
+        role: pilot_core::TaskRole::Author,
+        ci: pilot_core::CiStatus::None,
+        review: pilot_core::ReviewStatus::None,
+        checks: vec![],
+        unread_count: 0,
+        url: String::new(),
+        repo: None,
+        branch: None,
+        base_branch: None,
+        updated_at: Utc::now(),
+        labels: vec![],
+        reviewers: vec![],
+        assignees: vec![],
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        has_conflicts: false,
+        is_behind_base: false,
+        node_id: None,
+        needs_reply: false,
+        last_commenter: None,
+        recent_activity: vec![],
+        additions: 0,
+        deletions: 0,
+        closes_issues: vec![],
+    };
+    WorkspaceKey::new(pilot_core::workspace_key_for(&stub))
+}
+
+fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Workspace> {
+    let record = config.store.get_workspace(key).ok().flatten()?;
+    let json = record.workspace_json?;
+    serde_json::from_str::<Workspace>(&json).ok()
+}
+
+/// `owner/repo#N` for PR / issue rows; falls back to the workspace
+/// key string otherwise. Used in the confirm modal + footer notice.
+fn workspace_label_for(workspace: &Workspace, key: &WorkspaceKey) -> String {
+    workspace
+        .primary_task()
+        .map(|t| t.id.key.clone())
+        .unwrap_or_else(|| key.as_str().to_string())
 }
 
 /// Create an empty workspace (no PR, no issues) named by the user.

@@ -404,3 +404,90 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
         "queued out-of-scope prompt must surface after Help dismisses"
     );
 }
+
+#[test]
+fn merge_pending_event_mounts_confirm_modal() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
+        issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
+        pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+        issue_label: "o/r#71".into(),
+        pr_label: "o/r#141".into(),
+        active_terminal_count: 1,
+    });
+    assert_eq!(m.top_modal(), Some(&Id::MergeConfirm));
+}
+
+#[test]
+fn merge_confirm_yes_sends_accept_command() {
+    use pilot_ipc::Command;
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
+        issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
+        pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+        issue_label: "o/r#71".into(),
+        pr_label: "o/r#141".into(),
+        active_terminal_count: 1,
+    });
+    m.update(pilot_tui::realm::Msg::Confirmed(true));
+    // Drain the IPC pipe — we expect a ConfirmMerge { accept: true }.
+    let cmd = server.rx.try_recv().expect("ConfirmMerge command emitted");
+    match cmd {
+        Command::ConfirmMerge {
+            issue_workspace_key,
+            pr_workspace_key,
+            accept,
+        } => {
+            assert_eq!(issue_workspace_key.as_str(), "github-o-r-71");
+            assert_eq!(pr_workspace_key.as_str(), "github-o-r-141");
+            assert!(accept);
+        }
+        other => panic!("expected ConfirmMerge, got {other:?}"),
+    }
+    assert_eq!(m.top_modal(), None, "modal dismisses on confirm");
+}
+
+#[test]
+fn merge_confirm_esc_sends_reject_command() {
+    use pilot_ipc::Command;
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
+        issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
+        pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+        issue_label: "o/r#71".into(),
+        pr_label: "o/r#141".into(),
+        active_terminal_count: 1,
+    });
+    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    let cmd = server.rx.try_recv().expect("ConfirmMerge command emitted on Esc");
+    match cmd {
+        Command::ConfirmMerge { accept, .. } => assert!(!accept),
+        other => panic!("expected ConfirmMerge, got {other:?}"),
+    }
+}
+
+#[test]
+fn merge_pending_dedupes_re_emits_for_same_issue() {
+    // The daemon retries `WorkspaceMergePending` on every poll until
+    // confirmed; the TUI must NOT requeue duplicates. Otherwise the
+    // user would dismiss the modal only to see it re-mount from the
+    // queue.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    for _ in 0..3 {
+        m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
+            issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
+            pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+            issue_label: "o/r#71".into(),
+            pr_label: "o/r#141".into(),
+            active_terminal_count: 1,
+        });
+    }
+    // Dismiss the active prompt — the queue should be empty, not full
+    // of duplicates of the same prompt.
+    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    assert_eq!(m.top_modal(), None, "queue must not requeue duplicates");
+}

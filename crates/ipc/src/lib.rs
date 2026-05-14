@@ -329,6 +329,19 @@ pub enum Command {
     },
     Refresh,
     Shutdown,
+    /// Answer to a `WorkspaceMergePending` event. When the daemon
+    /// detects a PR that `closes` an issue whose workspace has live
+    /// sessions, it stalls the merge and asks via the TUI. The TUI
+    /// replies here: `accept=true` runs the merge (sessions move to
+    /// the PR workspace, issue row disappears); `accept=false`
+    /// leaves both rows visible and the stall is dropped — the
+    /// merge won't be re-prompted for this issue until pilot
+    /// restarts.
+    ConfirmMerge {
+        issue_workspace_key: pilot_core::WorkspaceKey,
+        pr_workspace_key: pilot_core::WorkspaceKey,
+        accept: bool,
+    },
     /// Start an agent runtime using a structured protocol surface. This
     /// does not replace `Spawn`; terminal clients can keep using PTY
     /// bytes while structured clients subscribe to run events.
@@ -425,6 +438,34 @@ pub enum Event {
         /// Number of live terminals (Claude/codex/shell/…) the user
         /// would lose if they confirm removal.
         active_terminal_count: usize,
+    },
+    /// Daemon detected a PR that closes an issue and wants to merge
+    /// the issue's workspace into the PR's — BUT the issue has live
+    /// sessions. The TUI asks the user; reply via
+    /// `Command::ConfirmMerge`. Without live sessions the daemon
+    /// merges silently and emits `WorkspaceMerged` instead.
+    WorkspaceMergePending {
+        issue_workspace_key: pilot_core::WorkspaceKey,
+        pr_workspace_key: pilot_core::WorkspaceKey,
+        /// Compact `owner/repo#N` form for both sides — the TUI renders
+        /// them in the confirm modal so the user can recognize what's
+        /// about to fold without memorizing keys.
+        issue_label: String,
+        pr_label: String,
+        /// Number of live terminals on the issue's side. The reason
+        /// we're prompting in the first place; the modal text quotes
+        /// it back so the user knows what they'd be moving.
+        active_terminal_count: usize,
+    },
+    /// Daemon collapsed an issue workspace into its closing PR. Sent
+    /// for both the silent (no live sessions) and the
+    /// post-confirm paths. The TUI flashes a footer notice so the
+    /// inbox-row disappearance isn't surprising.
+    WorkspaceMerged {
+        issue_workspace_key: pilot_core::WorkspaceKey,
+        pr_workspace_key: pilot_core::WorkspaceKey,
+        issue_label: String,
+        pr_label: String,
     },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and

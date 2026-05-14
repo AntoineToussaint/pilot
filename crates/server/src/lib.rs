@@ -513,6 +513,19 @@ impl Server {
                             }
                         }
                         pilot_ipc::Command::Shutdown => break,
+                        pilot_ipc::Command::ConfirmMerge {
+                            issue_workspace_key,
+                            pr_workspace_key,
+                            accept,
+                        } => {
+                            polling::handle_confirm_merge(
+                                &self.config,
+                                issue_workspace_key,
+                                pr_workspace_key,
+                                accept,
+                            )
+                            .await;
+                        }
                     }
                 }
                 bus = bus_rx.recv() => {

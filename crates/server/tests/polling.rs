@@ -1222,10 +1222,13 @@ fn make_pr_closing(pr_key: &str, closes: &[&str]) -> Task {
 
 #[tokio::test]
 async fn pr_polled_after_issue_collapses_them_into_one_row() {
-    // Issue is polled first → standalone workspace. PR shows up
-    // claiming the issue via closingIssuesReferences → the issue
-    // workspace folds into the PR's, the standalone row disappears.
+    // Issue is polled first → standalone workspace (zero sessions).
+    // PR shows up claiming the issue via closingIssuesReferences →
+    // the empty issue workspace folds into the PR's silently AND
+    // emits a `WorkspaceMerged` notice so the TUI can flash a
+    // footer line.
     let config = ServerConfig::in_memory();
+    let mut bus = config.bus.subscribe();
     polling::upsert(&config, make_issue_task("o/r#71")).await;
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
 
@@ -1252,6 +1255,17 @@ async fn pr_polled_after_issue_collapses_them_into_one_row() {
         "the issue must surface inside the PR workspace's gh_issues",
     );
     assert_eq!(pr_ws.gh_issues[0].id.key, "o/r#71");
+
+    let mut saw_merged_notice = false;
+    while let Ok(evt) = bus.try_recv() {
+        if matches!(evt, Event::WorkspaceMerged { .. }) {
+            saw_merged_notice = true;
+        }
+    }
+    assert!(
+        saw_merged_notice,
+        "silent merges must emit WorkspaceMerged for the footer notice",
+    );
 }
 
 #[tokio::test]
@@ -1276,19 +1290,18 @@ async fn issue_polled_after_pr_routes_into_pr_workspace() {
     assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
 }
 
-#[tokio::test]
-async fn issue_sessions_move_to_pr_workspace_on_merge() {
-    // The whole point of the migration: when a user already has a
-    // running session against an issue and a linked PR finally
-    // lands, the session must survive — moved over to the PR
-    // workspace, not killed and recreated.
+/// Seed an issue workspace with a fabricated session and return its
+/// id alongside the workspace key. Used by the merge-prompt + confirm
+/// tests below — both want the same starting state.
+async fn seed_issue_with_session(
+    config: &ServerConfig,
+    issue_short_key: &str,
+) -> (pilot_core::WorkspaceKey, pilot_core::SessionId) {
     use pilot_core::{SessionKind, WorkspaceKey, WorkspaceSession};
-
-    let config = ServerConfig::in_memory();
-
-    // Seed an issue workspace with a fabricated session.
-    polling::upsert(&config, make_issue_task("o/r#71")).await;
-    let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_issue_task("o/r#71")));
+    polling::upsert(config, make_issue_task(issue_short_key)).await;
+    let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_issue_task(
+        issue_short_key,
+    )));
     let mut issue_ws: pilot_core::Workspace = {
         let record = config.store.get_workspace(&issue_key).unwrap().unwrap();
         serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
@@ -1302,7 +1315,7 @@ async fn issue_sessions_move_to_pr_workspace_on_merge() {
             agent_id: "claude".into(),
         },
         state: pilot_core::SessionRunState::Active,
-        worktree_path: std::path::PathBuf::from("/tmp/pilot-test-issue-71"),
+        worktree_path: std::path::PathBuf::from("/tmp/pilot-test"),
         created_at: Utc::now(),
         last_output_at: None,
         layout: pilot_core::SessionLayout::default(),
@@ -1316,35 +1329,116 @@ async fn issue_sessions_move_to_pr_workspace_on_merge() {
             workspace_json: Some(json),
         })
         .unwrap();
+    (issue_key, session_id)
+}
 
-    // Now the linked PR shows up.
+#[tokio::test]
+async fn live_issue_session_stalls_merge_and_emits_pending_event() {
+    // Safety net: an issue workspace with live sessions must NOT be
+    // silently absorbed by its closing PR. The daemon emits a
+    // `WorkspaceMergePending` event and leaves both rows alone until
+    // the user confirms via `Command::ConfirmMerge`.
+    use pilot_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let mut bus = config.bus.subscribe();
+    let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
 
-    // Issue workspace gone, session lives under the PR workspace.
+    // Both workspaces still in the store.
     assert!(
-        config.store.get_workspace(&issue_key).unwrap().is_none(),
-        "issue workspace should be removed after merge",
+        config.store.get_workspace(&issue_key).unwrap().is_some(),
+        "issue workspace must NOT auto-merge while it has live sessions",
     );
     let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
+    assert!(config.store.get_workspace(&pr_key).unwrap().is_some());
+
+    // And a WorkspaceMergePending fired so the TUI can prompt.
+    let mut saw_pending = false;
+    while let Ok(evt) = bus.try_recv() {
+        if let Event::WorkspaceMergePending {
+            issue_workspace_key,
+            ..
+        } = evt
+        {
+            assert_eq!(issue_workspace_key, issue_key);
+            saw_pending = true;
+        }
+    }
+    assert!(saw_pending, "expected a WorkspaceMergePending broadcast");
+}
+
+#[tokio::test]
+async fn confirm_merge_accept_runs_the_merge() {
+    // After the user says "yes" to the prompt, the merge runs the
+    // same as the silent path: sessions move, terminal_meta rebadges,
+    // issue row disappears.
+    use pilot_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
+
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_none(),
+        "issue workspace should be removed after accepted merge",
+    );
     let pr_ws: pilot_core::Workspace = {
         let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
         serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
     };
-    assert!(
-        pr_ws.sessions.iter().any(|s| s.id == session_id),
-        "session must have moved to the PR workspace",
-    );
     let moved = pr_ws
         .sessions
         .iter()
         .find(|s| s.id == session_id)
-        .unwrap();
-    assert_eq!(
-        moved.workspace_key, pr_key,
-        "session.workspace_key must be rewritten to the PR's key",
+        .expect("session must have moved");
+    assert_eq!(moved.workspace_key, pr_key);
+}
+
+#[tokio::test]
+async fn confirm_merge_reject_pins_against_re_prompting() {
+    // User says "no": both workspaces survive, and a subsequent
+    // poll of the same PR must NOT re-emit WorkspaceMergePending
+    // — otherwise the modal would haunt them every 60 seconds.
+    use pilot_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let (issue_key, _) = seed_issue_with_session(&config, "o/r#71").await;
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), false).await;
+
+    // Drain the bus so we observe the *next* poll's events freshly.
+    let mut bus = config.bus.subscribe();
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    let mut saw_pending = false;
+    while let Ok(evt) = bus.try_recv() {
+        if matches!(evt, Event::WorkspaceMergePending { .. }) {
+            saw_pending = true;
+        }
+    }
+    assert!(
+        !saw_pending,
+        "rejected merges must not re-prompt on the next poll",
+    );
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_some(),
+        "rejecting must keep the issue workspace intact",
     );
 }
 

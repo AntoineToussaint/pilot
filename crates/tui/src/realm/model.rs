@@ -68,6 +68,11 @@ pub enum Id {
     /// workspace_key lives in `pending_removal_prompt` so the
     /// `Msg::Confirmed(true)` handler knows what to delete.
     RemoveOutOfScope,
+    /// Confirm dialog asking the user to merge an issue workspace
+    /// (that has live sessions) into the PR that closes it. The
+    /// (issue, PR) keys live in `active_merge_prompt`; `Msg::Confirmed`
+    /// dispatches `Command::ConfirmMerge` back to the daemon.
+    MergeConfirm,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -195,6 +200,21 @@ pub struct Model<T: TerminalAdapter> {
     /// Workspace currently being prompted about. Set when the
     /// RemoveOutOfScope modal mounts; consumed by `Msg::Confirmed`.
     active_removal_prompt: Option<pilot_core::WorkspaceKey>,
+    /// Pending issue→PR merge prompts. Daemon stalls a merge when
+    /// the issue has live sessions and emits
+    /// `WorkspaceMergePending`; we queue here and surface one at a
+    /// time as a Confirm modal. Tuple: issue key, PR key, issue
+    /// label, PR label, live terminal count.
+    pending_merge_prompts: std::collections::VecDeque<(
+        pilot_core::WorkspaceKey,
+        pilot_core::WorkspaceKey,
+        String,
+        String,
+        usize,
+    )>,
+    /// (issue, PR) pair currently being prompted about. Consumed by
+    /// `Msg::Confirmed` when the top modal is `Id::MergeConfirm`.
+    active_merge_prompt: Option<(pilot_core::WorkspaceKey, pilot_core::WorkspaceKey)>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -288,6 +308,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_reply: None,
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
+            pending_merge_prompts: std::collections::VecDeque::new(),
+            active_merge_prompt: None,
             status: StatusCtx::new(),
         }
     }
@@ -904,45 +926,70 @@ impl<T: TerminalAdapter> Model<T> {
                     let step = runner.step_dismissed();
                     self.handle_runner_step(runner, step);
                 } else {
-                    // If the dismissed modal was the out-of-scope
-                    // prompt, that's a "no, keep this workspace"
-                    // answer. Drop the active prompt and surface the
-                    // next queued one (if any).
-                    let dismissing_removal_prompt =
-                        matches!(self.modal_stack.last(), Some(Id::RemoveOutOfScope));
+                    // Dispatch by which modal was on top BEFORE the
+                    // pop so we route the "no" decision correctly.
+                    let top = self.modal_stack.last().cloned();
                     self.pop_modal();
-                    if dismissing_removal_prompt {
-                        self.active_removal_prompt = None;
+                    match top {
+                        Some(Id::RemoveOutOfScope) => {
+                            self.active_removal_prompt = None;
+                        }
+                        Some(Id::MergeConfirm) => {
+                            // Esc on the merge modal = "no, keep
+                            // them separate." Tell the daemon to drop
+                            // the stall so future polls don't
+                            // re-prompt.
+                            if let Some((issue_key, pr_key)) =
+                                self.active_merge_prompt.take()
+                            {
+                                self.send_cmd(IpcCommand::ConfirmMerge {
+                                    issue_workspace_key: issue_key,
+                                    pr_workspace_key: pr_key,
+                                    accept: false,
+                                });
+                            }
+                        }
+                        _ => {}
                     }
-                    // Always try to surface a queued out-of-scope
-                    // prompt after a modal dismisses — not just when
-                    // the dismissed modal was a removal prompt
-                    // itself. Otherwise a user who has Help / Settings
-                    // open when the daemon emits WorkspaceOutOfScope
-                    // would have the prompt stuck in the queue
-                    // indefinitely until something else triggered
-                    // the drain.
+                    // Always try to surface a queued prompt after a
+                    // modal dismisses — not just when the dismissed
+                    // modal itself was a prompt. Otherwise a user who
+                    // has Help / Settings open when the daemon emits
+                    // a prompt would have it stuck in the queue.
                     self.maybe_mount_next_removal_prompt();
+                    self.maybe_mount_next_merge_prompt();
                 }
             }
             Msg::Confirmed(yes) => {
-                // Today only the out-of-scope removal prompt uses
-                // this. If a different Confirm modal pops in the
-                // future, dispatch by `self.modal_stack.last()`.
-                let was_removal_prompt =
-                    matches!(self.modal_stack.last(), Some(Id::RemoveOutOfScope));
+                let top = self.modal_stack.last().cloned();
                 self.pop_modal();
-                if was_removal_prompt {
-                    let target = self.active_removal_prompt.take();
-                    if yes
-                        && let Some(workspace_key) = target
-                    {
-                        // Kill terminals + delete workspace.
-                        let session_key: pilot_core::SessionKey = (&workspace_key).into();
-                        self.send_cmd(IpcCommand::Kill { session_key });
+                match top {
+                    Some(Id::RemoveOutOfScope) => {
+                        let target = self.active_removal_prompt.take();
+                        if yes
+                            && let Some(workspace_key) = target
+                        {
+                            // Kill terminals + delete workspace.
+                            let session_key: pilot_core::SessionKey =
+                                (&workspace_key).into();
+                            self.send_cmd(IpcCommand::Kill { session_key });
+                        }
                     }
+                    Some(Id::MergeConfirm) => {
+                        if let Some((issue_key, pr_key)) =
+                            self.active_merge_prompt.take()
+                        {
+                            self.send_cmd(IpcCommand::ConfirmMerge {
+                                issue_workspace_key: issue_key,
+                                pr_workspace_key: pr_key,
+                                accept: yes,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
                 self.maybe_mount_next_removal_prompt();
+                self.maybe_mount_next_merge_prompt();
             }
             Msg::TextareaSubmitted(body) => {
                 // Reply submit: build a PostReply for the workspace
@@ -1749,6 +1796,45 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Surface the next queued issue→PR merge prompt when no modal
+    /// is currently up. The user's answer drives `Msg::Confirmed` /
+    /// `Msg::ModalDismissed`, which dispatch a `Command::ConfirmMerge`
+    /// back to the daemon. Default-no: silently absorbing a session
+    /// the user is in the middle of using would be the surprising
+    /// outcome, so Enter biases toward "leave them separate".
+    fn maybe_mount_next_merge_prompt(&mut self) {
+        use crate::realm::components::confirm::Confirm;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+
+        if !self.modal_stack.is_empty() {
+            return;
+        }
+        let Some((issue_key, pr_key, issue_label, pr_label, count)) =
+            self.pending_merge_prompts.pop_front()
+        else {
+            return;
+        };
+        let terminals_phrase = if count == 1 {
+            "1 running terminal".to_string()
+        } else {
+            format!("{count} running terminals")
+        };
+        let question = format!(
+            "{pr_label} closes {issue_label}, which has {terminals_phrase}. \
+             Merge the issue's sessions into the PR workspace?",
+        );
+        let modal = Confirm::new(question).default_no();
+        self.active_merge_prompt = Some((issue_key, pr_key));
+        let _ = self.app.mount(
+            Id::MergeConfirm,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::MergeConfirm);
+        let _ = self.app.active(&Id::MergeConfirm);
+        self.redraw = true;
+    }
+
     /// Push a modal.
     pub fn push_modal(&mut self, id: Id) {
         self.modal_stack.push(id.clone());
@@ -1820,6 +1906,55 @@ impl<T: TerminalAdapter> Model<T> {
                 self.maybe_mount_next_removal_prompt();
                 self.redraw = true;
             }
+            return;
+        }
+        // Same pattern for issue→PR merge prompts: queue + surface
+        // one at a time so the modal stack doesn't pile up.
+        if let IpcEvent::WorkspaceMergePending {
+            issue_workspace_key,
+            pr_workspace_key,
+            issue_label,
+            pr_label,
+            active_terminal_count,
+        } = &event
+        {
+            let already_active = self
+                .active_merge_prompt
+                .as_ref()
+                .map(|(i, _)| i == issue_workspace_key)
+                .unwrap_or(false);
+            let already_queued = self
+                .pending_merge_prompts
+                .iter()
+                .any(|(i, _, _, _, _)| i == issue_workspace_key);
+            if !already_active && !already_queued {
+                self.pending_merge_prompts.push_back((
+                    issue_workspace_key.clone(),
+                    pr_workspace_key.clone(),
+                    issue_label.clone(),
+                    pr_label.clone(),
+                    *active_terminal_count,
+                ));
+                self.maybe_mount_next_merge_prompt();
+                self.redraw = true;
+            }
+            return;
+        }
+        // Silent-merge notice: the daemon collapsed an issue row into
+        // its PR without prompting (no live sessions to worry about).
+        // Flash a footer line so the row disappearance has context.
+        if let IpcEvent::WorkspaceMerged {
+            issue_label,
+            pr_label,
+            ..
+        } = &event
+        {
+            use crate::realm::components::footer::{Notice, NoticeSeverity};
+            self.status.notice = Some(Notice::new(
+                format!("merged {issue_label} into {pr_label}"),
+                NoticeSeverity::Info,
+            ));
+            self.redraw = true;
             return;
         }
         self.sidebar.on_daemon_event(&event);
