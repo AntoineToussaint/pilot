@@ -1608,10 +1608,11 @@ const TIME_COL_W: usize = 4;
 
 /// Right-side status pill showing the most actionable problem on the
 /// PR. One pill at a time, ordered by severity: merge conflict beats
-/// CI failure beats CI-pending beats "behind base" beats nothing. The
-/// pill is a colored block (` CONFLICT ` / ` CI FAIL ` / etc.) with
-/// strong fg + colored bg — the v1 design that the user actually
-/// likes; subtle text-only failed visually.
+/// CI failure beats CI mixed beats CI running beats CI ok beats
+/// "behind base" beats nothing. The pill is a colored block
+/// (` CONFLICT ` / ` CI FAIL ` / ` CI OK ` / etc.) with strong fg +
+/// colored bg — the v1 design that the user actually likes; subtle
+/// text-only failed visually.
 struct StatusPill {
     label: &'static str,
     style: Style,
@@ -1679,6 +1680,14 @@ fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
         .bg(Color::Indexed(214)) // warm amber, less neon than 11
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
+    let pill_yellow = Style::default()
+        .bg(Color::Indexed(220)) // gold — distinct from amber Mixed
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let pill_green = Style::default()
+        .bg(Color::Indexed(40)) // bright green, terminal-bright
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
     if task.has_conflicts {
         return Some(StatusPill {
             label: " CONFLICT ",
@@ -1700,10 +1709,14 @@ fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
         }
         pilot_core::CiStatus::Pending | pilot_core::CiStatus::Running => {
             return Some(StatusPill {
-                label: "       CI ",
-                style: Style::default()
-                    .fg(Color::Indexed(214))
-                    .add_modifier(Modifier::BOLD),
+                label: " CI RUN   ",
+                style: pill_yellow,
+            });
+        }
+        pilot_core::CiStatus::Success => {
+            return Some(StatusPill {
+                label: " CI OK    ",
+                style: pill_green,
             });
         }
         _ => {}
@@ -1833,5 +1846,139 @@ mod truncate_tests {
         let out = truncate_ellipsis(s, 6);
         assert!(out.ends_with('…'));
         assert_eq!(out.chars().count(), 6);
+    }
+}
+
+#[cfg(test)]
+mod status_pill_tests {
+    use super::status_pill;
+    use pilot_core::{
+        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
+    };
+
+    fn base_task() -> Task {
+        Task {
+            id: TaskId {
+                source: "gh".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "u".into(),
+            repo: Some("o/r".into()),
+            branch: Some("b".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+        }
+    }
+
+    /// All pill labels render in a fixed 10-cell column so the time
+    /// column lines up across rows. Regression-guard the width.
+    #[test]
+    fn every_pill_label_is_ten_cells_wide() {
+        let cases: &[CiStatus] = &[
+            CiStatus::Failure,
+            CiStatus::Mixed,
+            CiStatus::Running,
+            CiStatus::Pending,
+            CiStatus::Success,
+        ];
+        for ci in cases {
+            let mut t = base_task();
+            t.ci = *ci;
+            let pill = status_pill(&t).expect("CI status should produce a pill");
+            assert_eq!(
+                pill.label.chars().count(),
+                10,
+                "label {:?} for {:?} is not 10 cells wide",
+                pill.label,
+                ci,
+            );
+        }
+    }
+
+    #[test]
+    fn ci_failure_renders_ci_fail() {
+        let mut t = base_task();
+        t.ci = CiStatus::Failure;
+        assert_eq!(status_pill(&t).unwrap().label, " CI FAIL  ");
+    }
+
+    #[test]
+    fn ci_success_renders_ci_ok() {
+        // New behaviour: CI passing now renders an explicit green
+        // ` CI OK    ` pill instead of an empty status column.
+        let mut t = base_task();
+        t.ci = CiStatus::Success;
+        let pill = status_pill(&t).expect("Success should produce a pill");
+        assert_eq!(pill.label, " CI OK    ");
+    }
+
+    #[test]
+    fn ci_running_renders_ci_run() {
+        // New behaviour: Running was previously a barely-visible amber
+        // fg `       CI `. Now it renders a yellow-bg ` CI RUN   ` pill
+        // matching the FAIL / MIX styling so users actually see it.
+        let mut t = base_task();
+        t.ci = CiStatus::Running;
+        assert_eq!(status_pill(&t).unwrap().label, " CI RUN   ");
+        t.ci = CiStatus::Pending;
+        assert_eq!(status_pill(&t).unwrap().label, " CI RUN   ");
+    }
+
+    #[test]
+    fn ci_mixed_renders_ci_mix() {
+        let mut t = base_task();
+        t.ci = CiStatus::Mixed;
+        assert_eq!(status_pill(&t).unwrap().label, " CI MIX   ");
+    }
+
+    #[test]
+    fn conflicts_trump_ci_status() {
+        let mut t = base_task();
+        t.has_conflicts = true;
+        t.ci = CiStatus::Success;
+        assert_eq!(status_pill(&t).unwrap().label, " CONFLICT ");
+    }
+
+    #[test]
+    fn merged_or_closed_renders_no_pill() {
+        // Inactive mailbox rows stay quiet — even if the CI status
+        // would otherwise produce a pill.
+        for state in [TaskState::Merged, TaskState::Closed] {
+            let mut t = base_task();
+            t.state = state;
+            t.ci = CiStatus::Success;
+            assert!(
+                status_pill(&t).is_none(),
+                "{:?} must not produce a pill",
+                state,
+            );
+        }
+    }
+
+    #[test]
+    fn ci_none_with_no_conflicts_renders_no_pill() {
+        let t = base_task();
+        assert!(status_pill(&t).is_none());
     }
 }
