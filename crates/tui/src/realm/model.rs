@@ -343,6 +343,21 @@ impl Model<CrosstermTerminalAdapter> {
             std::io::stdout(),
             crossterm::event::EnableMouseCapture,
         );
+        // Ask the host terminal to disambiguate modified Enter /
+        // Tab / Backspace etc. via the kitty keyboard protocol.
+        // Without this, most terminals collapse Shift-Enter into
+        // the same byte sequence as Enter and pilot can't tell
+        // "submit" from "newline in input" — Claude Code's prompt
+        // then ignores Shift-Enter the user pressed expecting a
+        // newline. Terminals that don't support the protocol
+        // silently ignore the request.
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            ),
+        );
         // Splash is mounted lazily by `start_setup_wizard`. Returning
         // users (with a persisted setup) boot straight to the panes.
         let mut model = Self::build(terminal, client);
@@ -749,6 +764,14 @@ impl<T: TerminalAdapter> Model<T> {
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::event::DisableMouseCapture,
+        );
+        // Drop the kitty keyboard protocol bits we pushed in `new`.
+        // Skipping this would leak the request into the user's host
+        // shell after pilot exits — subsequent commands would still
+        // receive disambiguated key events they didn't ask for.
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::PopKeyboardEnhancementFlags,
         );
         let _ = self.terminal.leave_alternate_screen();
         let _ = self.terminal.disable_raw_mode();
@@ -1687,47 +1710,26 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                // Trackpad / wheel scroll over the terminal pane.
-                // Two paths:
-                //   1. Inner program enabled mouse tracking (Claude
-                //      Code, vim, less, etc.) → encode the wheel
-                //      event as the protocol's escape sequence and
-                //      ship to the PTY. The inner app handles its
-                //      own scrolling.
-                //   2. Plain shell at a prompt → scroll libghostty's
-                //      scrollback in-pane.
+                // Trackpad / wheel always scrolls libghostty's
+                // scrollback — same behaviour the user gets from
+                // every other terminal emulator (iTerm2, Ghostty,
+                // Alacritty). Forwarding wheel-events to the inner
+                // program sounds clever but in practice Claude Code,
+                // vim, less, etc. don't actually scroll their own
+                // history on wheel — they just eat the event and
+                // the user sees nothing happen. Buffer scroll always
+                // works; if a future inner program really wants the
+                // wheel, we can add an explicit opt-in.
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
-                if self.terminals.focused_terminal_tracks_mouse() {
-                    // Wheel buttons in xterm/SGR protocol: 4 = up, 5 = down.
-                    let button = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                        libghostty_vt::mouse::Button::Four
-                    } else {
-                        libghostty_vt::mouse::Button::Five
-                    };
-                    let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
-                    if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
-                        libghostty_vt::mouse::Action::Press,
-                        Some(button),
-                        cell_col,
-                        cell_row,
-                    ) {
-                        self.send_cmd(IpcCommand::Write {
-                            terminal_id,
-                            bytes,
-                        });
-                    }
+                const STEP: isize = 3;
+                let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                    -STEP
                 } else {
-                    const STEP: isize = 3;
-                    let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                        -STEP
-                    } else {
-                        STEP
-                    };
-                    self.terminals.scroll_active(delta);
-                }
+                    STEP
+                };
+                self.terminals.scroll_active(delta);
                 self.redraw = true;
             }
             _ => {}
@@ -2340,6 +2342,16 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         if let Ok(true) = crossterm::event::poll(Duration::from_millis(40)) {
             match crossterm::event::read() {
                 Ok(crossterm::event::Event::Key(key)) => {
+                    // With KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    // pushed at startup, the host terminal sends both
+                    // Press and Release events for every keystroke.
+                    // Processing both would double every character;
+                    // skip Release / Repeat. (Press is also the default
+                    // when no flags are pushed, so this is safe on
+                    // terminals that don't support the protocol.)
+                    if !matches!(key.kind, crossterm::event::KeyEventKind::Press) {
+                        continue;
+                    }
                     let realm_key = crossterm_to_realm(key);
                     if model.modal_stack.is_empty() {
                         model.handle_pane_key(realm_key);
