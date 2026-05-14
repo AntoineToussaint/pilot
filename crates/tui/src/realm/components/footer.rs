@@ -122,12 +122,12 @@ pub fn render(
         height: 1,
     };
 
-    // Left zone: focused-pane keymap on the left, then a separator,
-    // then the always-on globals (`,` settings, `?` help, `q q`
-    // quit). Globals come last so the per-pane hints sit closest to
-    // where the user's eye lands.
+    // Left zone: focused-pane contextual bindings on the left, then
+    // a separator, then the always-on globals. Globals are the two
+    // keys users always need an escape hatch for — `?` help to see
+    // the full alphabet, `q q` to quit. `,` (settings) used to be
+    // here too but it isn't an emergency the way `?` / `q q` are.
     const GLOBALS: &[Binding] = &[
-        Binding { keys: ",", label: "settings" },
         Binding { keys: "?", label: "help" },
         Binding { keys: "q q", label: "quit" },
     ];

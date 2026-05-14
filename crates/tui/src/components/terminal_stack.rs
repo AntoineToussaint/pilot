@@ -976,10 +976,10 @@ impl TerminalStack {
             (KeyCode::Char('-'), _) => {
                 self.begin_split(session_key, PendingSplit::Horizontal, cmds);
             }
-            (KeyCode::Char('h'), _) => self.move_focus(TileDirection::Left, cmds),
-            (KeyCode::Char('j'), _) => self.move_focus(TileDirection::Down, cmds),
-            (KeyCode::Char('k'), _) => self.move_focus(TileDirection::Up, cmds),
-            (KeyCode::Char('l'), _) => self.move_focus(TileDirection::Right, cmds),
+            (KeyCode::Left, _) => self.move_focus(TileDirection::Left, cmds),
+            (KeyCode::Down, _) => self.move_focus(TileDirection::Down, cmds),
+            (KeyCode::Up, _) => self.move_focus(TileDirection::Up, cmds),
+            (KeyCode::Right, _) => self.move_focus(TileDirection::Right, cmds),
             (KeyCode::Char('q'), _) => self.close_focused_tile(cmds),
             _ => {}
         }

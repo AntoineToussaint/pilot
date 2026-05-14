@@ -106,7 +106,7 @@ fn double_q_within_window_quits() {
 fn other_key_disarms_q_latch() {
     let mut m = build_model();
     m.dispatch_key(key(Key::Char('q')));
-    m.dispatch_key(key(Key::Char('j')));
+    m.dispatch_key(key(Key::Down));
     assert!(!m.q_arm_pending(), "any non-q key disarms the latch");
     m.dispatch_key(key(Key::Char('q')));
     assert!(!m.quit, "after disarm, single q does not quit");

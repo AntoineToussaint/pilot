@@ -943,8 +943,10 @@ impl Sidebar {
     /// `keymap()` (used by the `?` help modal).
     pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
         use crate::Binding;
+        // Footer is for ACTIONABLE keys only — `j/k`, `Tab`, etc.
+        // are navigation alphabet the user learns once and doesn't
+        // need echoed on every row. Full alphabet is one `?` away.
         let mut out: Vec<Binding> = Vec::with_capacity(6);
-        out.push(Binding { keys: "j/k", label: "navigate" });
 
         let workspace = self.selected_workspace();
         let has_sessions = workspace.map(|w| !w.sessions.is_empty()).unwrap_or(false);
@@ -993,7 +995,7 @@ impl Sidebar {
         // Ctrl-Shift-D etc. live in the Global section of the Help
         // modal so they don't duplicate across every pane's hint bar.
         &[
-            Binding { keys: "j/k", label: "navigate" },
+            Binding { keys: "↑/↓", label: "navigate" },
             Binding { keys: "Enter", label: "focus activity" },
             Binding { keys: "n", label: "new workspace" },
             Binding { keys: "e", label: "open editor" },
@@ -1053,11 +1055,11 @@ impl Sidebar {
 
         match (key.code, key.modifiers) {
             // ── Navigation ────────────────────────────────────────────
-            (KeyCode::Char('j'), m) | (KeyCode::Down, m) if !m.contains(KeyModifiers::SHIFT) => {
+            (KeyCode::Down, m) if !m.contains(KeyModifiers::SHIFT) => {
                 self.move_cursor_by(1);
                 PaneOutcome::Consumed
             }
-            (KeyCode::Char('k'), m) | (KeyCode::Up, m) if !m.contains(KeyModifiers::SHIFT) => {
+            (KeyCode::Up, m) if !m.contains(KeyModifiers::SHIFT) => {
                 self.move_cursor_by(-1);
                 PaneOutcome::Consumed
             }

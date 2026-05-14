@@ -118,7 +118,7 @@ fn set_workspace_to_different_resets_cursor() {
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 5)));
     for _ in 0..3 {
         rp.handle_key(
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut Vec::new(),
         );
     }
@@ -139,7 +139,7 @@ fn set_workspace_to_same_preserves_cursor() {
     rp.set_workspace(Some(ws.clone()));
     for _ in 0..2 {
         rp.handle_key(
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut Vec::new(),
         );
     }
@@ -165,7 +165,7 @@ fn j_moves_cursor_down_bounded() {
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 3)));
     for _ in 0..10 {
         rp.handle_key(
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut Vec::new(),
         );
     }
@@ -177,12 +177,12 @@ fn k_moves_cursor_up_bounded() {
     let mut rp = RightPane::new(PaneId::new(1));
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 3)));
     rp.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
     for _ in 0..10 {
         rp.handle_key(
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
             &mut Vec::new(),
         );
     }
@@ -195,7 +195,7 @@ fn g_jumps_to_top() {
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 10)));
     for _ in 0..5 {
         rp.handle_key(
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut Vec::new(),
         );
     }
@@ -221,7 +221,7 @@ fn shift_g_jumps_to_bottom() {
 fn j_without_workspace_bubbles_up() {
     let mut rp = RightPane::new(PaneId::new(1));
     let outcome = rp.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
     assert_eq!(outcome, pilot_tui::PaneOutcome::Pass);
@@ -246,7 +246,7 @@ fn j_on_empty_activity_list_passes_through_when_collapsed() {
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 0)));
     assert!(rp.activity_collapsed(), "empty workspace auto-collapses");
     let outcome = rp.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
     assert_eq!(outcome, pilot_tui::PaneOutcome::Pass);
@@ -261,7 +261,7 @@ fn j_on_expanded_empty_activity_consumes() {
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 0)));
     rp.set_activity_collapsed(false);
     let outcome = rp.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
     assert_eq!(outcome, pilot_tui::PaneOutcome::Consumed);
@@ -582,7 +582,7 @@ fn cursor_move_resets_timer_to_zero() {
     let before = rp.auto_mark_progress().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     rp.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
     let after = rp.auto_mark_progress().unwrap();
@@ -671,7 +671,7 @@ fn cursor_move_clears_undo_target() {
     assert!(rp.can_undo_mark_read());
 
     rp.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
     assert!(!rp.can_undo_mark_read(), "moving the cursor invalidates undo");
@@ -696,7 +696,7 @@ fn cursor_walks_long_thread_with_scroll_following() {
     // meaning scroll has advanced.
     for _ in 0..15 {
         rp.handle_key(
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut Vec::new(),
         );
     }
@@ -732,7 +732,7 @@ fn page_up_walks_back() {
     let _ = render_to_string(&mut rp, 80, 20, true);
     for _ in 0..15 {
         rp.handle_key(
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut Vec::new(),
         );
     }

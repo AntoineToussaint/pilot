@@ -20,6 +20,9 @@ fn ctrl(c: char) -> KeyEvent {
 fn code(c: KeyCode) -> KeyEvent {
     KeyEvent::new(c, KeyModifiers::NONE)
 }
+fn arrow_right() -> KeyEvent {
+    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
+}
 
 fn sk(s: &str) -> SessionKey {
     s.into()
@@ -619,8 +622,11 @@ fn terminal_spawned_after_split_promotes_to_splits_layout() {
 }
 
 #[test]
-fn ctrl_w_l_moves_focus_right() {
-    // Pre-build a 2-leaf HSplit, focus on the left.
+fn ctrl_w_right_moves_focus_right() {
+    // Pre-build a 2-leaf HSplit, focus on the left. Tile focus
+    // moves use arrow keys after Ctrl-W (used to be `h/j/k/l`
+    // vim-style — replaced for consistency with the no-vim-mode
+    // rule the rest of the app follows).
     let mut t = TerminalStack::new(PaneId::new(1));
     t.set_active_session(Some(ws_key("o/r#1")));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
@@ -635,9 +641,9 @@ fn ctrl_w_l_moves_focus_right() {
     });
     let mut cmds = Vec::new();
     t.handle_key(ctrl('w'), &mut cmds);
-    t.handle_key(ch('l'), &mut cmds);
+    t.handle_key(arrow_right(), &mut cmds);
     if let SessionLayout::Splits { focused, .. } = t.layout() {
-        assert_eq!(focused, &vec![1u8], "Ctrl-w l moved focus to right tile");
+        assert_eq!(focused, &vec![1u8], "Ctrl-w Right moved focus to right tile");
     }
     // Persist via SetSessionLayout.
     assert!(

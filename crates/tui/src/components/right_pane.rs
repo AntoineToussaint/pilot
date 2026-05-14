@@ -715,8 +715,9 @@ impl RightPane {
     /// `keymap()` (consumed by the `?` help modal).
     pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
         use crate::Binding;
+        // Footer is for ACTIONABLE keys only — j/k / g / G scroll
+        // is alphabet the user learns once. Full keymap behind `?`.
         let mut out: Vec<Binding> = Vec::with_capacity(6);
-        out.push(Binding { keys: "j/k", label: "scroll" });
 
         let has_workspace = self.workspace.is_some();
         let has_activity = self
@@ -754,7 +755,7 @@ impl RightPane {
         // splitter / detach combos are listed under "Global" in the
         // Help modal so each pane's hint bar stays tight.
         &[
-            Binding { keys: "j/k", label: "scroll" },
+            Binding { keys: "↑/↓", label: "scroll" },
             Binding { keys: "→/←", label: "expand/collapse" },
             Binding { keys: "r", label: "reply" },
             Binding { keys: "v", label: "select" },
@@ -816,7 +817,7 @@ impl RightPane {
         let last = workspace.activity.len().saturating_sub(1);
 
         let result = match (key.code, key.modifiers) {
-            (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            (KeyCode::Down, _) => {
                 if workspace.activity.is_empty() {
                     return PaneOutcome::Consumed;
                 }
@@ -826,7 +827,7 @@ impl RightPane {
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
-            (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            (KeyCode::Up, _) => {
                 self.comment_cursor = self.comment_cursor.saturating_sub(1);
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed

@@ -140,7 +140,7 @@ fn workspace_removed_prunes_and_clamps_cursor() {
         terminals: vec![],
     });
     // Move cursor to second workspace row.
-    s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
     assert_eq!(s.selected_session_key(), Some(&ws_key(&w2)));
 
     s.on_event(&Event::WorkspaceRemoved(w2.key.clone()));
@@ -164,7 +164,7 @@ fn cursor_follows_workspace_key_across_resort() {
         terminals: vec![],
     });
     // Cursor on #2.
-    s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
     assert_eq!(s.selected_session_key(), Some(&ws_key(&w2)));
 
     // #3 jumps to top with a new updated_at — cursor stays on #2.
@@ -249,9 +249,9 @@ fn cursor_walks_through_repo_headers() {
         s.selected_session_key().map(|k| k.to_string()),
         Some(expected_session_key("alpha#1"))
     );
-    s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
     assert!(s.selected_session_key().is_none(), "cursor on beta header");
-    s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
     assert_eq!(
         s.selected_session_key().map(|k| k.to_string()),
         Some(expected_session_key("beta#1"))
@@ -542,7 +542,7 @@ fn shift_x_disarmed_by_unrelated_key() {
     let mut cmds = Vec::new();
     s.handle_key(shift_char('X'), &mut cmds);
     assert!(s.kill_armed().is_some());
-    s.handle_key(key_code(KeyCode::Char('j')), &mut cmds);
+    s.handle_key(key_code(KeyCode::Down), &mut cmds);
     assert!(s.kill_armed().is_none());
     s.handle_key(shift_char('X'), &mut cmds);
     assert_eq!(
@@ -559,7 +559,7 @@ fn shift_x_disarmed_when_moved_to_different_workspace() {
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
     s.handle_key(shift_char('X'), &mut cmds);
-    s.handle_key(key_code(KeyCode::Char('j')), &mut cmds);
+    s.handle_key(key_code(KeyCode::Down), &mut cmds);
     assert!(s.kill_armed().is_none());
     s.handle_key(shift_char('X'), &mut cmds);
     assert_eq!(
@@ -575,7 +575,7 @@ fn j_stops_at_last_workspace() {
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
     for _ in 0..10 {
-        s.handle_key(key_code(KeyCode::Char('j')), &mut cmds);
+        s.handle_key(key_code(KeyCode::Down), &mut cmds);
     }
     assert_eq!(
         s.selected_session_key().map(|k| k.to_string()),
@@ -591,9 +591,9 @@ fn k_stops_at_top_row() {
     // because `selected_session_key` is None on a header.
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
-    s.handle_key(key_code(KeyCode::Char('j')), &mut cmds);
+    s.handle_key(key_code(KeyCode::Down), &mut cmds);
     for _ in 0..10 {
-        s.handle_key(key_code(KeyCode::Char('k')), &mut cmds);
+        s.handle_key(key_code(KeyCode::Up), &mut cmds);
     }
     assert!(
         s.cursor_on_repo_header(),
@@ -764,14 +764,14 @@ fn cursor_can_land_on_a_session_subrow() {
         terminals: vec![],
     });
     // Cursor starts on the workspace row. Down once → session 0.
-    s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
     assert_eq!(s.selected_session_id(), Some(s0));
-    s.handle_key(key_code(KeyCode::Char('j')), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
     assert_eq!(s.selected_session_id(), Some(s1));
     // Workspace row's selected_session_id is None — the daemon
     // resolves which session to use.
-    s.handle_key(key_code(KeyCode::Char('k')), &mut Vec::new());
-    s.handle_key(key_code(KeyCode::Char('k')), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Up), &mut Vec::new());
+    s.handle_key(key_code(KeyCode::Up), &mut Vec::new());
     assert_eq!(s.selected_session_id(), None);
 }
 

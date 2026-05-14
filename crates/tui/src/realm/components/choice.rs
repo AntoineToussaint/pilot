@@ -392,7 +392,7 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         let (lines, cursor_line) = self.build_lines(inner.width);
         // Help footer
         let mut help_spans = vec![
-            Span::styled("j/k", Style::default().fg(theme.accent).bold()),
+            Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
             Span::raw(" navigate  "),
         ];
         if self.mode == Mode::Multi {
@@ -491,12 +491,12 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
             return Some(Msg::ModalDismissed);
         }
         match key.code {
-            Key::Down | Key::Char('j') => {
+            Key::Down => {
                 self.move_cursor(1);
                 self.show_empty_hint = false;
                 None
             }
-            Key::Up | Key::Char('k') => {
+            Key::Up => {
                 self.move_cursor(-1);
                 self.show_empty_hint = false;
                 None
