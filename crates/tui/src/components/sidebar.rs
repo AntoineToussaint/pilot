@@ -708,50 +708,18 @@ impl Sidebar {
     fn recompute_visible_inner(&mut self, preserve_header_park: bool) {
         let now = chrono::Utc::now();
         let mailbox = self.mailbox;
+        let show_inactive_in_inbox = self.show_inactive_in_inbox;
 
-        // Filter to the current mailbox. Each branch encodes ONE
-        // semantic bucket — see Mailbox docs for the full picture.
+        // Filter to the current mailbox via the pure
+        // `mailbox_membership` predicate. The decision matrix
+        // (`workspace × mailbox → bool`) is cell-tested in isolation
+        // so the snoozed/merged/empty edge cases can't drift between
+        // the docstring's intent and the code.
         let filtered: Vec<(&SessionKey, &Workspace)> = self
             .workspaces
             .iter()
-            .filter(|(_, w)| match mailbox {
-                Mailbox::Inbox => {
-                    // Actionable: not snoozed AND primary task is
-                    // alive (open/draft/in-progress/in-review).
-                    // When `show_inactive_in_inbox` is on the
-                    // alive-only gate is dropped — Merged/Closed
-                    // rows surface here too, useful for "what did I
-                    // touch this week" workflows that don't want to
-                    // hop between mailboxes.
-                    if w.is_snoozed(now) {
-                        return false;
-                    }
-                    if self.show_inactive_in_inbox {
-                        return true;
-                    }
-                    match w.primary_task() {
-                        Some(t) => !matches!(
-                            t.state,
-                            pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
-                        ),
-                        // Empty workspaces show up in Inbox so the
-                        // user can act on them.
-                        None => true,
-                    }
-                }
-                Mailbox::Inactive => {
-                    // Historical: primary task already merged/closed.
-                    // Snoozed-and-inactive lands in Snoozed (snooze
-                    // wins) so no overlap.
-                    if w.is_snoozed(now) {
-                        return false;
-                    }
-                    matches!(
-                        w.primary_task().map(|t| t.state),
-                        Some(pilot_core::TaskState::Merged) | Some(pilot_core::TaskState::Closed)
-                    )
-                }
-                Mailbox::Snoozed => w.is_snoozed(now),
+            .filter(|(_, w)| {
+                mailbox_membership(w, mailbox, now, show_inactive_in_inbox)
             })
             .collect();
 
@@ -1964,6 +1932,63 @@ fn build_implement_issue_prompt(issue: &pilot_core::Task) -> String {
     )
 }
 
+/// Pure predicate: does `workspace` belong in `mailbox` right now?
+///
+/// Single source of truth for the inbox / inactive / snoozed
+/// classification. The body used to live inline in
+/// `recompute_visible_inner`, where each branch was hand-rolled
+/// and the snoozed-wins-over-merged subtlety wasn't covered by
+/// any test. Pulling it out lets the test file exercise every
+/// (workspace state, mailbox) cell directly.
+///
+/// Rules (snooze always wins — a snoozed workspace appears ONLY
+/// in the Snoozed mailbox, never leaks into Inbox / Inactive):
+///
+/// - **Inbox**: not snoozed AND
+///   (`show_inactive_in_inbox` OR the primary task is alive —
+///   open / draft / in-progress / in-review). Empty workspaces
+///   (no primary task at all) show in Inbox so the user can act
+///   on them.
+/// - **Inactive**: not snoozed AND primary task is `Merged` /
+///   `Closed`.
+/// - **Snoozed**: workspace is snoozed.
+pub fn mailbox_membership(
+    workspace: &Workspace,
+    mailbox: Mailbox,
+    now: chrono::DateTime<chrono::Utc>,
+    show_inactive_in_inbox: bool,
+) -> bool {
+    let snoozed = workspace.is_snoozed(now);
+    match mailbox {
+        Mailbox::Snoozed => snoozed,
+        Mailbox::Inbox => {
+            if snoozed {
+                return false;
+            }
+            if show_inactive_in_inbox {
+                return true;
+            }
+            match workspace.primary_task() {
+                Some(t) => !matches!(
+                    t.state,
+                    pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
+                ),
+                None => true,
+            }
+        }
+        Mailbox::Inactive => {
+            if snoozed {
+                return false;
+            }
+            matches!(
+                workspace.primary_task().map(|t| t.state),
+                Some(pilot_core::TaskState::Merged)
+                    | Some(pilot_core::TaskState::Closed)
+            )
+        }
+    }
+}
+
 fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig) -> bool {
     if cfg.unread && w.unread_count() > 0 {
         return true;
@@ -2512,5 +2537,133 @@ mod workspace_type_label_tests {
     fn empty_workspace_returns_none() {
         let w = empty_ws();
         assert_eq!(workspace_type_label(&w), None);
+    }
+}
+
+#[cfg(test)]
+mod mailbox_membership_tests {
+    //! Cell tests for the `mailbox_membership` predicate. The
+    //! filter used to live inline in `recompute_visible_inner` with
+    //! the snoozed-merged interaction untested — exactly the kind
+    //! of state-cell drift the user has been pushing back on.
+    //! Each `(workspace state, mailbox)` cell gets one assertion;
+    //! a new mailbox semantic is one helper + ~6 assertions.
+
+    use super::{mailbox_membership, Mailbox};
+    use chrono::{Duration, Utc};
+    use pilot_core::{TaskState, Workspace, WorkspaceKey};
+
+    fn ws(state: Option<TaskState>) -> Workspace {
+        let now = Utc::now();
+        let mut w = Workspace::empty(WorkspaceKey::new("k"), "main", now);
+        if let Some(s) = state {
+            let mut task = super::status_pill_tests::base_task();
+            task.state = s;
+            task.url = "https://github.com/o/r/pull/1".into();
+            w.attach_task(task);
+        }
+        w
+    }
+
+    fn snoozed(mut w: Workspace) -> Workspace {
+        w.snoozed_until = Some(Utc::now() + Duration::hours(1));
+        w
+    }
+
+    // ── Inbox ────────────────────────────────────────────────────
+
+    #[test]
+    fn open_pr_is_in_inbox() {
+        let w = ws(Some(TaskState::Open));
+        assert!(mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+    }
+
+    #[test]
+    fn draft_pr_is_in_inbox() {
+        let w = ws(Some(TaskState::Draft));
+        assert!(mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+    }
+
+    #[test]
+    fn merged_pr_is_not_in_inbox_by_default() {
+        let w = ws(Some(TaskState::Merged));
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+    }
+
+    #[test]
+    fn closed_pr_is_not_in_inbox_by_default() {
+        let w = ws(Some(TaskState::Closed));
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+    }
+
+    #[test]
+    fn merged_pr_is_in_inbox_when_show_inactive_in_inbox_is_on() {
+        let w = ws(Some(TaskState::Merged));
+        assert!(mailbox_membership(&w, Mailbox::Inbox, Utc::now(), true));
+    }
+
+    #[test]
+    fn empty_workspace_is_in_inbox() {
+        let w = ws(None);
+        assert!(mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+    }
+
+    // ── Inactive ─────────────────────────────────────────────────
+
+    #[test]
+    fn merged_pr_is_in_inactive() {
+        let w = ws(Some(TaskState::Merged));
+        assert!(mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+    }
+
+    #[test]
+    fn closed_pr_is_in_inactive() {
+        let w = ws(Some(TaskState::Closed));
+        assert!(mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+    }
+
+    #[test]
+    fn open_pr_is_not_in_inactive() {
+        let w = ws(Some(TaskState::Open));
+        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+    }
+
+    #[test]
+    fn empty_workspace_is_not_in_inactive() {
+        let w = ws(None);
+        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+    }
+
+    // ── Snoozed wins over everything ─────────────────────────────
+
+    #[test]
+    fn snoozed_open_pr_is_only_in_snoozed() {
+        let w = snoozed(ws(Some(TaskState::Open)));
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+        assert!(mailbox_membership(&w, Mailbox::Snoozed, Utc::now(), false));
+    }
+
+    #[test]
+    fn snoozed_merged_pr_is_only_in_snoozed_not_inactive() {
+        // The exact failure mode the audit called out: a merged-AND-
+        // snoozed PR must NOT leak into Inactive. Snoozed wins.
+        let w = snoozed(ws(Some(TaskState::Merged)));
+        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+        assert!(mailbox_membership(&w, Mailbox::Snoozed, Utc::now(), false));
+    }
+
+    #[test]
+    fn snoozed_merged_pr_is_not_in_inbox_even_with_show_inactive() {
+        // `show_inactive_in_inbox` flips merged → Inbox, but snooze
+        // still wins over that.
+        let w = snoozed(ws(Some(TaskState::Merged)));
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), true));
+    }
+
+    #[test]
+    fn unsnoozed_open_pr_is_not_in_snoozed() {
+        let w = ws(Some(TaskState::Open));
+        assert!(!mailbox_membership(&w, Mailbox::Snoozed, Utc::now(), false));
     }
 }
