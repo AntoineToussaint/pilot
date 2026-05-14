@@ -87,6 +87,12 @@ pub struct RightPane {
     /// Agent the `f` (fix) shortcut spawns. Configurable via YAML
     /// (`setup.default_agent`); defaults to `"claude"`.
     default_agent: String,
+    /// Collapse state for the task-body / description section. Default
+    /// collapsed: the activity feed is what users come to the inbox
+    /// for; the body is reference material they can pop open with `b`
+    /// when they need it. Without this default a 200-line PR
+    /// description squeezed the activity feed off-screen.
+    task_body_collapsed: bool,
 }
 
 /// How long the cursor has to sit on an unread row before we
@@ -111,6 +117,7 @@ impl RightPane {
             expanded_activities: HashSet::new(),
             selected_activities: HashSet::new(),
             default_agent: "claude".to_string(),
+            task_body_collapsed: true,
         }
     }
 
@@ -708,7 +715,8 @@ impl RightPane {
             Binding { keys: "→/←", label: "expand/collapse" },
             Binding { keys: "r", label: "reply" },
             Binding { keys: "v", label: "select" },
-            Binding { keys: "f", label: "fix selected" },
+            Binding { keys: "w", label: "work on selected" },
+            Binding { keys: "b", label: "toggle description" },
             Binding { keys: "g/G", label: "top/bottom" },
             Binding { keys: "Enter/o", label: "toggle section" },
             Binding { keys: "Tab", label: "next pane" },
@@ -830,7 +838,22 @@ impl RightPane {
                 }
                 PaneOutcome::Consumed
             }
-            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+            // `b` toggles the description / task-body section
+            // between collapsed (1-row header only) and expanded
+            // (ratatui-sized body content). Bound here so the user
+            // can pop open a PR's body without leaving the activity
+            // pane.
+            (KeyCode::Char('b'), KeyModifiers::NONE) => {
+                self.toggle_task_body();
+                PaneOutcome::Consumed
+            }
+            // `w` (work-on-this) consumes the selected comments (or
+            // the cursor row when none selected) and spawns the
+            // default agent with an "address these comments" prompt.
+            // Renamed from `f` so we have one mnemonic everywhere:
+            // sidebar `w` for issues / CI failures, right-pane `w`
+            // for comments.
+            (KeyCode::Char('w'), KeyModifiers::NONE) => {
                 let indices: Vec<usize> = if self.selected_activities.is_empty() {
                     if workspace.activity.is_empty() {
                         return PaneOutcome::Consumed;
@@ -913,17 +936,18 @@ impl RightPane {
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
-        // Split vertically: header, separator, optional task body
-        // (only when the focused PR/issue has a description), then
-        // the activity section. The activity section's `Min(0)` gives
-        // it whatever's left after the description + header take
-        // their space.
-        let body_height = self.task_body_height(area.width);
+        // Use ratatui's native layout solver to share the vertical
+        // budget between the description (collapsible) and the
+        // activity feed. `Constraint::Max(...)` lets the body shrink
+        // gracefully when the right pane is short; `Constraint::Min(3)`
+        // guarantees the activity feed always has at least its header
+        // + 2 rows visible, no matter how long the PR description is.
+        let body_constraint = self.task_body_constraint();
         let chunks = Layout::vertical([
-            Constraint::Length(4),
-            Constraint::Length(1), // separator line
-            Constraint::Length(body_height),
-            Constraint::Min(0),
+            Constraint::Length(4),       // header (crumbs, pill, branch)
+            Constraint::Length(1),       // separator
+            body_constraint,             // 0 / 1 / Max(N) for the body
+            Constraint::Min(3),          // activity — never below 3 rows
         ])
         .split(area);
 
@@ -935,67 +959,101 @@ impl RightPane {
             .border_style(Style::default().fg(Color::DarkGray));
         frame.render_widget(sep, chunks[1]);
 
-        if body_height > 0 {
+        if chunks[2].height > 0 {
             self.render_task_body(chunks[2], frame);
         }
 
         let _ = self.render_activity(chunks[3], frame, focused);
     }
 
-    /// Rows reserved for the task-body section. 0 when the focused
-    /// task has no body (or no task at all). Capped at
-    /// `TASK_BODY_MAX_ROWS` so a 200-line PR description never crowds
-    /// the activity feed off-screen — the user can read the full
-    /// thing on GitHub if needed.
-    fn task_body_height(&self, width: u16) -> u16 {
-        const TASK_BODY_MAX_ROWS: u16 = 8;
-        let Some(workspace) = &self.workspace else {
-            return 0;
-        };
-        let Some(task) = workspace.primary_task() else {
-            return 0;
-        };
-        let body = task
-            .body
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let Some(body) = body else {
-            return 0;
-        };
-        let rendered = crate::components::comment_render::render_body(
-            body,
-            width.saturating_sub(2),
-            TASK_BODY_MAX_ROWS as usize,
-        );
-        rendered.len().min(TASK_BODY_MAX_ROWS as usize) as u16
+    /// Layout constraint for the task-body section. Three cases:
+    /// - no body on the focused task → 0 rows.
+    /// - body collapsed → 1 row (the `▶ Description` toggle hint).
+    /// - body expanded → `Max(content + 1)` so ratatui's solver can
+    ///   trim it when the pane is short (`Constraint::Min(3)` on the
+    ///   activity row gets priority).
+    fn task_body_constraint(&self) -> Constraint {
+        if !self.has_task_body() {
+            return Constraint::Length(0);
+        }
+        if self.task_body_collapsed {
+            return Constraint::Length(1);
+        }
+        // Content + 1 for the `▼ Description` header line.
+        let want = self.task_body_content_rows().saturating_add(1);
+        Constraint::Max(want.max(2))
     }
 
-    /// Render the focused task's body using the same lightweight
-    /// markdown pipeline the activity feed uses. Issues benefit most
-    /// (the body IS the work brief), but PR descriptions get the
-    /// same treatment — there's no reason to hide them.
-    fn render_task_body(&self, area: Rect, frame: &mut Frame) {
+    /// Estimate of the rendered body height (excluding the section
+    /// header). Used by `task_body_constraint` to size the
+    /// `Constraint::Max(...)` upper bound. The renderer itself caps
+    /// at the same number so the body never overflows.
+    fn task_body_content_rows(&self) -> u16 {
         const TASK_BODY_MAX_ROWS: u16 = 8;
-        let Some(workspace) = &self.workspace else {
-            return;
+        let Some(body) = self.task_body_str() else {
+            return 0;
         };
-        let Some(task) = workspace.primary_task() else {
-            return;
-        };
-        let Some(body) = task
+        // Width-aware render so wrapping affects the count. 80 is a
+        // conservative default — actual render uses `area.width`,
+        // which is always ≥ this for any practical terminal.
+        let rendered = crate::components::comment_render::render_body(
+            body,
+            80,
+            TASK_BODY_MAX_ROWS as usize,
+        );
+        (rendered.len() as u16).min(TASK_BODY_MAX_ROWS)
+    }
+
+    fn has_task_body(&self) -> bool {
+        self.task_body_str().is_some()
+    }
+
+    fn task_body_str(&self) -> Option<&str> {
+        self.workspace
+            .as_ref()?
+            .primary_task()?
             .body
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        else {
+    }
+
+    /// Render the focused task's body using the same lightweight
+    /// markdown pipeline the activity feed uses. The first row is a
+    /// `▼/▶ Description` header indicating collapse state; when
+    /// expanded the body content follows, sized to whatever the
+    /// layout solver gave us (so the activity feed always wins when
+    /// the pane is short). Issues benefit most (the body IS the
+    /// work brief); PR descriptions get the same treatment.
+    fn render_task_body(&self, area: Rect, frame: &mut Frame) {
+        let theme = crate::theme::current();
+        let Some(body) = self.task_body_str() else {
             return;
         };
-        let lines = crate::components::comment_render::render_body(
-            body,
-            area.width.saturating_sub(2),
-            TASK_BODY_MAX_ROWS as usize,
-        );
+        let glyph = if self.task_body_collapsed { "▶" } else { "▼" };
+        let header = Line::from(vec![
+            Span::styled(
+                format!("{glyph} Description"),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  (b)",
+                Style::default().fg(theme.text_dim),
+            ),
+        ]);
+        let mut lines = vec![header];
+        if !self.task_body_collapsed {
+            // Render at most `area.height - 1` body rows — anything
+            // more would overflow the rect ratatui carved out for us.
+            let body_rows = area.height.saturating_sub(1) as usize;
+            if body_rows > 0 {
+                lines.extend(crate::components::comment_render::render_body(
+                    body,
+                    area.width.saturating_sub(2),
+                    body_rows,
+                ));
+            }
+        }
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         // One-cell left margin so the body indents past the header's
         // crumbs + state pill — reads as "this belongs to the task
@@ -1007,6 +1065,12 @@ impl RightPane {
             height: area.height,
         };
         frame.render_widget(para, inner);
+    }
+
+    /// Toggle the task-body collapse state. Bound to `b` in the
+    /// right pane's handler; visible in the keymap hint.
+    pub fn toggle_task_body(&mut self) {
+        self.task_body_collapsed = !self.task_body_collapsed;
     }
 }
 

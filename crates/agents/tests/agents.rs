@@ -57,11 +57,19 @@ fn cursor_argv() {
 }
 
 #[test]
-fn inject_prompt_appends_newline() {
+fn claude_inject_prompt_appends_carriage_return() {
+    // Claude Code treats LF (`\n`) as a soft-newline inside its
+    // input buffer (same as Shift+Enter on a real keyboard) — to
+    // actually SUBMIT the prompt we need `\r` (Enter). Regression
+    // test for the bug where pilot's auto-injected prompts sat in
+    // Claude's input box waiting on a keystroke.
     let agent = Claude;
-    assert_eq!(agent.inject_prompt("hi"), b"hi\n");
-    assert_eq!(agent.inject_prompt(""), b"\n");
-    assert_eq!(agent.inject_prompt("multi\nline"), b"multi\nline\n");
+    assert_eq!(agent.inject_prompt("hi"), b"hi\r");
+    assert_eq!(agent.inject_prompt(""), b"\r");
+    // Internal `\n` is preserved verbatim — it's intentionally a
+    // line break inside Claude's input; only the trailing `\r`
+    // submits.
+    assert_eq!(agent.inject_prompt("multi\nline"), b"multi\nline\r");
 }
 
 #[test]

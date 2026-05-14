@@ -916,7 +916,6 @@ impl Sidebar {
             Binding { keys: "c", label: "claude" },
             Binding { keys: "x", label: "codex" },
             Binding { keys: "u", label: "cursor" },
-            Binding { keys: "f", label: "fix CI" },
             Binding { keys: "w", label: "work on this" },
             Binding { keys: "Shift-A", label: "adopt sessions" },
             Binding { keys: "m", label: "mark all read" },
@@ -1013,35 +1012,15 @@ impl Sidebar {
                 }
                 PaneOutcome::Consumed
             }
-            // `f` for fix — spawn the default agent in the focused
-            // workspace's worktree, pre-loaded with a prompt asking it
-            // to fix the current CI failure. Only active when the
-            // primary task has `ci == CiStatus::Fail`; otherwise we
-            // hide the binding so the hint bar doesn't lie about it.
-            (KeyCode::Char('f'), KeyModifiers::NONE)
-                if self.fix_target_for_cursor().is_some() =>
-            {
-                let Some((session_key, prompt)) = self.fix_target_for_cursor() else {
-                    return PaneOutcome::Consumed;
-                };
-                let agent_id = self.default_agent.clone();
-                tracing::info!(%session_key, %agent_id, "sidebar: emitting Spawn(Agent) with fix prompt");
-                cmds.push(Command::Spawn {
-                    session_key,
-                    session_id: self.selected_session_id(),
-                    kind: TerminalKind::Agent(agent_id),
-                    cwd: None,
-                    initial_prompt: Some(prompt),
-                });
-                PaneOutcome::Consumed
-            }
-
-            // `w` for "work on this" — broader sibling of `f`. Spawns
+            // `w` for "work on this" — single polymorphic key. Spawns
             // the default agent with a context-aware prompt:
             //  - on an issue row → implement the issue
-            //  - on a PR row with CI failing → same as `f` (fix)
+            //  - on a PR row with CI failing → fix the failing checks
             // Match guard hides the key in the hint bar when neither
             // case applies, so users see `w` only where it'll fire.
+            // (We removed the old `f` mnemonic — `w` covers both
+            // cases, plus the right-pane `w` for selected comments,
+            // so the user has one work key everywhere.)
             (KeyCode::Char('w'), KeyModifiers::NONE)
                 if self.work_target_for_cursor().is_some() =>
             {

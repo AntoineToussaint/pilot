@@ -98,6 +98,21 @@ pub mod builtins {
             vec!["claude".into(), "--continue".into()]
         }
 
+        /// Claude Code's input box treats `\n` (LF) as "insert a
+        /// newline in the input buffer" — same as Shift+Enter on a
+        /// real keyboard. To actually submit, the user presses
+        /// Enter, which the terminal encodes as `\r` (CR). We mirror
+        /// that here so an initial_prompt arrives + submits cleanly
+        /// instead of sitting in the input box waiting on a
+        /// keystroke. Any literal `\n` inside the prompt stays a
+        /// line break in Claude's input box, which is what we want
+        /// for multi-paragraph instructions.
+        fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
+            let mut bytes = prompt.as_bytes().to_vec();
+            bytes.push(b'\r');
+            bytes
+        }
+
         /// Claude Code's interactive prompt UI is recognisable by a
         /// stable footer line (`Esc to cancel · Tab to amend · …`)
         /// plus a small set of question phrasings. Matching the
