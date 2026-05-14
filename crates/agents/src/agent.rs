@@ -48,6 +48,21 @@ pub trait Agent: Send + Sync {
         bytes.push(b'\n');
         bytes
     }
+
+    /// Bytes to write AFTER `inject_prompt`, separated by a brief
+    /// delay, to commit/submit the prompt. Returns `None` when
+    /// `inject_prompt` already includes the submit keystroke — the
+    /// default, which works for any CLI where Enter both terminates
+    /// the line and submits it.
+    ///
+    /// Required by agents whose input area batches rapid byte
+    /// arrival as a paste (Claude Code): Enter inside a paste blob
+    /// is interpreted as a soft line break in the input buffer, not
+    /// as a submit. Sending Enter separately, after the paste batch
+    /// has settled, triggers the actual submit.
+    fn inject_submit(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Registry of known agents. Keyed by `Agent::id()`.
@@ -98,19 +113,29 @@ pub mod builtins {
             vec!["claude".into(), "--continue".into()]
         }
 
-        /// Claude Code's input box treats `\n` (LF) as "insert a
-        /// newline in the input buffer" — same as Shift+Enter on a
-        /// real keyboard. To actually submit, the user presses
-        /// Enter, which the terminal encodes as `\r` (CR). We mirror
-        /// that here so an initial_prompt arrives + submits cleanly
-        /// instead of sitting in the input box waiting on a
-        /// keystroke. Any literal `\n` inside the prompt stays a
-        /// line break in Claude's input box, which is what we want
-        /// for multi-paragraph instructions.
+        /// Claude Code's input area batches rapid byte arrival as a
+        /// paste. We deliberately return JUST the prompt bytes here
+        /// (no trailing `\r`) so `\r` doesn't get folded into the
+        /// paste blob — inside a paste, Enter is interpreted as a
+        /// soft line break, not a submit. The trailing `\r` is sent
+        /// separately by `inject_submit` after a brief delay, once
+        /// the paste batch has settled.
+        ///
+        /// Any literal `\n` inside the prompt stays a line break in
+        /// Claude's input box, which is what we want for multi-
+        /// paragraph instructions.
         fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
-            let mut bytes = prompt.as_bytes().to_vec();
-            bytes.push(b'\r');
-            bytes
+            prompt.as_bytes().to_vec()
+        }
+
+        /// Send `\r` (Enter) separately from the paste body. Without
+        /// the gap, Claude treats the whole blob as a paste and the
+        /// trailing `\r` becomes a soft line break instead of a
+        /// submit — the prompt sits in the input box waiting on a
+        /// keystroke. Sending `\r` after the gap fires Enter as an
+        /// independent keystroke and submits the paste.
+        fn inject_submit(&self) -> Option<Vec<u8>> {
+            Some(vec![b'\r'])
         }
 
         /// Claude Code's interactive prompt UI is recognisable by a

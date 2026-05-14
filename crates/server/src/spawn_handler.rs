@@ -385,14 +385,24 @@ pub async fn handle_spawn(
     // garbled prompt than a silently-lost one.
     if let (Some(prompt), Some(agent)) = (initial_prompt, &agent_for_inject) {
         let agent = agent.clone();
-        let bytes = agent.inject_prompt(&prompt);
+        let paste = agent.inject_prompt(&prompt);
+        let submit = agent.inject_submit();
         let backend = config.backend.clone();
         let states = config.agent_states.clone();
         let backend_key = backend_key.clone();
         let id = terminal_id;
         tokio::spawn(async move {
+            // Wait for the agent's input area to be ready. For agents
+            // whose first interactive screen registers as `Asking`
+            // (yes/no prompt detectors that fire on the welcome
+            // banner), this short-circuits. For Claude — whose
+            // welcome screen registers as `Active` — we fall through
+            // to the 1.5s settle and then write. 10s is the hard
+            // upper bound for slow cold starts (npm bootstrapping,
+            // first-run auth).
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
+            let mut settled = false;
+            while std::time::Instant::now() < deadline {
                 let ready = states
                     .lock()
                     .await
@@ -401,22 +411,45 @@ pub async fn handle_spawn(
                     .map(|s| s == pilot_ipc::AgentState::Asking)
                     .unwrap_or(false);
                 if ready {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    tracing::warn!(
-                        terminal_id = ?id,
-                        "initial_prompt: agent never reached Asking within 10s — writing anyway"
-                    );
+                    settled = true;
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
-            if let Err(e) = backend.write(&backend_key, &bytes).await {
+            if !settled {
+                // Cold start fallback: give the agent a beat to draw
+                // its input area before pasting. Without this, fast
+                // Claude startups race the paste and the first few
+                // bytes land in the welcome banner instead of the
+                // input box.
                 tracing::warn!(
                     terminal_id = ?id,
-                    "initial_prompt: backend.write failed: {e}"
+                    "initial_prompt: agent never reached Asking — writing after settle delay"
                 );
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            }
+            if let Err(e) = backend.write(&backend_key, &paste).await {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    "initial_prompt: backend.write(paste) failed: {e}"
+                );
+                return;
+            }
+            // Paste/submit split. Agents like Claude Code batch rapid
+            // byte arrival as a paste; Enter inside that batch is a
+            // soft line break, not a submit. Sending the submit
+            // keystroke after a beat lets the paste settle so Enter
+            // fires as its own keystroke. Agents that don't need a
+            // separate submit (the default trait impl) return None
+            // here and we skip the second write entirely.
+            if let Some(submit_bytes) = submit {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Err(e) = backend.write(&backend_key, &submit_bytes).await {
+                    tracing::warn!(
+                        terminal_id = ?id,
+                        "initial_prompt: backend.write(submit) failed: {e}"
+                    );
+                }
             }
         });
     }

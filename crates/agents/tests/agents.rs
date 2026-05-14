@@ -57,19 +57,43 @@ fn cursor_argv() {
 }
 
 #[test]
-fn claude_inject_prompt_appends_carriage_return() {
-    // Claude Code treats LF (`\n`) as a soft-newline inside its
-    // input buffer (same as Shift+Enter on a real keyboard) — to
-    // actually SUBMIT the prompt we need `\r` (Enter). Regression
-    // test for the bug where pilot's auto-injected prompts sat in
-    // Claude's input box waiting on a keystroke.
+fn claude_inject_prompt_is_just_the_prompt_body() {
+    // Claude Code batches rapid byte arrival as a paste. If we
+    // included `\r` here it would land inside the paste blob and
+    // Claude would interpret it as a soft line break in the input
+    // buffer, not a submit — the prompt would sit in the input box
+    // waiting on a keystroke (the bug this test guards against).
+    // The trailing Enter is delivered separately by `inject_submit`,
+    // after a brief delay so the paste batch settles first.
     let agent = Claude;
-    assert_eq!(agent.inject_prompt("hi"), b"hi\r");
-    assert_eq!(agent.inject_prompt(""), b"\r");
+    assert_eq!(agent.inject_prompt("hi"), b"hi");
+    assert_eq!(agent.inject_prompt(""), b"");
     // Internal `\n` is preserved verbatim — it's intentionally a
-    // line break inside Claude's input; only the trailing `\r`
-    // submits.
-    assert_eq!(agent.inject_prompt("multi\nline"), b"multi\nline\r");
+    // line break inside Claude's input.
+    assert_eq!(agent.inject_prompt("multi\nline"), b"multi\nline");
+}
+
+#[test]
+fn claude_inject_submit_is_carriage_return() {
+    // Companion to `claude_inject_prompt_is_just_the_prompt_body`:
+    // the actual submit keystroke. The spawn handler writes this
+    // ~200ms after the paste so Claude's paste detection has
+    // closed its batch — Enter then fires as an independent
+    // keystroke and submits the buffered prompt.
+    let agent = Claude;
+    assert_eq!(agent.inject_submit(), Some(vec![b'\r']));
+}
+
+#[test]
+fn default_agent_inject_submit_is_none() {
+    // For agents where `inject_prompt` already includes the submit
+    // keystroke (the default trait impl appends `\n`), the spawn
+    // handler skips the second write. Codex/Cursor inherit this
+    // default — only Claude needs the paste/submit split.
+    let agent = Codex;
+    assert_eq!(agent.inject_submit(), None);
+    let agent = Cursor;
+    assert_eq!(agent.inject_submit(), None);
 }
 
 #[test]
