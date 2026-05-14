@@ -59,6 +59,7 @@ fn make_task(key: &str) -> Task {
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        closes_issues: vec![],
     }
 }
 
@@ -1193,5 +1194,205 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
     assert!(
         config.store.list_workspaces().unwrap().is_empty(),
         "workspace deleted from store"
+    );
+}
+
+// ── Issue → PR collapsing (closingIssuesReferences) ─────────────────
+
+fn make_issue_task(key: &str) -> Task {
+    // Mirror `make_task` but mint an issue URL so the workspace
+    // classifier routes this into `gh_issues` (not the PR slot).
+    let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+    let mut t = make_task(key);
+    t.url = format!("https://github.com/{path}/issues/{num}");
+    t
+}
+
+fn make_pr_closing(pr_key: &str, closes: &[&str]) -> Task {
+    let mut t = make_task(pr_key);
+    t.closes_issues = closes
+        .iter()
+        .map(|k| TaskId {
+            source: "github".into(),
+            key: (*k).into(),
+        })
+        .collect();
+    t
+}
+
+#[tokio::test]
+async fn pr_polled_after_issue_collapses_them_into_one_row() {
+    // Issue is polled first → standalone workspace. PR shows up
+    // claiming the issue via closingIssuesReferences → the issue
+    // workspace folds into the PR's, the standalone row disappears.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    let keys: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(
+        keys.len(),
+        1,
+        "issue + PR must collapse to one workspace row, got {keys:?}"
+    );
+    assert!(keys[0].contains("141"), "remaining row is the PR's");
+
+    let pr_ws_record = config.store.list_workspaces().unwrap().pop().unwrap();
+    let pr_ws: pilot_core::Workspace =
+        serde_json::from_str(&pr_ws_record.workspace_json.unwrap()).unwrap();
+    assert_eq!(
+        pr_ws.gh_issues.len(),
+        1,
+        "the issue must surface inside the PR workspace's gh_issues",
+    );
+    assert_eq!(pr_ws.gh_issues[0].id.key, "o/r#71");
+}
+
+#[tokio::test]
+async fn issue_polled_after_pr_routes_into_pr_workspace() {
+    // PR polled first (carrying closes_issues); issue polled next.
+    // The issue's standalone workspace must NOT get created — its
+    // update must flow into the PR workspace instead.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+
+    let records = config.store.list_workspaces().unwrap();
+    assert_eq!(
+        records.len(),
+        1,
+        "issue must NOT create its own workspace when a PR already claims it",
+    );
+    let ws: pilot_core::Workspace =
+        serde_json::from_str(records[0].workspace_json.clone().unwrap().as_str()).unwrap();
+    assert_eq!(ws.pr.as_ref().unwrap().id.key, "o/r#141");
+    assert_eq!(ws.gh_issues.len(), 1);
+    assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
+}
+
+#[tokio::test]
+async fn issue_sessions_move_to_pr_workspace_on_merge() {
+    // The whole point of the migration: when a user already has a
+    // running session against an issue and a linked PR finally
+    // lands, the session must survive — moved over to the PR
+    // workspace, not killed and recreated.
+    use pilot_core::{SessionKind, WorkspaceKey, WorkspaceSession};
+
+    let config = ServerConfig::in_memory();
+
+    // Seed an issue workspace with a fabricated session.
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_issue_task("o/r#71")));
+    let mut issue_ws: pilot_core::Workspace = {
+        let record = config.store.get_workspace(&issue_key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    let session_id = pilot_core::SessionId::new();
+    issue_ws.add_session(WorkspaceSession {
+        id: session_id,
+        workspace_key: issue_key.clone(),
+        name: "claude".into(),
+        kind: SessionKind::Agent {
+            agent_id: "claude".into(),
+        },
+        state: pilot_core::SessionRunState::Active,
+        worktree_path: std::path::PathBuf::from("/tmp/pilot-test-issue-71"),
+        created_at: Utc::now(),
+        last_output_at: None,
+        layout: pilot_core::SessionLayout::default(),
+    });
+    let json = serde_json::to_string(&issue_ws).unwrap();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: issue_key.as_str().to_string(),
+            created_at: issue_ws.created_at,
+            workspace_json: Some(json),
+        })
+        .unwrap();
+
+    // Now the linked PR shows up.
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    // Issue workspace gone, session lives under the PR workspace.
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_none(),
+        "issue workspace should be removed after merge",
+    );
+    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    let pr_ws: pilot_core::Workspace = {
+        let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    assert!(
+        pr_ws.sessions.iter().any(|s| s.id == session_id),
+        "session must have moved to the PR workspace",
+    );
+    let moved = pr_ws
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .unwrap();
+    assert_eq!(
+        moved.workspace_key, pr_key,
+        "session.workspace_key must be rewritten to the PR's key",
+    );
+}
+
+#[tokio::test]
+async fn pr_with_no_closing_issues_leaves_other_workspaces_alone() {
+    // Sanity: the migration only collapses workspaces it has an
+    // explicit closing-link for. An unrelated issue keeps its own
+    // row.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    polling::upsert(&config, make_task("o/r#999")).await; // PR with no closes_issues
+
+    let count = config.store.list_workspaces().unwrap().len();
+    assert_eq!(count, 2, "unlinked issue + PR keep separate rows");
+}
+
+#[tokio::test]
+async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
+    // Pre-seed terminal_meta as if a terminal had been spawned
+    // against the issue's session_key. After the PR merges the
+    // issue, the meta entry must be rebadged to the PR's key —
+    // otherwise reconnecting TUI clients see a terminal pointing
+    // to a workspace that no longer exists.
+    use pilot_core::{SessionKey, WorkspaceKey};
+    use pilot_ipc::{TerminalId, TerminalKind};
+
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+
+    let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_issue_task("o/r#71")));
+    let issue_session_key: SessionKey = (&issue_key).into();
+    config
+        .terminal_meta
+        .lock()
+        .await
+        .insert(TerminalId(7), (issue_session_key.clone(), TerminalKind::Shell));
+
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    let pr_session_key: SessionKey = (&pr_key).into();
+    let meta = config.terminal_meta.lock().await;
+    let entry = meta.get(&TerminalId(7)).expect("terminal_meta still present");
+    assert_eq!(
+        entry.0, pr_session_key,
+        "terminal_meta entry must point at the PR's session_key after merge",
     );
 }

@@ -53,6 +53,7 @@ fn make_task(key: &str) -> Task {
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        closes_issues: vec![],
     }
 }
 

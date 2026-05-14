@@ -167,6 +167,12 @@ pub struct Task {
     /// Number of lines deleted in this PR.
     #[serde(default)]
     pub deletions: u32,
+    /// Other tasks this PR closes when merged. Populated from
+    /// GitHub's `closingIssuesReferences` field. Used by the server
+    /// to collapse the issue + PR workspaces so the user doesn't
+    /// see two rows for the same work.
+    #[serde(default)]
+    pub closes_issues: Vec<TaskId>,
 }
 
 /// Computed urgency level for a session. Used for inbox sorting.
@@ -319,6 +325,7 @@ mod status_tag_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            closes_issues: vec![],
         }
     }
 

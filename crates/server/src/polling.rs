@@ -792,13 +792,65 @@ pub async fn run_one_tick(config: &ServerConfig) {
 /// Read state (`seen_count`, `read_indices`, `snoozed_until`,
 /// `last_viewed_at`) is preserved across updates — providers only
 /// own upstream-derived fields.
+///
+/// ## Issue → PR collapsing
+///
+/// GitHub PRs can link to issues via `closingIssuesReferences` (the
+/// canonical "Closes #N" / "Fixes #N" mapping). When we observe a PR
+/// whose closes_issues lists an issue that already lives in its own
+/// standalone workspace, we **merge** the issue workspace into the
+/// PR workspace — moving its sessions over (terminals keep running)
+/// and dropping the standalone row. Conversely, when an issue is
+/// polled and a PR already claims it, we route the issue update into
+/// the PR workspace instead of building a duplicate.
 pub async fn upsert(config: &ServerConfig, task: Task) {
+    // For issues: if a PR somewhere already claims this issue as
+    // closed-by, route the upsert into that PR workspace. This is
+    // the "issue polled AFTER its PR" path. We only kick in when
+    // the issue has no standalone workspace yet — once one exists,
+    // either the PR poll will collapse them or the issue's own row
+    // remains until the PR shows up. Polling is cheap to scan: the
+    // workspace list is bounded by the user's filter scope.
+    if !is_pr_task(&task) {
+        let issue_key_str = pilot_core::workspace_key_for(&task);
+        let issue_key = WorkspaceKey::new(issue_key_str);
+        let already_standalone = config
+            .store
+            .get_workspace(&issue_key)
+            .ok()
+            .flatten()
+            .is_some();
+        if !already_standalone
+            && let Some(pr_key) = pr_workspace_claiming_issue(config, &task.id)
+        {
+            tracing::info!(
+                issue = %task.id,
+                pr_workspace = %pr_key,
+                "routing issue upsert into PR workspace (closingIssuesReferences)"
+            );
+            upsert_into_workspace_key(config, &pr_key, task).await;
+            return;
+        }
+    }
+
     let key_str = pilot_core::workspace_key_for(&task);
     let key = WorkspaceKey::new(key_str.clone());
+    upsert_into_workspace_key(config, &key, task).await;
+}
 
+/// Inner upsert: load workspace at `key`, attach the task, migrate
+/// linked-issue workspaces if the task is a PR with closing refs,
+/// then persist + broadcast. Split out from `upsert` so the
+/// "route to PR workspace" path can reuse the same write/broadcast
+/// behaviour without duplicating it.
+async fn upsert_into_workspace_key(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    task: Task,
+) {
     let existing = config
         .store
-        .get_workspace(&key)
+        .get_workspace(key)
         .ok()
         .flatten()
         .and_then(|r| r.workspace_json)
@@ -811,6 +863,13 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
         }
         None => Workspace::from_task(task, Utc::now()),
     };
+
+    // If this workspace's primary task is a PR that closes issues,
+    // pull any standalone issue workspaces into it. Runs **before**
+    // session-path migration so the migration sees the final session
+    // set (issue sessions included) and renames their worktrees to
+    // the PR slug in one pass.
+    merge_closing_issue_workspaces(config, &mut workspace).await;
 
     // PR-attach migration runs **before** persistence + broadcast so
     // observers never see a stale `worktree_path`. Most polls are
@@ -836,6 +895,170 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
     let _ = config
         .bus
         .send(Event::WorkspaceUpserted(Box::new(workspace)));
+}
+
+/// Heuristic for "is this Task the PR side of a PR/issue pair?". We
+/// classify on URL (the same rule [`pilot_core::workspace::classify`]
+/// uses), so a single source of truth governs both "which slot does
+/// this task fill?" and "should I look up closing-issue references?".
+fn is_pr_task(task: &Task) -> bool {
+    task.url.contains("/pull/")
+}
+
+/// Scan stored workspaces for one whose PR claims `issue_id` via
+/// `closes_issues`. Returns the PR's workspace key when a match is
+/// found. Linear in the workspace count — fine in practice (10s to
+/// low 100s of workspaces).
+fn pr_workspace_claiming_issue(
+    config: &ServerConfig,
+    issue_id: &pilot_core::TaskId,
+) -> Option<WorkspaceKey> {
+    let records = config.store.list_workspaces().ok()?;
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
+            continue;
+        };
+        let Some(pr) = &ws.pr else {
+            continue;
+        };
+        if pr.closes_issues.iter().any(|id| id == issue_id) {
+            return Some(ws.key);
+        }
+    }
+    None
+}
+
+/// If `workspace`'s PR closes issues that pilot tracks as their own
+/// workspaces, fold each issue's workspace into `workspace` and
+/// remove the standalone row. Sessions move over (terminals keep
+/// running); `terminal_meta` is rewritten so wire-side events for
+/// the old session_key flow to the new one.
+///
+/// No-op when there's no PR, no `closes_issues`, or no matching
+/// issue workspace exists yet.
+async fn merge_closing_issue_workspaces(
+    config: &ServerConfig,
+    workspace: &mut Workspace,
+) {
+    let Some(pr) = workspace.pr.as_ref() else {
+        return;
+    };
+    if pr.closes_issues.is_empty() {
+        return;
+    }
+
+    let pr_session_key: pilot_core::SessionKey = (&workspace.key).into();
+    let mut closed_ids: Vec<pilot_core::TaskId> = pr.closes_issues.clone();
+    closed_ids.dedup();
+
+    for issue_id in closed_ids {
+        // The issue's standalone workspace key is whatever
+        // workspace_key_for() would have produced when the issue was
+        // first upserted. We synthesize that with a Task fragment
+        // since we only have the TaskId here — the slug logic uses
+        // source + key.
+        let stub = Task {
+            id: issue_id.clone(),
+            title: String::new(),
+            body: None,
+            state: pilot_core::TaskState::Open,
+            role: pilot_core::TaskRole::Author,
+            ci: pilot_core::CiStatus::None,
+            review: pilot_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: None,
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            has_conflicts: false,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&stub));
+        if issue_key == workspace.key {
+            // Self-link — nothing to merge.
+            continue;
+        }
+        let Some(record) = config.store.get_workspace(&issue_key).ok().flatten() else {
+            continue;
+        };
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(issue_ws) = serde_json::from_str::<Workspace>(&json) else {
+            continue;
+        };
+
+        // 1. Move sessions. Each session carries its own
+        // workspace_key; rewrite it so future `worktree_slug` /
+        // path-migration sees the PR as the owner.
+        let issue_session_key: pilot_core::SessionKey = (&issue_key).into();
+        for mut session in issue_ws.sessions {
+            session.workspace_key = workspace.key.clone();
+            workspace.add_session(session);
+        }
+
+        // 2. Carry the issue Task data forward so the PR row shows
+        // a "linked issue: …" entry. If the issue workspace had its
+        // own gh_issues / linear_issues lists, splice those in too.
+        for issue_task in &issue_ws.gh_issues {
+            workspace.attach_task(issue_task.clone());
+        }
+        for issue_task in &issue_ws.linear_issues {
+            workspace.attach_task(issue_task.clone());
+        }
+
+        // 3. Rewrite terminal_meta so any terminals previously
+        // bound to the issue's session_key now route to the PR's
+        // session_key. Without this, reconnecting TUI clients would
+        // see orphan terminals (workspace gone, terminal still wired
+        // to its old key).
+        let mut meta = config.terminal_meta.lock().await;
+        for (_tid, entry) in meta.iter_mut() {
+            if entry.0 == issue_session_key {
+                entry.0 = pr_session_key.clone();
+            }
+        }
+        drop(meta);
+
+        // 4. Drop the issue workspace from the store + broadcast
+        // its removal. We call `store.delete_workspace` directly
+        // (not `delete_workspace(config, ..)`) so we DON'T trigger
+        // the kill-loop in that helper — the terminals are alive
+        // and well, just rebadged. A bus broadcast keeps every
+        // connected TUI in sync without going through the kill path.
+        if let Err(e) = config.store.delete_workspace(&issue_key) {
+            tracing::warn!(
+                issue_workspace = %issue_key,
+                "delete_workspace during PR merge failed: {e}"
+            );
+        }
+        let _ = config
+            .bus
+            .send(Event::WorkspaceRemoved(issue_key.clone()));
+
+        tracing::info!(
+            issue_workspace = %issue_key,
+            pr_workspace = %workspace.key,
+            "merged issue workspace into PR (closingIssuesReferences)"
+        );
+    }
 }
 
 /// Create an empty workspace (no PR, no issues) named by the user.

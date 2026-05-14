@@ -223,6 +223,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         recent_activity: activity,
         additions: 0,
         deletions: 0,
+        closes_issues: vec![],
     }
 }
 

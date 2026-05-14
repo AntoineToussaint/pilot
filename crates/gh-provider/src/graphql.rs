@@ -82,6 +82,14 @@ query($query: String!, $first: Int!, $after: String) {
             submittedAt
           }
         }
+        closingIssuesReferences(first: 10) {
+          nodes {
+            number
+            repository {
+              nameWithOwner
+            }
+          }
+        }
         reviewThreads(first: 50) {
           nodes {
             id
@@ -245,6 +253,23 @@ pub struct GqlPr {
     #[serde(rename = "reviewThreads")]
     pub review_threads: GqlReviewThreads,
     pub commits: GqlCommits,
+    /// Issues this PR will close on merge (linked via "Closes #N" in
+    /// body, GitHub keyword variants, or the PR sidebar's "Development"
+    /// linker). Populated from GitHub's `closingIssuesReferences` —
+    /// the canonical link, not title heuristics.
+    #[serde(default, rename = "closingIssuesReferences")]
+    pub closing_issues_references: Option<GqlClosingIssues>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlClosingIssues {
+    pub nodes: Vec<GqlClosingIssue>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlClosingIssue {
+    pub number: u64,
+    pub repository: GqlIssueRepo,
 }
 
 #[derive(Deserialize, Debug)]
@@ -685,6 +710,19 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         recent_activity: activities,
         additions: pr.additions,
         deletions: pr.deletions,
+        closes_issues: pr
+            .closing_issues_references
+            .as_ref()
+            .map(|c| {
+                c.nodes
+                    .iter()
+                    .map(|ci| TaskId {
+                        source: "github".into(),
+                        key: format!("{}#{}", ci.repository.name_with_owner, ci.number),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -1074,6 +1112,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         recent_activity: comments,
         additions: 0,
         deletions: 0,
+        closes_issues: vec![],
     }
 }
 
@@ -1304,6 +1343,7 @@ mod tests {
             reviews: GqlReviews { nodes: vec![] },
             review_threads: GqlReviewThreads { nodes: vec![] },
             commits: GqlCommits { nodes: vec![] },
+            closing_issues_references: None,
         }
     }
 
