@@ -907,12 +907,13 @@ async fn upsert_into_workspace_key(
         .send(Event::WorkspaceUpserted(Box::new(workspace)));
 }
 
-/// Heuristic for "is this Task the PR side of a PR/issue pair?". We
-/// classify on URL (the same rule [`pilot_core::workspace::classify`]
-/// uses), so a single source of truth governs both "which slot does
-/// this task fill?" and "should I look up closing-issue references?".
+/// Heuristic for "is this Task the PR side of a PR/issue pair?".
+/// Single source of truth: [`Task::is_pr`] — same method
+/// `workspace::classify` consults — so adding a new provider
+/// (GitLab `/merge_requests/`, Bitbucket `/pull-requests/`, …)
+/// only requires extending that one method.
 fn is_pr_task(task: &Task) -> bool {
-    task.url.contains("/pull/")
+    task.is_pr()
 }
 
 /// Scan stored workspaces for one whose PR claims `issue_id` via

@@ -398,9 +398,16 @@ fn classify(task: &Task) -> TaskSlot {
     if task.id.source == "linear" {
         return TaskSlot::LinearIssue;
     }
-    if task.url.contains("/pull/") {
+    // Provider-aware "is this a PR?" check — recognizes GitHub,
+    // GitLab, and Bitbucket URL shapes via one shared method on
+    // Task. New providers extend `Task::is_pr` rather than this
+    // function.
+    if task.is_pr() {
         return TaskSlot::Pr;
     }
+    // Anything else from a known issue-tracking source is treated
+    // as an issue. The explicit `/issues/` check catches paths even
+    // if `source` is set to something custom.
     if task.url.contains("/issues/") || task.id.source == "github" {
         return TaskSlot::GhIssue;
     }
@@ -969,6 +976,31 @@ mod tests {
         let ws = Workspace::from_task(issue("github", "o/r#42"), now());
         assert!(ws.pr.is_none());
         assert_eq!(ws.gh_issues.len(), 1);
+    }
+
+    #[test]
+    fn classify_routes_gitlab_merge_request_to_pr_slot() {
+        // Future-provider regression: GitLab's merge-request URLs
+        // must classify as PR via the shared `Task::is_pr` knob.
+        // Today no provider crate produces these, but the model
+        // is expected to route them correctly when one does.
+        let mut t = pr("o/r#1");
+        t.id.source = "gitlab".into();
+        t.url = "https://gitlab.com/group/project/-/merge_requests/1".into();
+        let ws = Workspace::from_task(t, now());
+        assert!(
+            ws.pr.is_some(),
+            "GitLab merge_request URL must land in the PR slot",
+        );
+    }
+
+    #[test]
+    fn classify_routes_bitbucket_pull_request_to_pr_slot() {
+        let mut t = pr("o/r#1");
+        t.id.source = "bitbucket".into();
+        t.url = "https://bitbucket.org/team/project/pull-requests/1".into();
+        let ws = Workspace::from_task(t, now());
+        assert!(ws.pr.is_some(), "Bitbucket pull-request URL must land in PR slot");
     }
 
     #[test]

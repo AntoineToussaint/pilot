@@ -175,6 +175,26 @@ pub struct Task {
     pub closes_issues: Vec<TaskId>,
 }
 
+impl Task {
+    /// True when this task represents a pull/merge request rather
+    /// than an issue/ticket. Centralizes the URL-shape heuristic so
+    /// new providers (Bitbucket, GitLab, …) extend ONE place instead
+    /// of every caller. Today's providers in tree:
+    ///
+    /// - GitHub: `https://github.com/{owner}/{repo}/pull/{N}`
+    /// - GitLab: `https://gitlab.com/.../merge_requests/{N}`
+    /// - Bitbucket: `https://bitbucket.org/.../pull-requests/{N}`
+    ///
+    /// Linear has no PR concept — its tasks always return false
+    /// here; classification routes them to the linear-issue slot.
+    pub fn is_pr(&self) -> bool {
+        let url = self.url.as_str();
+        url.contains("/pull/")
+            || url.contains("/pull-requests/")
+            || url.contains("/merge_requests/")
+    }
+}
+
 /// Computed urgency level for a session. Used for inbox sorting.
 /// Ordered from most urgent (0) to least urgent (7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -417,5 +437,47 @@ mod status_tag_tests {
         assert_eq!(StatusTag::AutoMerge.label(), "AUTO");
         assert_eq!(StatusTag::Ready.label(), "READY");
         assert_eq!(StatusTag::None.label(), "");
+    }
+
+    #[test]
+    fn is_pr_recognizes_github_url() {
+        let mut t = base();
+        t.url = "https://github.com/o/r/pull/42".into();
+        assert!(t.is_pr());
+    }
+
+    #[test]
+    fn is_pr_recognizes_gitlab_merge_request_url() {
+        // GitLab uses `/-/merge_requests/N`. The substring check
+        // catches the relevant slug even with the `-` segment.
+        let mut t = base();
+        t.url = "https://gitlab.com/group/project/-/merge_requests/42".into();
+        assert!(
+            t.is_pr(),
+            "GitLab merge_request URLs must classify as PR — extending \
+             Task::is_pr is the one-line knob future providers tweak",
+        );
+    }
+
+    #[test]
+    fn is_pr_recognizes_bitbucket_pull_request_url() {
+        let mut t = base();
+        t.url = "https://bitbucket.org/team/project/pull-requests/42".into();
+        assert!(t.is_pr());
+    }
+
+    #[test]
+    fn is_pr_is_false_for_github_issue_url() {
+        let mut t = base();
+        t.url = "https://github.com/o/r/issues/42".into();
+        assert!(!t.is_pr(), "issue URLs must not classify as PR");
+    }
+
+    #[test]
+    fn is_pr_is_false_for_linear_issue_url() {
+        let mut t = base();
+        t.id.source = "linear".into();
+        t.url = "https://linear.app/team/issue/ENG-42".into();
+        assert!(!t.is_pr(), "Linear has no PR concept");
     }
 }
