@@ -60,6 +60,58 @@ impl<K: PartialEq + Clone> ConfirmLatch<K> {
     }
 }
 
+/// Time-based "armed for `delay`" latch. Same family as
+/// `ConfirmLatch`, different trigger — instead of a second press,
+/// the elapsed time gates the fire. Used by the right pane's
+/// auto-mark-read timer (which used to live as a hand-rolled
+/// `Option<Instant>` field with mutations scattered across ~10
+/// call sites).
+///
+/// Contract:
+/// - `arm()` records "now" as the start of the countdown.
+/// - `disarm()` clears the latch.
+/// - `ready(delay)` returns `true` iff the latch is armed and at
+///   least `delay` has elapsed.
+/// - `progress(delay)` returns `Some(0.0..=1.0)` while armed, for
+///   rendering a progress bar.
+#[derive(Debug, Default, Clone)]
+pub struct TimerLatch {
+    armed_at: Option<std::time::Instant>,
+}
+
+impl TimerLatch {
+    pub fn new() -> Self {
+        Self { armed_at: None }
+    }
+
+    pub fn arm(&mut self) {
+        self.armed_at = Some(std::time::Instant::now());
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed_at = None;
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed_at.is_some()
+    }
+
+    /// True iff armed and `delay` has elapsed since `arm`.
+    pub fn ready(&self, delay: std::time::Duration) -> bool {
+        self.armed_at
+            .map(|t| t.elapsed() >= delay)
+            .unwrap_or(false)
+    }
+
+    /// Elapsed fraction of `delay`, clamped to `[0.0, 1.0]`. None
+    /// when disarmed.
+    pub fn progress(&self, delay: std::time::Duration) -> Option<f32> {
+        let elapsed = self.armed_at?.elapsed();
+        let ratio = elapsed.as_secs_f32() / delay.as_secs_f32();
+        Some(ratio.clamp(0.0, 1.0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +156,47 @@ mod tests {
         latch.disarm();
         assert!(!latch.arm_or_fire("a"));
         assert_eq!(latch.armed(), Some(&"a"));
+    }
+
+    // ── TimerLatch tests ─────────────────────────────────────────
+
+    #[test]
+    fn timer_starts_disarmed() {
+        let t = TimerLatch::new();
+        assert!(!t.is_armed());
+        assert!(!t.ready(std::time::Duration::from_millis(10)));
+        assert_eq!(t.progress(std::time::Duration::from_millis(10)), None);
+    }
+
+    #[test]
+    fn timer_arm_sets_armed_flag() {
+        let mut t = TimerLatch::new();
+        t.arm();
+        assert!(t.is_armed());
+    }
+
+    #[test]
+    fn timer_disarm_clears_flag() {
+        let mut t = TimerLatch::new();
+        t.arm();
+        t.disarm();
+        assert!(!t.is_armed());
+    }
+
+    #[test]
+    fn timer_progress_grows_while_armed() {
+        let mut t = TimerLatch::new();
+        t.arm();
+        // Immediately after arm the ratio is near 0 but not None.
+        let p = t.progress(std::time::Duration::from_secs(1));
+        assert!(p.is_some_and(|r| (0.0..=1.0).contains(&r)));
+    }
+
+    #[test]
+    fn timer_ready_after_delay() {
+        let mut t = TimerLatch::new();
+        t.arm();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        assert!(t.ready(std::time::Duration::from_millis(10)));
     }
 }

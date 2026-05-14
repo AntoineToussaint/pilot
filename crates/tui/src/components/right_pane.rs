@@ -65,13 +65,13 @@ pub struct RightPane {
     /// explicitly toggles, we stop auto-collapsing on empty: their
     /// intent wins.
     activity_collapse_user_set: bool,
-    /// Auto-mark-read timer. When the cursor lands on an unread row
-    /// while the pane has focus, we record the moment in
-    /// `mark_armed_at`. On the next `tick` past `MARK_READ_DELAY` we
-    /// flip that activity to read and remember the index in
-    /// `last_marked_read` so `z` can undo it. None means: nothing
-    /// pending, or the cursor is already on a read row.
-    mark_armed_at: Option<std::time::Instant>,
+    /// Auto-mark-read timer. Armed when the cursor lands on an
+    /// unread row while the pane has focus; on the next `tick`
+    /// past `auto_mark_delay` the activity flips to read and we
+    /// remember the index in `last_marked_read` so `z` can undo
+    /// it. Backed by the generic `TimerLatch` so the
+    /// "arm-on-event, fire-on-elapsed" contract is one place.
+    mark_timer: crate::confirm_latch::TimerLatch,
     last_marked_read: Option<usize>,
     /// Per-activity expand state. Default-empty: every comment renders
     /// as one header row to keep the feed scannable. The user expands
@@ -104,6 +104,23 @@ pub struct RightPane {
 // `MARK_READ_DELAY` retired — value lives on `self.auto_mark_delay`
 // now, sourced from `~/.pilot/config.yaml::ui.auto_mark_delay`.
 
+/// Pure predicate: should the auto-mark timer be armed for the
+/// current state? The old `rearm_mark_timer` mixed this decision
+/// with the `&mut self` mutation; pulling it out lets the cell
+/// tests pin every truth-table cell (focused × workspace ×
+/// cursor-unread) directly without going through the rest of the
+/// pane's state.
+pub fn should_arm_mark_timer(
+    focused: bool,
+    workspace: Option<&pilot_core::Workspace>,
+    cursor: usize,
+) -> bool {
+    focused
+        && workspace
+            .map(|w| w.is_activity_unread(cursor))
+            .unwrap_or(false)
+}
+
 impl RightPane {
     pub fn new(id: PaneId) -> Self {
         Self {
@@ -116,7 +133,7 @@ impl RightPane {
             // workspace landing in `set_workspace`.
             activity_collapsed: true,
             activity_collapse_user_set: false,
-            mark_armed_at: None,
+            mark_timer: crate::confirm_latch::TimerLatch::new(),
             last_marked_read: None,
             expanded_activities: HashSet::new(),
             selected_activities: HashSet::new(),
@@ -150,10 +167,7 @@ impl RightPane {
     /// armed, else None. The status footer reads this to render a
     /// progress bar. `elapsed_ratio` is clamped to [0.0, 1.0].
     pub fn auto_mark_progress(&self) -> Option<f32> {
-        let armed = self.mark_armed_at?;
-        let elapsed = armed.elapsed();
-        let ratio = elapsed.as_secs_f32() / self.auto_mark_delay.as_secs_f32();
-        Some(ratio.clamp(0.0, 1.0))
+        self.mark_timer.progress(self.auto_mark_delay)
     }
 
     /// Whether `z` would do something useful right now. Drives the
@@ -184,18 +198,10 @@ impl RightPane {
     /// changes in a way that might affect the answer (j/k/g/G,
     /// set_workspace, focus enter). Idempotent on re-arm.
     fn rearm_mark_timer(&mut self, focused: bool) {
-        if !focused {
-            self.mark_armed_at = None;
-            return;
-        }
-        let Some(workspace) = &self.workspace else {
-            self.mark_armed_at = None;
-            return;
-        };
-        if workspace.is_activity_unread(self.comment_cursor) {
-            self.mark_armed_at = Some(std::time::Instant::now());
+        if should_arm_mark_timer(focused, self.workspace.as_ref(), self.comment_cursor) {
+            self.mark_timer.arm();
         } else {
-            self.mark_armed_at = None;
+            self.mark_timer.disarm();
         }
     }
 
@@ -210,7 +216,7 @@ impl RightPane {
         }
         workspace.mark_activity_read(i);
         self.last_marked_read = Some(i);
-        self.mark_armed_at = None;
+        self.mark_timer.disarm();
         Some((pilot_core::SessionKey::from(&workspace.key), i))
     }
 
@@ -223,8 +229,8 @@ impl RightPane {
         workspace.unmark_activity_read(i);
         // Re-arm if the cursor is still on this row — otherwise the
         // timer would re-fire on the next tick and undo the undo.
-        // Simpler: just clear armed_at; user can re-arm by moving.
-        self.mark_armed_at = None;
+        // Simpler: just clear; user can re-arm by moving.
+        self.mark_timer.disarm();
         Some((pilot_core::SessionKey::from(&workspace.key), i))
     }
 
@@ -233,11 +239,10 @@ impl RightPane {
     /// an activity was just marked, so the App can persist via IPC.
     pub fn tick(&mut self, focused: bool) -> Option<(pilot_core::SessionKey, usize)> {
         if !focused {
-            self.mark_armed_at = None;
+            self.mark_timer.disarm();
             return None;
         }
-        let armed = self.mark_armed_at?;
-        if armed.elapsed() < self.auto_mark_delay {
+        if !self.mark_timer.ready(self.auto_mark_delay) {
             return None;
         }
         self.fire_auto_mark()
@@ -252,7 +257,7 @@ impl RightPane {
         if focused {
             self.rearm_mark_timer(true);
         } else {
-            self.mark_armed_at = None;
+            self.mark_timer.disarm();
             self.last_marked_read = None;
         }
     }
@@ -302,7 +307,7 @@ impl RightPane {
             // displayed. A stale `last_marked_read` would point at an
             // index in workspace A; pressing `z` on workspace B would
             // un-read a different activity entirely. Disarm + forget.
-            self.mark_armed_at = None;
+            self.mark_timer.disarm();
             self.last_marked_read = None;
             // Indices are workspace-relative; an "expanded row 3" on
             // PR A points at a wholly different comment on PR B.
@@ -1158,4 +1163,79 @@ impl RightPane {
 // `crate::intent` so the `w` resolver owns the prompt text. The
 // right pane's `w` handler now calls `intent::resolve_work` and
 // just executes the returned `Intent`.
+
+#[cfg(test)]
+mod should_arm_mark_timer_tests {
+    use super::should_arm_mark_timer;
+    use chrono::Utc;
+    use pilot_core::{Workspace, WorkspaceKey};
+
+    fn empty_ws() -> Workspace {
+        Workspace::empty(WorkspaceKey::new("k"), "main", Utc::now())
+    }
+
+    fn ws_with_activity(unread: usize, read: usize) -> Workspace {
+        let mut w = empty_ws();
+        // Activity rows are indexed newest-first; `seen_count`
+        // counts trailing reads. Build `unread` new + `read` old.
+        for i in 0..(unread + read) {
+            w.activity.push(pilot_core::Activity {
+                author: format!("u{i}"),
+                body: "x".into(),
+                created_at: Utc::now(),
+                kind: pilot_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        w.seen_count = read;
+        w
+    }
+
+    #[test]
+    fn unfocused_never_arms() {
+        let w = ws_with_activity(3, 0);
+        assert!(!should_arm_mark_timer(false, Some(&w), 0));
+    }
+
+    #[test]
+    fn focused_no_workspace_does_not_arm() {
+        assert!(!should_arm_mark_timer(true, None, 0));
+    }
+
+    #[test]
+    fn focused_unread_cursor_arms() {
+        let w = ws_with_activity(3, 0); // 3 unread at indices 0..3
+        assert!(should_arm_mark_timer(true, Some(&w), 0));
+        assert!(should_arm_mark_timer(true, Some(&w), 2));
+    }
+
+    #[test]
+    fn focused_read_cursor_does_not_arm() {
+        // 1 unread (idx 0) + 2 read (idx 1, 2).
+        let w = ws_with_activity(1, 2);
+        assert!(should_arm_mark_timer(true, Some(&w), 0), "unread row arms");
+        assert!(
+            !should_arm_mark_timer(true, Some(&w), 1),
+            "already-read row must not arm",
+        );
+    }
+
+    #[test]
+    fn focused_empty_activity_does_not_arm() {
+        let w = empty_ws();
+        assert!(!should_arm_mark_timer(true, Some(&w), 0));
+    }
+
+    #[test]
+    fn focused_out_of_bounds_cursor_does_not_arm() {
+        // Defensive: a stale cursor past the activity len shouldn't
+        // crash or spuriously arm.
+        let w = ws_with_activity(2, 0);
+        assert!(!should_arm_mark_timer(true, Some(&w), 100));
+    }
+}
 
