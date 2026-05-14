@@ -1447,6 +1447,27 @@ impl Sidebar {
                         spans.push(span);
                     };
 
+                    // Type marker (PR vs issue) — dim, in front of the
+                    // #number. Users were getting blindsided by the
+                    // workspace-merge collapse pulling an issue row
+                    // into a PR row; the marker makes it unambiguous
+                    // which kind of work each row represents.
+                    let type_label = workspace.and_then(workspace_type_label);
+                    if let Some(tag) = type_label {
+                        let style = if is_cursor {
+                            row_style
+                        } else {
+                            Style::default()
+                                .fg(theme.text_dim)
+                                .add_modifier(Modifier::BOLD)
+                        };
+                        push(
+                            Span::styled(format!("{tag} "), style),
+                            &mut used,
+                            &mut spans,
+                        );
+                    }
+
                     if let Some(n) = pr_num {
                         let label = format!("#{n}");
                         let style = if is_cursor {
@@ -1710,6 +1731,21 @@ struct StatusPill {
 /// the "needs attention" counter on the collapsed repo header.
 /// Each signal (unread / CI / review / agent-asking / mentioned)
 /// is independently toggleable via `~/.pilot/config.yaml::attention`.
+/// Short type marker rendered before the `#number` on each workspace
+/// row. Returns `Some("[PR]")` for workspaces holding a pull request,
+/// `Some("[I]")` for issue-only workspaces, and `None` for empty
+/// scratch workspaces (no PR, no issues — those have no number to
+/// label anyway).
+fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
+    if workspace.pr.is_some() {
+        return Some("[PR]");
+    }
+    if !workspace.gh_issues.is_empty() || !workspace.linear_issues.is_empty() {
+        return Some("[I]");
+    }
+    None
+}
+
 /// Build the agent prompt for `w` ("work on this") when the focused
 /// task is a GitHub issue. The agent lands in the issue workspace's
 /// worktree with `gh` + `git` available, so the prompt frames the
@@ -2005,7 +2041,7 @@ mod status_pill_tests {
         CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
     };
 
-    fn base_task() -> Task {
+    pub(super) fn base_task() -> Task {
         Task {
             id: TaskId {
                 source: "gh".into(),
@@ -2166,5 +2202,51 @@ mod status_pill_tests {
     fn ci_none_with_no_conflicts_renders_no_pill() {
         let t = base_task();
         assert!(status_pill(&t).is_none());
+    }
+}
+
+#[cfg(test)]
+mod workspace_type_label_tests {
+    use super::*;
+    use pilot_core::{Workspace, WorkspaceKey};
+
+    fn empty_ws() -> Workspace {
+        Workspace::empty(WorkspaceKey::new("k"), "main", chrono::Utc::now())
+    }
+
+    fn task(url: &str) -> pilot_core::Task {
+        let mut t = status_pill_tests::base_task();
+        t.url = url.into();
+        t
+    }
+
+    #[test]
+    fn pr_workspace_returns_pr_label() {
+        let mut w = empty_ws();
+        w.attach_task(task("https://github.com/o/r/pull/1"));
+        assert_eq!(workspace_type_label(&w), Some("[PR]"));
+    }
+
+    #[test]
+    fn issue_workspace_returns_i_label() {
+        let mut w = empty_ws();
+        w.attach_task(task("https://github.com/o/r/issues/42"));
+        assert_eq!(workspace_type_label(&w), Some("[I]"));
+    }
+
+    #[test]
+    fn pr_workspace_with_linked_issue_still_labels_pr() {
+        // Merged via closingIssuesReferences: workspace has both a
+        // PR slot and a gh_issue. PR is the primary identity.
+        let mut w = empty_ws();
+        w.attach_task(task("https://github.com/o/r/pull/1"));
+        w.attach_task(task("https://github.com/o/r/issues/42"));
+        assert_eq!(workspace_type_label(&w), Some("[PR]"));
+    }
+
+    #[test]
+    fn empty_workspace_returns_none() {
+        let w = empty_ws();
+        assert_eq!(workspace_type_label(&w), None);
     }
 }

@@ -60,6 +60,14 @@ fn tokenize(body: &str) -> Vec<String> {
     let bytes = lower.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        // `lower[i..]` would panic if `i` lands mid-UTF-8-codepoint.
+        // Skip past byte positions that aren't char boundaries — the
+        // keyword set is ASCII so a non-boundary byte can't possibly
+        // start a match anyway.
+        if !lower.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
         for kw in KEYWORDS {
             if lower[i..].starts_with(kw) {
                 let after = i + kw.len();
@@ -72,7 +80,15 @@ fn tokenize(body: &str) -> Vec<String> {
                 if !next.is_ascii_whitespace() && next != b':' {
                     continue;
                 }
-                let end = (after + 80).min(body.len());
+                // Take ~80 chars past the keyword. Snap `end` back to
+                // a char boundary so multi-byte chars (`…`, em-dash,
+                // emoji, …) sitting on the 80-byte window edge don't
+                // panic when we slice. `floor_char_boundary` is
+                // unstable, so walk back manually.
+                let mut end = (after + 80).min(body.len());
+                while end > after && !body.is_char_boundary(end) {
+                    end -= 1;
+                }
                 tokens.push(body[after..end].to_string());
             }
         }
@@ -269,5 +285,24 @@ mod tests {
     fn linear_prefix_too_short_or_long_rejected() {
         assert!(extract("Fixes A-1").is_empty());
         assert!(extract("Fixes ABCDEFGHIJK-1").is_empty());
+    }
+
+    #[test]
+    fn does_not_panic_on_multibyte_around_token_window() {
+        // Regression: the tokenizer used to slice `body[after..end]`
+        // with `end = after + 80`, which could land inside a UTF-8
+        // multi-byte sequence. A PR body like `Closes #73.\n\nSummary: …`
+        // happens to put the trailing `…` straddling that boundary
+        // and would panic at the slice. We now snap `end` back to a
+        // char boundary; the link is still extracted.
+        let body = "Closes #73.\n\nSummary: …";
+        let links = extract(body);
+        assert_eq!(
+            links,
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 73,
+            }],
+        );
     }
 }

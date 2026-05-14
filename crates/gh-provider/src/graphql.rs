@@ -680,7 +680,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         checks: extract_check_runs(pr),
         unread_count,
         url: pr.url.clone(),
-        repo: Some(repo),
+        repo: Some(repo.clone()),
         branch: Some(pr.head_ref_name.clone()),
         base_branch: if pr.base_ref_name.is_empty() {
             None
@@ -710,20 +710,53 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         recent_activity: activities,
         additions: pr.additions,
         deletions: pr.deletions,
-        closes_issues: pr
-            .closing_issues_references
-            .as_ref()
-            .map(|c| {
-                c.nodes
-                    .iter()
-                    .map(|ci| TaskId {
-                        source: "github".into(),
-                        key: format!("{}#{}", ci.repository.name_with_owner, ci.number),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        closes_issues: extract_closes_issues(pr, &repo),
     }
+}
+
+/// Build the `closes_issues` list for a PR Task. Combines two sources
+/// so we don't miss links when one is incomplete:
+///
+/// 1. `closingIssuesReferences` from GitHub's GraphQL — the structured,
+///    canonical link.
+/// 2. Body-text keyword parsing via [`pilot_core::extract_issue_links`]
+///    — covers cases where the GraphQL field hasn't been populated
+///    yet (GitHub registers the link asynchronously; for a freshly
+///    opened PR the field can stay empty for minutes) and where the
+///    user closed an issue via a non-standard keyword the API
+///    doesn't recognize.
+///
+/// Same-repo `#N` body references are resolved against `pr_repo` (the
+/// PR's own `owner/repo`). Linear keys are skipped — this list is
+/// scoped to GitHub issues since the merge target is a GitHub
+/// workspace key.
+fn extract_closes_issues(pr: &GqlPr, pr_repo: &str) -> Vec<TaskId> {
+    let mut out: Vec<TaskId> = Vec::new();
+    let mut push_unique = |id: TaskId| {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    };
+    if let Some(refs) = pr.closing_issues_references.as_ref() {
+        for ci in &refs.nodes {
+            push_unique(TaskId {
+                source: "github".into(),
+                key: format!("{}#{}", ci.repository.name_with_owner, ci.number),
+            });
+        }
+    }
+    if let Some(body) = pr.body.as_deref() {
+        for link in pilot_core::extract_issue_links(body) {
+            if let pilot_core::IssueLink::GitHub { repo, number } = link {
+                let repo = repo.unwrap_or_else(|| pr_repo.to_string());
+                push_unique(TaskId {
+                    source: "github".into(),
+                    key: format!("{repo}#{number}"),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Comprehensive needs_reply: check unresolved threads, latest issue comment,
@@ -1427,5 +1460,66 @@ mod tests {
     fn issues_query_body_includes_after_when_set() {
         let body = issues_query_body("test", Some("cursor-abc"));
         assert_eq!(body["variables"]["after"], "cursor-abc");
+    }
+
+    #[test]
+    fn closes_issues_falls_back_to_body_keyword() {
+        // GitHub registers `closingIssuesReferences` asynchronously,
+        // so a freshly-opened PR can have an empty list even when
+        // the body explicitly says "Closes #N". The fallback parser
+        // must catch this so the inbox doesn't display both rows
+        // for the same work.
+        let mut pr = make_pr(166, "alice");
+        pr.body = Some("Closes #73.\n\nSummary: …".into());
+        pr.url = "https://github.com/tensorzero/nanogateway/pull/166".into();
+        pr.closing_issues_references = None;
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(
+            task.closes_issues,
+            vec![pilot_core::TaskId {
+                source: "github".into(),
+                key: "tensorzero/nanogateway#73".into(),
+            }],
+            "body-text fallback must surface `Closes #73` when the API didn't",
+        );
+    }
+
+    #[test]
+    fn closes_issues_merges_graphql_and_body_sources() {
+        // Both sources contribute, deduped. GraphQL contributes #73,
+        // body contributes #74 — we want both.
+        let mut pr = make_pr(200, "alice");
+        pr.body = Some("Closes #74. Also closes #73 (duplicate guard).".into());
+        pr.url = "https://github.com/o/r/pull/200".into();
+        pr.closing_issues_references = Some(GqlClosingIssues {
+            nodes: vec![GqlClosingIssue {
+                number: 73,
+                repository: GqlIssueRepo {
+                    name_with_owner: "o/r".into(),
+                },
+            }],
+        });
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.closes_issues.len(), 2, "{:?}", task.closes_issues);
+        let keys: Vec<&str> = task
+            .closes_issues
+            .iter()
+            .map(|id| id.key.as_str())
+            .collect();
+        assert!(keys.contains(&"o/r#73"));
+        assert!(keys.contains(&"o/r#74"));
+    }
+
+    #[test]
+    fn closes_issues_resolves_same_repo_hash_against_pr_repo() {
+        // `Closes #42` means "the issue numbered 42 in this PR's
+        // repo" — the body parser returns repo=None and we have to
+        // splice the PR's own repo back in.
+        let mut pr = make_pr(300, "alice");
+        pr.body = Some("Fixes #42.".into());
+        pr.url = "https://github.com/owner/repo/pull/300".into();
+        pr.closing_issues_references = None;
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.closes_issues[0].key, "owner/repo#42");
     }
 }
