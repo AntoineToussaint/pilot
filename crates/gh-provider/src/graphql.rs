@@ -493,6 +493,25 @@ pub fn update_branch_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
+/// GraphQL mutation that merges the PR — same effect as clicking
+/// "Merge pull request" on github.com. Default method is what the
+/// repo's settings allow (MERGE / SQUASH / REBASE); we don't pin
+/// here so the repo's enforced method wins.
+const MERGE_PR_MUTATION: &str = r#"
+mutation($id: ID!) {
+  mergePullRequest(input: { pullRequestId: $id }) {
+    pullRequest { id state merged }
+  }
+}
+"#;
+
+pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": MERGE_PR_MUTATION,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
 /// Convert GraphQL PR data to our Task type.
 pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     let repo = extract_repo_from_url(&pr.url);

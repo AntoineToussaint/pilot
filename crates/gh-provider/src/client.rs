@@ -795,6 +795,29 @@ impl GhClient {
         }
         Ok(())
     }
+
+    /// Merge a PR — same as clicking "Merge pull request" on
+    /// github.com. Requires the PR's GraphQL node ID. We don't pin
+    /// the merge method; GitHub will use whatever the repo's
+    /// settings allow / require.
+    pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        let body = graphql::merge_pr_body(pull_request_node_id);
+        let response: graphql::GqlResponse = self
+            .inner
+            .post("/graphql", Some(&body))
+            .await
+            .map_err(GhError::Api)?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("mergePullRequest errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
 }
 
 impl pilot_core::TaskProvider for GhClient {

@@ -537,6 +537,10 @@ impl Server {
                             )
                             .await;
                         }
+                        pilot_ipc::Command::MergePr { workspace_key } => {
+                            polling::handle_merge_pr(&self.config, workspace_key)
+                                .await;
+                        }
                     }
                 }
                 bus = bus_rx.recv() => {

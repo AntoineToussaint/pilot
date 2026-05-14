@@ -923,6 +923,75 @@ fn pr_task_with_ci(repo: &str, key: &str, ci: CiStatus) -> Task {
 }
 
 #[test]
+fn merge_target_fires_when_pr_is_ready() {
+    // READY = approved + green CI (or no CI). The merge key should
+    // only advertise itself for rows GitHub will actually let us
+    // merge.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let mut pr = make_task("o/r", "o/r#1", Utc::now());
+    pr.review = ReviewStatus::Approved;
+    pr.ci = CiStatus::Success;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    assert!(s.merge_target_for_cursor().is_some());
+}
+
+#[test]
+fn merge_target_is_hidden_without_approval() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let mut pr = make_task("o/r", "o/r#1", Utc::now());
+    pr.review = ReviewStatus::Pending;
+    pr.ci = CiStatus::Success;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    assert!(s.merge_target_for_cursor().is_none());
+}
+
+#[test]
+fn merge_target_is_hidden_when_ci_failing() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let mut pr = make_task("o/r", "o/r#1", Utc::now());
+    pr.review = ReviewStatus::Approved;
+    pr.ci = CiStatus::Failure;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    assert!(s.merge_target_for_cursor().is_none());
+}
+
+#[test]
+fn shift_m_requires_two_presses_to_emit_merge_command() {
+    use pilot_ipc::Command as IpcCommand;
+    let mut s = Sidebar::new(PaneId::new(1));
+    let mut pr = make_task("o/r", "o/r#1", Utc::now());
+    pr.review = ReviewStatus::Approved;
+    pr.ci = CiStatus::Success;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+
+    let mut cmds: Vec<IpcCommand> = Vec::new();
+    s.handle_key(shift_char('M'), &mut cmds);
+    assert!(
+        cmds.is_empty(),
+        "first Shift-M arms the latch; must NOT emit MergePr",
+    );
+
+    s.handle_key(shift_char('M'), &mut cmds);
+    assert_eq!(cmds.len(), 1);
+    assert!(
+        matches!(cmds[0], IpcCommand::MergePr { .. }),
+        "second Shift-M fires MergePr",
+    );
+}
+
+#[test]
 fn fix_target_fires_only_when_ci_is_failing() {
     // `f` is the narrow CI-fix mnemonic. PRs with green / running
     // CI must NOT advertise the binding — otherwise the hint bar

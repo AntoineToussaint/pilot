@@ -2109,6 +2109,19 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Shift-M completed: GitHub accepted the merge. Local Task
+        // still reads `Open` until the next poll re-fetches, but the
+        // notice tells the user the click landed.
+        if let IpcEvent::PrMerged { pr_label, .. } = &event {
+            use crate::realm::components::footer::{Notice, NoticeSeverity};
+            self.status.notice = Some(Notice::new(
+                format!("merged {pr_label}"),
+                NoticeSeverity::Info,
+            ));
+            self.send_cmd(IpcCommand::Refresh);
+            self.redraw = true;
+            return;
+        }
         self.sidebar.on_daemon_event(&event);
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);

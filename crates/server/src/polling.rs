@@ -1756,3 +1756,70 @@ fn emit_reply_error(config: &ServerConfig, msg: &str) {
         kind: "retryable".into(),
     });
 }
+
+/// Handle `Command::MergePr`: load the workspace, recover the PR's
+/// GraphQL node id from its primary task, and ship a `mergePullRequest`
+/// mutation. On success the next poll cycle picks up the new MERGED
+/// state and the workspace lands in the Inactive mailbox (or folds
+/// into nothing if `closingIssuesReferences` had set up a collapse).
+///
+/// Errors surface as `Event::ProviderError` so the TUI can flash the
+/// reason without us inventing a bespoke event variant.
+pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config.bus.send(Event::ProviderError {
+            source: "merge".into(),
+            message: msg.to_string(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("merge: workspace {workspace_key} not found"));
+        return;
+    };
+    let Some(pr) = ws.pr.as_ref() else {
+        emit_err(&format!("merge: workspace {workspace_key} has no PR"));
+        return;
+    };
+    let Some(node_id) = pr.node_id.as_deref() else {
+        emit_err("merge: PR has no node_id (need to repoll first)");
+        return;
+    };
+
+    let chain = CredentialChain::new()
+        .with(EnvProvider::new("GH_TOKEN"))
+        .with(EnvProvider::new("GITHUB_TOKEN"))
+        .with(CommandProvider::new("gh", &["auth", "token"]));
+    let cred = match chain.resolve("github").await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_err(&format!("github credentials: {e}"));
+            return;
+        }
+    };
+    let client = match GhClient::from_credential(cred).await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_err(&format!("github client init: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = client.merge_pr(node_id).await {
+        tracing::warn!("merge_pr {workspace_key}: {e}");
+        emit_err(&format!("merge failed: {e}"));
+        return;
+    }
+    tracing::info!("merged PR for workspace {workspace_key}");
+
+    // Local Task still reads `Open` — the GitHub mutation succeeded
+    // but our stored copy won't reflect MERGED until the next poll.
+    // Broadcast `PrMerged` so the TUI can flash a footer notice and
+    // the user doesn't think the keypress did nothing.
+    let pr_label = pr.id.key.clone();
+    let _ = config.bus.send(Event::PrMerged {
+        workspace_key: workspace_key.clone(),
+        pr_label,
+    });
+}

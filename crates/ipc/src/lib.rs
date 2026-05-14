@@ -353,6 +353,14 @@ pub enum Command {
         source_workspace_key: pilot_core::WorkspaceKey,
         target_workspace_key: pilot_core::WorkspaceKey,
     },
+    /// Merge the workspace's PR via the provider. Fires from the
+    /// sidebar's `Shift-M` shortcut on a READY (approved + green
+    /// CI) row. The daemon looks up the PR's `node_id` and calls
+    /// the GraphQL `mergePullRequest` mutation. Method defaults
+    /// to the repo's setting; future per-repo config can override.
+    MergePr {
+        workspace_key: pilot_core::WorkspaceKey,
+    },
     /// Start an agent runtime using a structured protocol surface. This
     /// does not replace `Spawn`; terminal clients can keep using PTY
     /// bytes while structured clients subscribe to run events.
@@ -476,6 +484,14 @@ pub enum Event {
         issue_workspace_key: pilot_core::WorkspaceKey,
         pr_workspace_key: pilot_core::WorkspaceKey,
         issue_label: String,
+        pr_label: String,
+    },
+    /// The PR for `workspace_key` was just merged via `Command::MergePr`.
+    /// The local Task still reads `Open` until the next poll catches
+    /// up, so the TUI flashes a footer notice so the keypress doesn't
+    /// look like a no-op.
+    PrMerged {
+        workspace_key: pilot_core::WorkspaceKey,
         pr_label: String,
     },
     /// A new session (= folder worktree) was provisioned inside its

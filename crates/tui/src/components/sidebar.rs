@@ -129,6 +129,11 @@ pub struct Sidebar {
     /// j/k handlers maintain that invariant.
     cursor: usize,
     mailbox: Mailbox,
+    /// If set, `Shift-M` has been pressed once on this row. A
+    /// second `Shift-M` confirms and fires `Command::MergePr`. Any
+    /// other key disarms — same two-press pattern as `Shift-X`,
+    /// since a merge is irreversible.
+    merge_pending: Option<SessionKey>,
     /// If set, `Shift-X` has been pressed once on this row. A
     /// second press executes the kill. Any other key clears.
     kill_pending: Option<SessionKey>,
@@ -180,6 +185,7 @@ impl Sidebar {
             cursor: 0,
             mailbox: Mailbox::Inbox,
             kill_pending: None,
+            merge_pending: None,
             agent_shortcuts,
             running_terminals: HashMap::new(),
             attention: pilot_config::AttentionConfig::default(),
@@ -327,6 +333,32 @@ impl Sidebar {
         let issue = workspace.gh_issues.first()?;
         let session_key = SessionKey::from(&workspace.key);
         Some((session_key, build_implement_issue_prompt(issue)))
+    }
+
+    /// Return the workspace key the `Shift-M` merge shortcut would
+    /// target. Only fires when the focused row is a PR in a state
+    /// GitHub would let us merge — Approved + CI green / none — so
+    /// the contextual footer can advertise the key only when it'll
+    /// actually work.
+    pub fn merge_target_for_cursor(&self) -> Option<pilot_core::WorkspaceKey> {
+        let workspace = self.selected_workspace()?;
+        let pr = workspace.pr.as_ref()?;
+        if !matches!(pr.state, pilot_core::TaskState::Open | pilot_core::TaskState::InReview) {
+            return None;
+        }
+        if !matches!(pr.review, pilot_core::ReviewStatus::Approved) {
+            return None;
+        }
+        if !matches!(
+            pr.ci,
+            pilot_core::CiStatus::Success | pilot_core::CiStatus::None
+        ) {
+            return None;
+        }
+        if pr.has_conflicts {
+            return None;
+        }
+        Some(pilot_core::WorkspaceKey::new(workspace.key.as_str()))
     }
 
     /// If the row under the cursor is a PR with `ci == Fail`, return
@@ -919,6 +951,7 @@ impl Sidebar {
             Binding { keys: "x", label: "codex" },
             Binding { keys: "u", label: "cursor" },
             Binding { keys: "w", label: "work on this" },
+            Binding { keys: "Shift-M", label: "merge PR (when READY)" },
             Binding { keys: "Shift-A", label: "adopt sessions" },
             Binding { keys: "m", label: "mark all read" },
             Binding { keys: "/", label: "search" },
@@ -957,6 +990,13 @@ impl Sidebar {
             key.code == KeyCode::Char('X') && key.modifiers.contains(KeyModifiers::SHIFT);
         if self.kill_pending.is_some() && !is_shift_x {
             self.kill_pending = None;
+        }
+        // Same two-press latch for Shift-M (merge) — irreversible
+        // action, so we require a deliberate second press.
+        let is_shift_m =
+            key.code == KeyCode::Char('M') && key.modifiers.contains(KeyModifiers::SHIFT);
+        if self.merge_pending.is_some() && !is_shift_m {
+            self.merge_pending = None;
         }
 
         match (key.code, key.modifiers) {
@@ -1127,6 +1167,27 @@ impl Sidebar {
                     cmds.push(Command::Kill { session_key });
                 } else {
                     self.kill_pending = Some(session_key);
+                }
+                PaneOutcome::Consumed
+            }
+
+            // ── Merge PR (two-press confirmation) ─────────────────────
+            // Fires only when the focused row is a READY PR — the
+            // match guard reads `merge_target_for_cursor` so the
+            // contextual footer + this handler agree on availability.
+            (KeyCode::Char('M'), m)
+                if m.contains(KeyModifiers::SHIFT)
+                    && self.merge_target_for_cursor().is_some() =>
+            {
+                let Some(workspace_key) = self.merge_target_for_cursor() else {
+                    return PaneOutcome::Consumed;
+                };
+                let session_key: SessionKey = (&workspace_key).into();
+                if self.merge_pending.as_ref() == Some(&session_key) {
+                    self.merge_pending = None;
+                    cmds.push(Command::MergePr { workspace_key });
+                } else {
+                    self.merge_pending = Some(session_key);
                 }
                 PaneOutcome::Consumed
             }
@@ -1412,6 +1473,8 @@ impl Sidebar {
                     let prefix = if is_cursor { "  ▸ " } else { "    " };
                     let kill_mark = if self.kill_pending.as_ref() == Some(key) {
                         " [kill?]"
+                    } else if self.merge_pending.as_ref() == Some(key) {
+                        " [merge?]"
                     } else {
                         ""
                     };
