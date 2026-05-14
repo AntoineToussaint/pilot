@@ -7,6 +7,7 @@
 //! activity-feed renderers, status pills) live under
 //! `crate::components`.
 
+pub mod agent_attention;
 pub mod components;
 pub mod confirm_latch;
 pub mod editors;

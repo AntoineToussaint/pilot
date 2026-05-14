@@ -176,6 +176,22 @@ pub struct Sidebar {
     /// mailbox owns the history. Wired from
     /// `~/.pilot/config.yaml::display.show_inactive_in_inbox`.
     show_inactive_in_inbox: bool,
+    /// Notifications queued in response to "any agent → Asking"
+    /// transitions. The library NEVER fires an OS-level
+    /// `osascript` / `notify-send` itself — that would break tests
+    /// by triggering real banner spam during a `cargo test` run.
+    /// The outer wrapper (`realm::components::sidebar`) drains this
+    /// after each event delivery and routes to `platform::notify_user`.
+    pending_notifications: Vec<PendingNotification>,
+}
+
+/// A queued user-facing notification that the outer (IO-aware) layer
+/// will translate into an OS-level banner. Pure data so the sidebar
+/// is fully testable without involving any subprocess.
+#[derive(Debug, Clone)]
+pub struct PendingNotification {
+    pub title: String,
+    pub body: String,
 }
 
 impl Sidebar {
@@ -207,7 +223,23 @@ impl Sidebar {
             subscribed_repos: BTreeSet::new(),
             default_agent: "claude".to_string(),
             show_inactive_in_inbox: false,
+            pending_notifications: Vec::new(),
         }
+    }
+
+    /// Take any pending desktop notifications queued by event
+    /// handling since the last drain. The outer (IO-aware) layer is
+    /// responsible for actually firing them via
+    /// `crate::platform::notify_user`. Callers must invoke this
+    /// after each batch of `on_event` calls — un-drained
+    /// notifications sit until the next call.
+    ///
+    /// Returning the queue rather than firing inline keeps the
+    /// sidebar pure: a `cargo test` constructing `Sidebar::new(...)`
+    /// and feeding it events will never trigger a real `osascript`
+    /// banner.
+    pub fn drain_pending_notifications(&mut self) -> Vec<PendingNotification> {
+        std::mem::take(&mut self.pending_notifications)
     }
 
     /// Toggle whether merged + closed PRs surface in the Inbox view.
@@ -419,6 +451,35 @@ impl Sidebar {
             }
         }
         false
+    }
+
+    /// Move the cursor onto the next workspace whose agent is in the
+    /// `Asking` state, starting AFTER the row currently selected (so
+    /// `!` cycles through asking workspaces rather than re-selecting
+    /// the current one). Wraps around the visible list. Returns true
+    /// when a target was found and the cursor moved.
+    ///
+    /// Pure decision lives in `agent_attention::next_asking_workspace`;
+    /// this method just glues it to the sidebar's cursor + visible
+    /// row state.
+    pub fn focus_next_asking_workspace(&mut self) -> bool {
+        let keys_order: Vec<SessionKey> = self
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        let current = self.selected_session_key().cloned();
+        let Some(target) = crate::agent_attention::next_asking_workspace(
+            &self.workspaces,
+            &keys_order,
+            current.as_ref(),
+        ) else {
+            return false;
+        };
+        self.focus_workspace_key(&target)
     }
 
     /// Move the cursor onto the session sub-row matching `id`. No-op
@@ -1300,6 +1361,48 @@ impl Sidebar {
                     self.recompute_visible();
                 }
             }
+            Event::AgentState { session_key, state } => {
+                // The daemon-side detector flipped an agent into
+                // `Asking` (yes/no prompt) or back to `Active`. Two
+                // things need to happen:
+                //
+                // 1. Mirror the new state onto the workspace's
+                //    sessions so the row pill + header counter
+                //    render. (Until this wiring landed, the
+                //    `SessionRunState::Asking` check in
+                //    `workspace_needs_attention` was dead code — no
+                //    code path ever set the state, so the signal
+                //    never lit up.)
+                //
+                // 2. On the Active → Asking transition only, enqueue
+                //    a desktop notification so the user sees the
+                //    prompt even when pilot isn't the focused
+                //    window. The notification itself is fired by
+                //    the outer wrapper layer (see
+                //    `realm::components::sidebar::on_daemon_event`)
+                //    after draining `pending_notifications` — this
+                //    way library tests construct a `Sidebar`
+                //    directly and never trigger a real OS-level
+                //    `osascript` / `notify-send`.
+                if let Some(workspace) = self.workspaces.get_mut(session_key) {
+                    let transition = crate::agent_attention::apply_agent_state(
+                        &mut workspace.sessions,
+                        *state,
+                    );
+                    if matches!(
+                        transition,
+                        crate::agent_attention::AttentionTransition::NowAsking
+                    ) {
+                        let title = format!("pilot — {} needs input", workspace.name);
+                        let body = workspace
+                            .primary_task()
+                            .map(|t| t.title.clone())
+                            .unwrap_or_else(|| workspace.name.clone());
+                        self.pending_notifications.push(PendingNotification { title, body });
+                    }
+                    self.recompute_visible();
+                }
+            }
             _ => {}
         }
     }
@@ -1611,6 +1714,26 @@ impl Sidebar {
                                     .add_modifier(Modifier::BOLD)
                             };
                             push(Span::styled(" ●", dot_style), &mut used, &mut spans);
+                        }
+                        // Inline needs-input marker — a bright `?`
+                        // when any agent session in this workspace is
+                        // `Asking`. Reuses the header glyph from the
+                        // top-of-sidebar `? N input` counter so the
+                        // row-level and global signal look consistent.
+                        // Sits right after the unread dot — the user
+                        // already scans this column for "stuff that
+                        // needs me."
+                        if workspace
+                            .is_some_and(crate::agent_attention::workspace_is_asking)
+                        {
+                            let style = if is_cursor {
+                                row_style
+                            } else {
+                                Style::default()
+                                    .fg(theme.warn)
+                                    .add_modifier(Modifier::BOLD)
+                            };
+                            push(Span::styled(" ?", style), &mut used, &mut spans);
                         }
                         push(Span::styled(" ", row_style), &mut used, &mut spans);
                     }

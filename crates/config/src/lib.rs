@@ -192,6 +192,11 @@ pub enum Action {
     /// `Shift-A` — open the "adopt sessions" picker for the focused
     /// workspace.
     AdoptSessions,
+    /// `!` — jump the sidebar cursor to the next workspace whose
+    /// agent is in `Asking` state. Wraps around. Used to triage
+    /// "who needs my input" quickly when multiple agents are
+    /// running in parallel.
+    JumpToAsking,
 }
 
 /// One keystroke pattern: `code` (a single char or named key) plus
@@ -298,6 +303,7 @@ pub struct Keybindings {
     pub new_workspace: String,
     pub focus_activity: String,
     pub adopt_sessions: String,
+    pub jump_to_asking: String,
 }
 
 impl Default for Keybindings {
@@ -311,6 +317,7 @@ impl Default for Keybindings {
             new_workspace: "n".into(),
             focus_activity: "Enter".into(),
             adopt_sessions: "Shift-A".into(),
+            jump_to_asking: "!".into(),
         }
     }
 }
@@ -330,6 +337,7 @@ impl Keybindings {
             Action::NewWorkspace => &self.new_workspace,
             Action::FocusActivity => &self.focus_activity,
             Action::AdoptSessions => &self.adopt_sessions,
+            Action::JumpToAsking => &self.jump_to_asking,
         };
         KeySpec::parse_chord(user).unwrap_or_else(|| {
             let fallback = match action {
@@ -341,6 +349,7 @@ impl Keybindings {
                 Action::NewWorkspace => "n",
                 Action::FocusActivity => "Enter",
                 Action::AdoptSessions => "Shift-A",
+                Action::JumpToAsking => "!",
             };
             KeySpec::parse_chord(fallback)
                 .expect("fallback chord must parse — code-only constant")

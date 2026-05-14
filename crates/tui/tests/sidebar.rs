@@ -1425,3 +1425,157 @@ fn work_key_emits_spawn_command_on_issue() {
         other => panic!("expected Spawn, got {other:?}"),
     }
 }
+
+// ── Event::AgentState wiring ──────────────────────────────────────────
+//
+// The daemon broadcasts `Event::AgentState { Asking }` when Claude /
+// Codex hits a yes-no prompt. Before this wiring landed, the sidebar
+// dropped the event on the floor: the workspace's `sessions[i].state`
+// stayed `Active`, so the row pill + header `? N input` counter both
+// stayed dark. These tests pin the path end-to-end:
+//
+//   AgentState event  →  workspace.sessions[i].state = Asking
+//                     →  workspace_is_asking == true
+//                     →  focus_next_asking_workspace can find it.
+
+fn agent_workspace(repo: &str, key: &str, now: DateTime<Utc>) -> Workspace {
+    use pilot_core::{SessionKind, WorkspaceSession};
+    use std::path::PathBuf;
+
+    let mut w = make_workspace(repo, key, now);
+    w.sessions.push(WorkspaceSession {
+        id: pilot_core::SessionId::new(),
+        workspace_key: w.key.clone(),
+        name: "claude".into(),
+        kind: SessionKind::Agent {
+            agent_id: "claude".into(),
+        },
+        state: pilot_core::SessionRunState::Active,
+        worktree_path: PathBuf::from("/tmp/x"),
+        created_at: now,
+        last_output_at: None,
+        layout: Default::default(),
+    });
+    w
+}
+
+#[test]
+fn agent_state_asking_flips_workspace_session_state() {
+    // Round-trip the IPC event through `on_event` and assert the
+    // workspace's session-state field reflects the new status. This
+    // is the wiring that the row pill + `? N input` header both
+    // depend on — without it the rest of the feature is decorative.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = agent_workspace("owner/repo", "o/r#1", now);
+    let key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+    });
+
+    s.on_event(&Event::AgentState {
+        session_key: key.clone(),
+        state: pilot_ipc::AgentState::Asking,
+    });
+
+    let ws = s.workspace_by_key(&key).expect("workspace present");
+    assert!(
+        ws.sessions
+            .iter()
+            .any(|sess| sess.state == pilot_core::SessionRunState::Asking),
+        "Event::AgentState {{ Asking }} must mark the agent session Asking"
+    );
+}
+
+#[test]
+fn agent_state_asking_queues_a_desktop_notification() {
+    // The Active → Asking transition must enqueue exactly one
+    // notification (drained + fired by the wrapper). Repeated
+    // broadcasts of the same state must NOT re-notify — the
+    // pure-transition helper protects against banner spam when
+    // the daemon re-emits on every output chunk.
+    //
+    // This test asserts the queue contents, never firing a real
+    // `osascript` — that's the whole point of the drain split.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = agent_workspace("owner/repo", "o/r#1", now);
+    let key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+    });
+    // Drain any setup-time notifications so the assertion is clean.
+    let _ = s.drain_pending_notifications();
+
+    s.on_event(&Event::AgentState {
+        session_key: key.clone(),
+        state: pilot_ipc::AgentState::Asking,
+    });
+    let queued = s.drain_pending_notifications();
+    assert_eq!(queued.len(), 1, "first transition must enqueue once");
+    assert!(
+        queued[0].title.contains("needs input"),
+        "title should signal urgency: {}",
+        queued[0].title
+    );
+
+    // Repeat broadcast — no new notification.
+    s.on_event(&Event::AgentState {
+        session_key: key,
+        state: pilot_ipc::AgentState::Asking,
+    });
+    let queued = s.drain_pending_notifications();
+    assert!(
+        queued.is_empty(),
+        "Asking → Asking must not re-notify, got {queued:?}"
+    );
+}
+
+#[test]
+fn bang_jumps_to_next_asking_workspace() {
+    // Three workspaces, only #2 is asking. Cursor starts on #1.
+    // Calling `focus_next_asking_workspace` (what the `!` global key
+    // invokes) should land on #2.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w1 = agent_workspace("owner/repo", "o/r#1", now);
+    let w2 = agent_workspace("owner/repo", "o/r#2", now - Duration::seconds(1));
+    let w3 = agent_workspace("owner/repo", "o/r#3", now - Duration::seconds(2));
+    let k2 = ws_key(&w2);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w1, w2, w3],
+        terminals: vec![],
+    });
+
+    s.on_event(&Event::AgentState {
+        session_key: k2.clone(),
+        state: pilot_ipc::AgentState::Asking,
+    });
+
+    let moved = s.focus_next_asking_workspace();
+    assert!(moved, "must report a move when a target exists");
+    assert_eq!(s.selected_session_key(), Some(&k2));
+}
+
+#[test]
+fn bang_is_a_noop_when_nothing_is_asking() {
+    // The hint bar / discoverability story: pressing `!` with no
+    // asking workspaces must not move the cursor or panic. Returns
+    // false so the caller can skip the redraw + focus-switch.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = agent_workspace("owner/repo", "o/r#1", now);
+    let starting_key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+    });
+    let before = s.selected_session_key().cloned();
+    assert_eq!(before.as_ref(), Some(&starting_key));
+
+    let moved = s.focus_next_asking_workspace();
+    assert!(!moved);
+    assert_eq!(s.selected_session_key().cloned(), before);
+}

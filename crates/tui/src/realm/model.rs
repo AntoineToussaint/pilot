@@ -1315,6 +1315,22 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_help();
                 return;
             }
+            // `!` — jump to the next workspace whose agent is
+            // waiting on the user. Globally available outside the
+            // terminal pane (where `!` belongs to the shell for
+            // history expansion). Sets focus to the sidebar so the
+            // user lands on the row, ready to act.
+            _ if self.focus != PaneFocus::Terminals
+                && self.matches_action(&key, pilot_config::Action::JumpToAsking) =>
+            {
+                self.q_armed_at = None;
+                if self.sidebar.focus_next_asking_workspace() {
+                    self.focus = PaneFocus::Sidebar;
+                    self.set_focus_attr();
+                    self.redraw = true;
+                }
+                return;
+            }
             // `Enter` on the sidebar = "open this row" → focus the
             // Activity pane so the user can read comments / reply.
             // Used to be a dead binding before this migration; right

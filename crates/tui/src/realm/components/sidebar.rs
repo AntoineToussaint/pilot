@@ -60,10 +60,23 @@ impl Sidebar {
     }
 
     /// Forward an incoming daemon event to the inner sidebar so its
-    /// workspace map / live-terminal tracking stays in sync.
+    /// workspace map / live-terminal tracking stays in sync. After
+    /// delegating, drain any desktop notifications the inner sidebar
+    /// queued in response (currently: agent → Asking transitions)
+    /// and fire them via the OS-aware `platform::notify_user`.
+    ///
+    /// **Why drain here and not inside the inner sidebar?** The
+    /// inner sidebar is constructed directly in unit tests (`cargo
+    /// test`) — if it called `osascript` itself, every test that
+    /// drove an `AgentState::Asking` event would spam the user's
+    /// notification center. Keeping the IO side-effect in this
+    /// wrapper (which production code goes through; tests don't)
+    /// keeps the inner sidebar fully deterministic.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
-        self.inner.on_event(evt,
-        );
+        self.inner.on_event(evt);
+        for notif in self.inner.drain_pending_notifications() {
+            crate::platform::notify_user(&notif.title, &notif.body);
+        }
     }
 
     /// Render directly into a rect — orchestrator-friendly entry
@@ -162,6 +175,13 @@ impl Sidebar {
         self.inner.focus_session_id(id)
     }
 
+    /// Move the cursor onto the next workspace whose agent is in
+    /// `Asking` state, wrapping around. Returns true when a target
+    /// was found. Backs the `!` global key.
+    pub fn focus_next_asking_workspace(&mut self) -> bool {
+        self.inner.focus_next_asking_workspace()
+    }
+
     /// Forward to the inner pane's keymap so the help panel can list
     /// the same bindings the legacy hint bar showed.
     pub fn keymap(&self) -> &'static [crate::pane::Binding] {
@@ -218,8 +238,10 @@ impl AppComponent<Msg, UserEvent> for Sidebar {
             // `on_event` so its `workspaces` map + `running_terminals`
             // stay current.
             Event::User(UserEvent::Daemon(evt)) => {
-                self.inner.on_event(evt,
-                );
+                self.inner.on_event(evt);
+                for notif in self.inner.drain_pending_notifications() {
+                    crate::platform::notify_user(&notif.title, &notif.body);
+                }
                 None
             }
             Event::Keyboard(key) if self.focused => {

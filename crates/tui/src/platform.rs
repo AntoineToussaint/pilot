@@ -73,6 +73,65 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
     }
 }
 
+/// Fire a desktop notification with `title` + `body`. Best-effort —
+/// returns immediately whether or not the OS surface is available
+/// (no PII in error logs; we don't want a missing dependency to
+/// generate noise on every notification).
+///
+/// Used to surface agent state changes that need the user's
+/// attention even when pilot isn't the focused app — e.g. Claude
+/// going to `Asking` while the user is reading email.
+///
+/// **macOS**: `osascript -e 'display notification ...'`. Native, no
+/// extra dependency. Quiet (no sound) — the visual banner is
+/// enough.
+///
+/// **Linux**: `notify-send` (libnotify). Present on every desktop
+/// environment we'd realistically support. Skipped silently if
+/// `notify-send` is missing.
+///
+/// **Windows**: stub (TODO: PowerShell `New-BurntToastNotification`).
+pub fn notify_user(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        // `osascript` is part of macOS — always present. We escape
+        // double-quotes in the inputs so the user's strings can't
+        // break out of the AppleScript string literal. Single-quote
+        // wrapping at the shell level is handled by `Command::arg`
+        // (no shell involved — direct exec).
+        let safe_title = title.replace('"', "\\\"");
+        let safe_body = body.replace('"', "\\\"");
+        let script = format!(
+            "display notification \"{safe_body}\" with title \"{safe_title}\""
+        );
+        // Detached + ignored — we don't care about exit status and
+        // don't want to block. `spawn()` returns immediately;
+        // dropping the child handle on a non-waited child is fine
+        // for this fire-and-forget case (the OS reaps it).
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .arg(title)
+            .arg(body)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(windows)]
+    {
+        let _ = (title, body);
+    }
+}
+
 /// Async wait for a graceful-shutdown signal — SIGTERM or Ctrl-C on
 /// unix, Ctrl-Break on Windows. Resolves once. Used by
 /// `pilot server start`'s outer task to trigger a clean stop.
