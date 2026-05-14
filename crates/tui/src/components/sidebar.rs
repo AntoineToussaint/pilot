@@ -1880,6 +1880,26 @@ fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
                 .add_modifier(Modifier::BOLD),
         });
     }
+    // Approval pills. `READY` is the "this is mergeable right now"
+    // signal — approved AND CI green — and earns the same green pill
+    // as CI OK but with stronger wording. `APPROVED` covers the
+    // approved-but-CI-not-yet-green case so the user knows the human
+    // half is done even while the build runs.
+    if matches!(task.review, pilot_core::ReviewStatus::Approved) {
+        if matches!(task.ci, pilot_core::CiStatus::Success | pilot_core::CiStatus::None) {
+            return Some(StatusPill {
+                label: " READY    ",
+                style: pill_green,
+            });
+        }
+        return Some(StatusPill {
+            label: " APPROVED ",
+            style: Style::default()
+                .bg(theme.accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        });
+    }
     match task.ci {
         pilot_core::CiStatus::Pending | pilot_core::CiStatus::Running => {
             return Some(StatusPill {
@@ -2102,6 +2122,20 @@ mod status_pill_tests {
                 state,
             );
         }
+        // Approval pills.
+        for ci in [CiStatus::Success, CiStatus::Running] {
+            let mut t = base_task();
+            t.review = ReviewStatus::Approved;
+            t.ci = ci;
+            let pill = status_pill(&t).expect("approval should produce a pill");
+            assert_eq!(
+                pill.label.chars().count(),
+                10,
+                "label {:?} for approval + {:?} is not 10 cells wide",
+                pill.label,
+                ci,
+            );
+        }
     }
 
     #[test]
@@ -2191,6 +2225,47 @@ mod status_pill_tests {
     fn ci_none_with_no_conflicts_renders_no_pill() {
         let t = base_task();
         assert!(status_pill(&t).is_none());
+    }
+
+    #[test]
+    fn approved_plus_green_ci_renders_ready() {
+        // The "this is mergeable right now" signal — both the human
+        // half (review) and the machine half (CI) are done.
+        let mut t = base_task();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
+        assert_eq!(status_pill(&t).unwrap().label, " READY    ");
+    }
+
+    #[test]
+    fn approved_with_no_ci_yet_still_renders_ready() {
+        // Some repos don't run CI on every PR (or the rollup is still
+        // empty after a fresh push). Approval alone is enough to call
+        // it READY rather than holding back forever.
+        let mut t = base_task();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::None;
+        assert_eq!(status_pill(&t).unwrap().label, " READY    ");
+    }
+
+    #[test]
+    fn approved_with_running_ci_renders_approved() {
+        // Human approval landed; CI is still chewing. The user can
+        // safely walk away — once green, the PR is mergeable.
+        let mut t = base_task();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Running;
+        assert_eq!(status_pill(&t).unwrap().label, " APPROVED ");
+    }
+
+    #[test]
+    fn ci_failure_overrides_approval() {
+        // Approval is great but red CI still trumps — that's the
+        // actionable problem.
+        let mut t = base_task();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Failure;
+        assert_eq!(status_pill(&t).unwrap().label, " CI FAIL  ");
     }
 }
 
