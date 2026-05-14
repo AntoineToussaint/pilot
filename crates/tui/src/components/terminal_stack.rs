@@ -76,10 +76,12 @@ pub struct TerminalStack {
     /// when no split has ever been requested. Mutating this triggers
     /// a `Command::SetSessionLayout` so the daemon persists.
     layout: pilot_core::SessionLayout,
-    /// Currently armed `Ctrl-w` prefix? When true, the next keystroke
-    /// is interpreted as a tile-management action instead of being
-    /// forwarded to the active PTY.
-    ctrl_w_armed: bool,
+    /// `Ctrl-w` tile-management prefix latch (tmux-style). When
+    /// armed, the next keystroke is interpreted as a tile action
+    /// (split, focus move, close); otherwise keys forward to the
+    /// active PTY. Generic `PrefixLatch` shared with future two-key
+    /// chord features — see `crate::confirm_latch::PrefixLatch`.
+    ctrl_w_latch: crate::confirm_latch::PrefixLatch,
     /// Pending split operation: when the user hits `Ctrl-w |` we
     /// emit `Command::Spawn` for a new shell, then once the
     /// `TerminalSpawned` event arrives we wrap the focused leaf in a
@@ -216,7 +218,7 @@ impl TerminalStack {
             collapsed: true,
             collapse_user_set: false,
             layout: pilot_core::SessionLayout::default(),
-            ctrl_w_armed: false,
+            ctrl_w_latch: crate::confirm_latch::PrefixLatch::new(),
             pending_split: None,
             pending_resizes: Vec::new(),
         }
@@ -237,7 +239,7 @@ impl TerminalStack {
     /// user's last arrangement.
     pub fn set_layout(&mut self, layout: pilot_core::SessionLayout) {
         self.layout = layout;
-        self.ctrl_w_armed = false;
+        self.ctrl_w_latch.disarm();
         self.pending_split = None;
     }
 
@@ -576,12 +578,11 @@ impl TerminalStack {
         // next key is a tile action (split, focus move, close);
         // anything unrecognised disarms cleanly. Same vocabulary as
         // tmux/vim windows so existing muscle memory transfers.
-        if self.ctrl_w_armed {
-            self.ctrl_w_armed = false;
+        if self.ctrl_w_latch.take() {
             return self.handle_tile_action(key, cmds);
         }
         if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.ctrl_w_armed = true;
+            self.ctrl_w_latch.arm();
             return PaneOutcome::Consumed;
         }
 

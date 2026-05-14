@@ -112,6 +112,63 @@ impl TimerLatch {
     }
 }
 
+/// One-shot "consume the next key" prefix latch.
+///
+/// Third member of the latch family: `ConfirmLatch` keys off a
+/// payload (two presses of the same target fire), `TimerLatch`
+/// keys off elapsed time, and `PrefixLatch` keys off "did the
+/// previous key arm this?" — a tmux-style prefix where the next
+/// keystroke is interpreted as a tile-management action instead
+/// of being forwarded to the focused PTY.
+///
+/// Replaces the hand-rolled `ctrl_w_armed: bool` field in
+/// `TerminalStack`. The mutation pattern was the same as the
+/// other latches (arm on prefix, disarm on consume, force-disarm
+/// on context change) but lived inline as ad-hoc `self.x = bool`
+/// assignments — pulling it into a typed struct lets tests cover
+/// the contract once instead of through every consumer.
+///
+/// Contract:
+/// - `arm()` flips the latch on.
+/// - `take()` returns the current value and unconditionally
+///   disarms — `Ctrl-w` + any next key should consume the prefix
+///   exactly once, even if the next key isn't a recognised tile
+///   action.
+/// - `disarm()` force-clears (called from `set_layout`-style
+///   transitions where any in-flight prefix should evaporate).
+#[derive(Debug, Default, Clone)]
+pub struct PrefixLatch {
+    armed: bool,
+}
+
+impl PrefixLatch {
+    pub fn new() -> Self {
+        Self { armed: false }
+    }
+
+    pub fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed
+    }
+
+    /// Read-and-disarm. Returns `true` iff the latch was armed; the
+    /// latch is always cleared on return (so a single `Ctrl-w` +
+    /// non-tile-action key reliably resets to "forward everything
+    /// to the PTY").
+    pub fn take(&mut self) -> bool {
+        let was = self.armed;
+        self.armed = false;
+        was
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +255,56 @@ mod tests {
         t.arm();
         std::thread::sleep(std::time::Duration::from_millis(15));
         assert!(t.ready(std::time::Duration::from_millis(10)));
+    }
+
+    // ── PrefixLatch tests ────────────────────────────────────────
+
+    #[test]
+    fn prefix_starts_disarmed() {
+        let p = PrefixLatch::new();
+        assert!(!p.is_armed());
+    }
+
+    #[test]
+    fn prefix_arm_sets_flag() {
+        let mut p = PrefixLatch::new();
+        p.arm();
+        assert!(p.is_armed());
+    }
+
+    #[test]
+    fn prefix_take_when_armed_returns_true_and_disarms() {
+        let mut p = PrefixLatch::new();
+        p.arm();
+        assert!(p.take());
+        assert!(!p.is_armed(), "take must clear the latch");
+    }
+
+    #[test]
+    fn prefix_take_when_disarmed_returns_false() {
+        let mut p = PrefixLatch::new();
+        assert!(!p.take());
+        assert!(!p.is_armed());
+    }
+
+    #[test]
+    fn prefix_disarm_clears_armed_state() {
+        // `set_layout` and similar context-change transitions
+        // force-clear; this is the contract behind that.
+        let mut p = PrefixLatch::new();
+        p.arm();
+        p.disarm();
+        assert!(!p.is_armed());
+    }
+
+    #[test]
+    fn prefix_second_take_is_false() {
+        // The `Ctrl-w` + 'j' + 'k' sequence: 'k' must NOT be
+        // treated as a tile action because 'j' already consumed
+        // the prefix.
+        let mut p = PrefixLatch::new();
+        p.arm();
+        assert!(p.take()); // 'j' lands on tile-action handler
+        assert!(!p.take()); // 'k' does not
     }
 }
