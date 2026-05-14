@@ -342,6 +342,17 @@ pub enum Command {
         pr_workspace_key: pilot_core::WorkspaceKey,
         accept: bool,
     },
+    /// Manual "adopt": move all sessions from `source_workspace_key`
+    /// into `target_workspace_key`. Driven by the sidebar's `Shift-A`
+    /// picker — useful when you started work on the wrong row and
+    /// want to migrate the running agent without losing it. Unlike
+    /// the issue→PR merge, the source workspace is NOT deleted; it
+    /// just becomes a session-less tracking row the user can ignore
+    /// or remove via `Shift-X`.
+    AdoptSessions {
+        source_workspace_key: pilot_core::WorkspaceKey,
+        target_workspace_key: pilot_core::WorkspaceKey,
+    },
     /// Start an agent runtime using a structured protocol surface. This
     /// does not replace `Spawn`; terminal clients can keep using PTY
     /// bytes while structured clients subscribe to run events.

@@ -466,6 +466,15 @@ impl Sidebar {
             .count()
     }
 
+    /// Iterate every workspace this sidebar knows about, regardless
+    /// of visibility filter. The adopt-target picker uses this to
+    /// build its candidate list — including ones currently hidden
+    /// by the active mailbox so the user isn't forced to swap views
+    /// before moving sessions.
+    pub fn workspace_iter(&self) -> impl Iterator<Item = (&SessionKey, &Workspace)> {
+        self.workspaces.iter()
+    }
+
     /// Step the cursor `delta` selectable rows from its current
     /// position, skipping repo headers. Workspace rows AND session
     /// sub-rows are selectable; only headers are not. Clamps at the
@@ -909,6 +918,7 @@ impl Sidebar {
             Binding { keys: "u", label: "cursor" },
             Binding { keys: "f", label: "fix CI" },
             Binding { keys: "w", label: "work on this" },
+            Binding { keys: "Shift-A", label: "adopt sessions" },
             Binding { keys: "m", label: "mark all read" },
             Binding { keys: "/", label: "search" },
         ]

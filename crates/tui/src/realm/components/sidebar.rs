@@ -111,6 +111,14 @@ impl Sidebar {
         self.inner.workspace_by_key(key)
     }
 
+    /// Iterate every known workspace. The adopt-sessions picker uses
+    /// this to build its candidate list.
+    pub fn workspace_iter(
+        &self,
+    ) -> impl Iterator<Item = (&pilot_core::SessionKey, &pilot_core::Workspace)> {
+        self.inner.workspace_iter()
+    }
+
     /// Apply `~/.pilot/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
     pub fn apply_inner_config(

@@ -1120,6 +1120,85 @@ pub async fn handle_confirm_merge(
         .send(Event::WorkspaceUpserted(Box::new(pr_ws)));
 }
 
+/// Manual "adopt": move every session out of `source_key`'s
+/// workspace and into `target_key`'s, rebadging `terminal_meta` so
+/// wire-side traffic follows them. Unlike the issue→PR merge, we
+/// do NOT delete the source workspace — the user may still want
+/// it as a tracking row (or remove it explicitly via `Shift-X`).
+///
+/// No-op when either workspace is missing or `source == target`.
+pub async fn handle_adopt_sessions(
+    config: &ServerConfig,
+    source_key: WorkspaceKey,
+    target_key: WorkspaceKey,
+) {
+    if source_key == target_key {
+        return;
+    }
+    let Some(mut source_ws) = load_workspace(config, &source_key) else {
+        tracing::warn!(
+            source_workspace = %source_key,
+            "AdoptSessions: source workspace missing — aborting"
+        );
+        return;
+    };
+    let Some(mut target_ws) = load_workspace(config, &target_key) else {
+        tracing::warn!(
+            target_workspace = %target_key,
+            "AdoptSessions: target workspace missing — aborting"
+        );
+        return;
+    };
+    if source_ws.sessions.is_empty() {
+        tracing::info!(
+            source_workspace = %source_key,
+            "AdoptSessions: source has no sessions — nothing to move"
+        );
+        return;
+    }
+
+    let source_session_key: pilot_core::SessionKey = (&source_key).into();
+    let target_session_key: pilot_core::SessionKey = (&target_key).into();
+    let moved = source_ws.sessions.len();
+    for mut session in source_ws.sessions.drain(..) {
+        session.workspace_key = target_key.clone();
+        target_ws.add_session(session);
+    }
+    let mut meta = config.terminal_meta.lock().await;
+    for (_tid, entry) in meta.iter_mut() {
+        if entry.0 == source_session_key {
+            entry.0 = target_session_key.clone();
+        }
+    }
+    drop(meta);
+
+    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut target_ws).await;
+
+    for ws in [&source_ws, &target_ws] {
+        if let Ok(json) = serde_json::to_string(ws) {
+            let _ = config.store.save_workspace(&WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(json),
+            });
+        }
+    }
+
+    tracing::info!(
+        source_workspace = %source_key,
+        target_workspace = %target_key,
+        moved,
+        "adopted sessions across workspaces"
+    );
+
+    let _ = config
+        .bus
+        .send(Event::WorkspaceUpserted(Box::new(source_ws)));
+    let _ = config
+        .bus
+        .send(Event::WorkspaceUpserted(Box::new(target_ws)));
+}
+
 /// Move `issue_ws`'s sessions, gh/linear-issue tasks, and any
 /// terminal_meta entries onto `pr_workspace`. Caller is responsible
 /// for deleting the issue workspace from the store and broadcasting

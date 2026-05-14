@@ -73,6 +73,12 @@ pub enum Id {
     /// (issue, PR) keys live in `active_merge_prompt`; `Msg::Confirmed`
     /// dispatches `Command::ConfirmMerge` back to the daemon.
     MergeConfirm,
+    /// Picker for the `Shift-A` ("adopt") flow — pick the target
+    /// workspace the source's sessions should move into. Source is
+    /// stashed in `pending_adopt_source`; `Msg::ChoicePicked` reads
+    /// the picked index out of `adopt_choices` and dispatches
+    /// `Command::AdoptSessions`.
+    AdoptTarget,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -215,6 +221,14 @@ pub struct Model<T: TerminalAdapter> {
     /// (issue, PR) pair currently being prompted about. Consumed by
     /// `Msg::Confirmed` when the top modal is `Id::MergeConfirm`.
     active_merge_prompt: Option<(pilot_core::WorkspaceKey, pilot_core::WorkspaceKey)>,
+    /// Source workspace key the `Shift-A` adopt picker is gathering
+    /// a target for. Set when the picker mounts; consumed when the
+    /// user picks (or dismisses).
+    pending_adopt_source: Option<pilot_core::WorkspaceKey>,
+    /// Candidate target workspaces for the active adopt picker,
+    /// in the same order as the picker's row indices. `Msg::ChoicePicked`
+    /// indexes into this to recover the chosen `WorkspaceKey`.
+    adopt_choices: Vec<pilot_core::WorkspaceKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -310,6 +324,8 @@ impl<T: TerminalAdapter> Model<T> {
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
             active_merge_prompt: None,
+            pending_adopt_source: None,
+            adopt_choices: Vec::new(),
             status: StatusCtx::new(),
         }
     }
@@ -830,10 +846,38 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Msg::ChoicePicked(picks) => {
+                // Adopt picker (Id::AdoptTarget) — pick → send the
+                // `Command::AdoptSessions` mapping source→target.
+                // Empty pick (Esc → no Msg, but cover the defensive
+                // case) drops the stash without firing.
+                if matches!(self.modal_stack.last(), Some(Id::AdoptTarget)) {
+                    let target = picks
+                        .first()
+                        .and_then(|i| self.adopt_choices.get(*i).cloned());
+                    self.adopt_choices.clear();
+                    self.pop_modal();
+                    let source = self.pending_adopt_source.take();
+                    if let (Some(source_key), Some(target_key)) = (source, target) {
+                        use crate::realm::components::footer::{
+                            Notice, NoticeSeverity,
+                        };
+                        self.send_cmd(IpcCommand::AdoptSessions {
+                            source_workspace_key: source_key.clone(),
+                            target_workspace_key: target_key.clone(),
+                        });
+                        self.status.notice = Some(Notice::new(
+                            format!(
+                                "adopted sessions: {source_key} → {target_key}"
+                            ),
+                            NoticeSeverity::Info,
+                        ));
+                        self.redraw = true;
+                    }
+                }
                 // Editor picker (Id::Editor) — pick → launch (or
                 // defer behind a session-spawn when the workspace
                 // has no worktree yet).
-                if matches!(self.modal_stack.last(), Some(Id::Editor)) {
+                else if matches!(self.modal_stack.last(), Some(Id::Editor)) {
                     let editor = picks
                         .first()
                         .and_then(|i| self.setup.editor_choices.get(*i).cloned());
@@ -1287,6 +1331,39 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.q_armed_at = None;
                 self.open_settings();
+                return;
+            }
+            // Shift-A from the sidebar: open the "adopt sessions"
+            // picker. Lets the user move every session from the
+            // focused workspace into another — useful when they
+            // started agent work on the wrong row, or when the
+            // auto-merge prompt got rejected and they want to do it
+            // manually later. Only fires when the focused workspace
+            // actually has sessions to move.
+            Key::Char('A')
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.focus == PaneFocus::Sidebar =>
+            {
+                self.q_armed_at = None;
+                let source = self.sidebar.selected_workspace().and_then(|w| {
+                    if w.sessions.is_empty() {
+                        None
+                    } else {
+                        Some(pilot_core::WorkspaceKey::new(w.key.as_str()))
+                    }
+                });
+                if let Some(source_key) = source {
+                    self.mount_adopt_picker(source_key);
+                } else {
+                    use crate::realm::components::footer::{
+                        Notice, NoticeSeverity,
+                    };
+                    self.status.notice = Some(Notice::new(
+                        "no sessions on the focused workspace to adopt",
+                        NoticeSeverity::Info,
+                    ));
+                    self.redraw = true;
+                }
                 return;
             }
             _ => {
@@ -1793,6 +1870,57 @@ impl<T: TerminalAdapter> Model<T> {
         );
         self.modal_stack.push(Id::RemoveOutOfScope);
         let _ = self.app.active(&Id::RemoveOutOfScope);
+        self.redraw = true;
+    }
+
+    /// Mount the `Shift-A` adopt-target picker. Lists every other
+    /// workspace the user could move sessions into. No-op when there
+    /// are no other workspaces — show a hint instead since there's
+    /// nothing to pick.
+    fn mount_adopt_picker(&mut self, source_key: pilot_core::WorkspaceKey) {
+        use crate::realm::components::choice::Choice;
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+
+        // Build (target_key, label) pairs from every workspace EXCEPT
+        // the source. Labels prefer the primary task's `owner/repo#N`
+        // form so the picker reads like the inbox rows.
+        let mut items: Vec<(pilot_core::WorkspaceKey, String)> = Vec::new();
+        for (key, ws) in self.sidebar.workspace_iter() {
+            if key.as_str() == source_key.as_str() {
+                continue;
+            }
+            let label = ws
+                .primary_task()
+                .map(|t| t.id.key.clone())
+                .unwrap_or_else(|| ws.name.clone());
+            items.push((
+                pilot_core::WorkspaceKey::new(key.as_str()),
+                label,
+            ));
+        }
+        if items.is_empty() {
+            self.status.notice = Some(Notice::new(
+                "no other workspace to adopt sessions into",
+                NoticeSeverity::Info,
+            ));
+            self.redraw = true;
+            return;
+        }
+        let labels: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();
+        self.adopt_choices = items.into_iter().map(|(k, _)| k).collect();
+        self.pending_adopt_source = Some(source_key);
+
+        let modal = Choice::single("Move sessions to which workspace?", labels)
+            .title("Adopt sessions")
+            .label(|s: &String| s.clone());
+        let _ = self.app.mount(
+            Id::AdoptTarget,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::AdoptTarget);
+        let _ = self.app.active(&Id::AdoptTarget);
         self.redraw = true;
     }
 

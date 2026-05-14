@@ -1406,6 +1406,101 @@ async fn confirm_merge_accept_runs_the_merge() {
 }
 
 #[tokio::test]
+async fn adopt_sessions_moves_sessions_between_workspaces() {
+    use pilot_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let (source_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    polling::upsert(&config, make_task("o/r#999")).await;
+    let target_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#999")));
+
+    polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
+
+    // Source still exists (we don't delete it on adopt), but has no
+    // sessions left.
+    let source_ws: pilot_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&source_key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        source_ws.sessions.is_empty(),
+        "source workspace must have lost its sessions after adopt",
+    );
+
+    // Target gained the session, rekeyed.
+    let target_ws: pilot_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&target_key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    let moved = target_ws
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .expect("session must have moved to target");
+    assert_eq!(moved.workspace_key, target_key);
+}
+
+#[tokio::test]
+async fn adopt_sessions_into_self_is_a_noop() {
+    let config = ServerConfig::in_memory();
+    let (source_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    polling::handle_adopt_sessions(&config, source_key.clone(), source_key.clone()).await;
+    let ws: pilot_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&source_key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        ws.sessions.iter().any(|s| s.id == session_id),
+        "self-adopt must leave the session in place",
+    );
+}
+
+#[tokio::test]
+async fn adopt_sessions_rewrites_terminal_meta() {
+    use pilot_core::{SessionKey, WorkspaceKey};
+    use pilot_ipc::{TerminalId, TerminalKind};
+
+    let config = ServerConfig::in_memory();
+    let (source_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    polling::upsert(&config, make_task("o/r#999")).await;
+    let target_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#999")));
+
+    let source_session_key: SessionKey = (&source_key).into();
+    config.terminal_meta.lock().await.insert(
+        TerminalId(7),
+        (source_session_key, TerminalKind::Shell),
+    );
+
+    polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
+
+    let target_session_key: SessionKey = (&target_key).into();
+    let meta = config.terminal_meta.lock().await;
+    let entry = meta.get(&TerminalId(7)).expect("terminal_meta entry kept");
+    assert_eq!(
+        entry.0, target_session_key,
+        "terminal_meta must repoint at the adopt target",
+    );
+}
+
+#[tokio::test]
 async fn confirm_merge_reject_pins_against_re_prompting() {
     // User says "no": both workspaces survive, and a subsequent
     // poll of the same PR must NOT re-emit WorkspaceMergePending

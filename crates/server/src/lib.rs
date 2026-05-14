@@ -526,6 +526,17 @@ impl Server {
                             )
                             .await;
                         }
+                        pilot_ipc::Command::AdoptSessions {
+                            source_workspace_key,
+                            target_workspace_key,
+                        } => {
+                            polling::handle_adopt_sessions(
+                                &self.config,
+                                source_workspace_key,
+                                target_workspace_key,
+                            )
+                            .await;
+                        }
                     }
                 }
                 bus = bus_rx.recv() => {

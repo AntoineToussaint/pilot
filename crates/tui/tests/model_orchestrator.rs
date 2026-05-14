@@ -469,6 +469,108 @@ fn merge_confirm_esc_sends_reject_command() {
     }
 }
 
+fn task_with_pr(key: &str) -> pilot_core::Task {
+    use pilot_core::{
+        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
+    };
+    let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+    Task {
+        id: TaskId {
+            source: "github".into(),
+            key: key.into(),
+        },
+        title: format!("PR {key}"),
+        body: None,
+        state: TaskState::Open,
+        role: TaskRole::Author,
+        ci: CiStatus::None,
+        review: ReviewStatus::None,
+        checks: vec![],
+        unread_count: 0,
+        url: format!("https://github.com/{path}/pull/{num}"),
+        repo: Some("o/r".into()),
+        branch: Some("main".into()),
+        base_branch: None,
+        updated_at: Utc::now(),
+        labels: vec![],
+        reviewers: vec![],
+        assignees: vec![],
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        has_conflicts: false,
+        is_behind_base: false,
+        node_id: None,
+        needs_reply: false,
+        last_commenter: None,
+        recent_activity: vec![],
+        additions: 0,
+        deletions: 0,
+        closes_issues: vec![],
+    }
+}
+
+#[test]
+fn shift_a_with_no_sessions_does_not_mount_picker() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+    });
+    // Shift-A should be a no-op (no sessions to adopt).
+    m.dispatch_key(key_with(Key::Char('A'), KeyModifiers::SHIFT));
+    assert_eq!(
+        m.top_modal(),
+        None,
+        "Shift-A on a session-less workspace must not mount a picker",
+    );
+}
+
+#[test]
+fn shift_a_with_sessions_mounts_adopt_picker() {
+    use chrono::Duration;
+    use pilot_core::{SessionKind, WorkspaceSession};
+
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    // Sidebar sorts by `updated_at` desc within a repo group, so we
+    // bias `source` slightly newer than `target` to make the cursor
+    // (which starts at row 0) land on the source — the workspace
+    // Shift-A is supposed to read from.
+    let now = Utc::now();
+    let mut src_task = task_with_pr("o/r#1");
+    src_task.updated_at = now + Duration::seconds(1);
+    let mut source = Workspace::from_task(src_task, now);
+    source.add_session(WorkspaceSession::new(
+        source.key.clone(),
+        SessionKind::Shell,
+        std::path::PathBuf::from("/tmp/x"),
+        now,
+    ));
+    let mut tgt_task = task_with_pr("o/r#2");
+    tgt_task.updated_at = now;
+    let target = Workspace::from_task(tgt_task, now);
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![source, target],
+        terminals: vec![],
+    });
+    // Sanity: the cursor must be on a workspace with sessions for
+    // Shift-A to fire. If this fails, the picker test diagnoses the
+    // selection state rather than the keybinding wiring.
+    let selected = m.sidebar().selected_workspace().cloned();
+    assert!(
+        selected.as_ref().is_some_and(|w| !w.sessions.is_empty()),
+        "fixture: cursor must land on the source workspace; got {selected:?}"
+    );
+    m.dispatch_key(key_with(Key::Char('A'), KeyModifiers::SHIFT));
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::AdoptTarget),
+        "Shift-A on a workspace with sessions must mount the picker",
+    );
+}
+
 #[test]
 fn merge_pending_dedupes_re_emits_for_same_issue() {
     // The daemon retries `WorkspaceMergePending` on every poll until
