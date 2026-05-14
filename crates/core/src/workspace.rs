@@ -1185,4 +1185,174 @@ mod tests {
         w.add_session(make());
         assert_eq!(w.sessions.len(), 1, "second add with same id is a no-op");
     }
+
+    // ── Worktree slug stability ───────────────────────────────────
+    //
+    // `worktree_slug` decides the on-disk directory name for every
+    // worktree pilot creates. The whole session-recovery model relies
+    // on calling the function with the same workspace state +
+    // session-index returning the SAME path, otherwise a restart
+    // would orphan every existing worktree.
+    //
+    // These tests pin the parts of the contract callers depend on:
+    //   1. Pure function — same input, same output.
+    //   2. PR-number prefix is shared across all renames of the same
+    //      PR. Lets us locate (and migrate) the on-disk folder when
+    //      the title is edited upstream.
+    //   3. Unicode/emoji handled without panic.
+    //   4. Fallback chain (PR → name → key-suffix) covers every
+    //      possible workspace state — `worktree_slug` never returns
+    //      an empty string, even on a fully-anonymous workspace.
+
+    fn ws_with_pr(num: u64, title: &str) -> Workspace {
+        let mut t = pr(&format!("o/r#{num}"));
+        t.title = title.into();
+        Workspace::from_task(t, now())
+    }
+
+    #[test]
+    fn slug_is_deterministic_for_the_same_workspace() {
+        // Bedrock contract: pilot calls `worktree_slug` on every
+        // session bring-up. Two calls in a row, no state change in
+        // between, must produce identical strings.
+        let w = ws_with_pr(7413, "Propagate status code");
+        assert_eq!(w.worktree_slug(), w.worktree_slug());
+    }
+
+    #[test]
+    fn pr_slug_uses_pr_number_prefix() {
+        // The `PR-{num}-` prefix is the stable anchor used by the
+        // worktree manager for cross-rename lookups (today
+        // aspirationally; tomorrow when we wire the migration). Any
+        // tweak to `pr_slug` that drops this prefix breaks that
+        // recovery path.
+        let w = ws_with_pr(7413, "Propagate status code");
+        assert!(
+            w.worktree_slug().starts_with("PR-7413-"),
+            "got {}",
+            w.worktree_slug()
+        );
+    }
+
+    #[test]
+    fn pr_rename_keeps_the_pr_number_prefix() {
+        // Two workspaces representing the same PR with different
+        // titles must share the `PR-{num}-` prefix. The full slug
+        // differs (that's the orphan-worktree footgun), but the
+        // prefix is the stable shared component the worktree manager
+        // can key on.
+        let before = ws_with_pr(7413, "Propagate status code").worktree_slug();
+        let after = ws_with_pr(7413, "Fix propagation bug").worktree_slug();
+        assert_ne!(before, after, "renames change the trailing slug body");
+        assert!(before.starts_with("PR-7413-"));
+        assert!(after.starts_with("PR-7413-"));
+    }
+
+    #[test]
+    fn different_prs_with_same_title_produce_distinct_slugs() {
+        // Sanity: no collision between sibling PRs that happen to
+        // share a title. The PR number is what disambiguates.
+        let a = ws_with_pr(1, "Fix bug").worktree_slug();
+        let b = ws_with_pr(2, "Fix bug").worktree_slug();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn pr_with_empty_title_falls_back_to_pr_number_only() {
+        // Emoji-only or whitespace-only titles must NOT produce a
+        // trailing dash (`PR-42-`) — that breaks filesystem hygiene
+        // on case-insensitive volumes and looks broken.
+        let w = ws_with_pr(42, "🚀");
+        let slug = w.worktree_slug();
+        assert_eq!(slug, "PR-42");
+        assert!(!slug.ends_with('-'));
+    }
+
+    #[test]
+    fn workspace_with_no_pr_falls_back_to_name_slug() {
+        // A pre-PR workspace (user pressed `n` to create a fresh
+        // branch) has no `pr` slot. The slug comes from the
+        // workspace's name instead, lowercased + dashed.
+        let mut w = Workspace::empty(
+            crate::WorkspaceKey::new("github:owner/repo"),
+            "main",
+            now(),
+        );
+        w.name = "Hotfix Auth".into();
+        assert_eq!(w.worktree_slug(), "hotfix-auth");
+    }
+
+    #[test]
+    fn fully_anonymous_workspace_falls_back_to_stable_placeholder() {
+        // Workspace with no PR AND a name that slugifies to empty
+        // (emoji-only / whitespace) must still produce a non-empty
+        // slug so the on-disk path is valid. The key-suffix tail
+        // keeps it unique across siblings in the same repo.
+        let mut w = Workspace::empty(
+            crate::WorkspaceKey::new("github:owner/repo#xyz9"),
+            "main",
+            now(),
+        );
+        w.name = "🚀✨".into();
+        let slug = w.worktree_slug();
+        assert!(
+            slug.starts_with("workspace-"),
+            "fallback path must start with `workspace-`, got {slug}",
+        );
+        assert!(!slug.ends_with('-'), "no trailing dash");
+        // Stable across calls — the key is fixed.
+        assert_eq!(slug, w.worktree_slug());
+    }
+
+    #[test]
+    fn slug_never_returns_empty() {
+        // Hard invariant across the entire fallback chain. Many
+        // callers `.join(slug)` directly — an empty slug would
+        // produce `<root>/` (i.e., the root itself) and writes
+        // would land in the wrong place.
+        for w in [
+            ws_with_pr(1, "Has title"),
+            ws_with_pr(2, "🚀"),
+            {
+                let mut w = Workspace::empty(
+                    crate::WorkspaceKey::new("github:a/b#1"),
+                    "main",
+                    now(),
+                );
+                w.name = "Named workspace".into();
+                w
+            },
+            {
+                let mut w = Workspace::empty(
+                    crate::WorkspaceKey::new("github:a/b#xyz"),
+                    "main",
+                    now(),
+                );
+                w.name = "🚀".into();
+                w
+            },
+        ] {
+            assert!(!w.worktree_slug().is_empty());
+        }
+    }
+
+    #[test]
+    fn slug_is_lowercase_and_dash_separated() {
+        // Filesystem-portable invariant. Some volumes are case-
+        // insensitive (macOS default) and an uppercase slug would
+        // collide with a different-cased one. Dashes only — no
+        // spaces, no underscores, no other punctuation.
+        let w = ws_with_pr(7, "Add Multi-Word Title!");
+        let slug = w.worktree_slug();
+        for ch in slug.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || ch == '-',
+                "{slug} contains non-portable char {ch:?}",
+            );
+            assert!(
+                !ch.is_ascii_uppercase() || slug.starts_with("PR-"),
+                "{slug} has uppercase outside the PR- anchor",
+            );
+        }
+    }
 }
