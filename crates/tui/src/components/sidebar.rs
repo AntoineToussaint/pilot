@@ -905,10 +905,12 @@ impl Sidebar {
     /// Bindings advertised in the hint bar.
     pub fn keymap(&self) -> &'static [crate::Binding] {
         use crate::Binding;
+        // Pane-local bindings only — Tab / q-q / ? / Shift-arrows /
+        // Ctrl-Shift-D etc. live in the Global section of the Help
+        // modal so they don't duplicate across every pane's hint bar.
         &[
             Binding { keys: "j/k", label: "navigate" },
-            Binding { keys: "Tab", label: "next pane" },
-            Binding { keys: "Enter", label: "open" },
+            Binding { keys: "Enter", label: "focus activity" },
             Binding { keys: "n", label: "new workspace" },
             Binding { keys: "e", label: "open editor" },
             Binding { keys: "Space", label: "fold repo" },

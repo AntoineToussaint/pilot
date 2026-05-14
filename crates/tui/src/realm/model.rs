@@ -1275,6 +1275,22 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_help();
                 return;
             }
+            // Enter on the sidebar = "open this row" → focus the
+            // Activity pane so the user can read comments / reply.
+            // Used to be a dead binding (advertised in the keymap
+            // but never matched anywhere), which surprised users
+            // looking for an "open" action. Right pane keeps its own
+            // Enter meaning (toggle section); terminals forward
+            // Enter as `\r` to the PTY.
+            Key::Enter
+                if key.modifiers.is_empty() && self.focus == PaneFocus::Sidebar =>
+            {
+                self.q_armed_at = None;
+                self.focus = PaneFocus::Right;
+                self.set_focus_attr();
+                self.redraw = true;
+                return;
+            }
             // Shift-arrows: resize splitters. Disabled inside a
             // terminal so the shell can still bind them.
             Key::Left | Key::Right | Key::Up | Key::Down
@@ -1798,10 +1814,16 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
 
+        // Global bindings — the keys that work regardless of which
+        // pane has focus (except inside a live terminal, where most
+        // of these are forwarded to the PTY instead). Each pane's
+        // local keymap is built from its own `keymap()` and doesn't
+        // duplicate these.
         const GLOBAL: &[Binding] = &[
             Binding { keys: "Tab", label: "cycle panes" },
             Binding { keys: "Shift-Arrows", label: "resize splitters" },
             Binding { keys: "Ctrl-Shift-D", label: "detach pane" },
+            Binding { keys: ",", label: "settings" },
             Binding { keys: "?", label: "this help" },
             Binding { keys: "q q", label: "quit" },
         ];

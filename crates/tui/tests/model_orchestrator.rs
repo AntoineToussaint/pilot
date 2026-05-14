@@ -54,6 +54,39 @@ fn tab_cycles_focus_through_panes() {
 }
 
 #[test]
+fn enter_on_sidebar_focuses_activity_pane() {
+    // Used to be a dead binding (advertised "open" in the keymap
+    // but never matched). Now it jumps the user from the row into
+    // the activity feed, which is the natural read flow: pick a
+    // workspace, hit Enter, read the comments.
+    let mut m = build_model();
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+    m.dispatch_key(key(Key::Enter));
+    assert_eq!(
+        m.focus(),
+        PaneFocus::Right,
+        "Enter on the sidebar must focus the Activity pane",
+    );
+}
+
+#[test]
+fn enter_on_right_pane_does_not_move_focus() {
+    // Enter inside the right pane toggles the activity section
+    // collapse — it must NOT jump focus elsewhere. (The sidebar
+    // Enter handler is gated on `focus == Sidebar`; verify the
+    // guard works.)
+    let mut m = build_model();
+    m.dispatch_key(key(Key::Tab));
+    assert_eq!(m.focus(), PaneFocus::Right);
+    m.dispatch_key(key(Key::Enter));
+    assert_eq!(
+        m.focus(),
+        PaneFocus::Right,
+        "Enter in the Activity pane stays in the Activity pane",
+    );
+}
+
+#[test]
 fn single_q_arms_latch_does_not_quit() {
     let mut m = build_model();
     m.dispatch_key(key(Key::Char('q')));

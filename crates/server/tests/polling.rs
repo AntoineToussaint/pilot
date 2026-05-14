@@ -1538,6 +1538,35 @@ async fn confirm_merge_reject_pins_against_re_prompting() {
 }
 
 #[tokio::test]
+async fn body_text_referencing_another_pr_does_not_delete_that_pr() {
+    // CRITICAL regression: GitHub's `#N` syntax is shared by issues
+    // AND PRs. Our body-text fallback parser can't distinguish them
+    // from the body alone — a PR whose body says "Closes #141" where
+    // #141 is itself a PR used to make us absorb #141's workspace
+    // into the closing PR's, then delete it. Result: PRs vanished
+    // from the inbox shortly after every poll cycle. The merge code
+    // now verifies that the target workspace is an actual issue
+    // (no `pr` slot) before touching it.
+    use pilot_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#141")).await; // a PR
+    let mut pr_166 = make_task("o/r#166");
+    pr_166.closes_issues = vec![TaskId {
+        source: "github".into(),
+        key: "o/r#141".into(), // ← pointing at the OTHER PR by mistake
+    }];
+    polling::upsert(&config, pr_166).await;
+
+    let key_141 = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#141")));
+    assert!(
+        config.store.get_workspace(&key_141).unwrap().is_some(),
+        "PR #141 must survive — a PR body referencing another PR via \
+         `Closes #N` must NOT delete the referenced PR's workspace",
+    );
+}
+
+#[tokio::test]
 async fn pr_with_no_closing_issues_leaves_other_workspaces_alone() {
     // Sanity: the migration only collapses workspaces it has an
     // explicit closing-link for. An unrelated issue keeps its own

@@ -710,6 +710,9 @@ impl RightPane {
     /// Bindings shown in the hint bar.
     pub fn keymap(&self) -> &'static [crate::Binding] {
         use crate::Binding;
+        // Pane-local bindings only — Tab, q-q, ? and the global
+        // splitter / detach combos are listed under "Global" in the
+        // Help modal so each pane's hint bar stays tight.
         &[
             Binding { keys: "j/k", label: "scroll" },
             Binding { keys: "→/←", label: "expand/collapse" },
@@ -719,7 +722,6 @@ impl RightPane {
             Binding { keys: "b", label: "toggle description" },
             Binding { keys: "g/G", label: "top/bottom" },
             Binding { keys: "Enter/o", label: "toggle section" },
-            Binding { keys: "Tab", label: "next pane" },
         ]
     }
 

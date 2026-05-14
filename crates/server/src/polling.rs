@@ -982,6 +982,24 @@ async fn merge_closing_issue_workspaces(
             continue;
         };
 
+        // Critical safety check: only merge ACTUAL issue workspaces.
+        // GitHub's `#N` syntax is the same for issues and PRs, and
+        // our body-text fallback parser can't tell them apart from
+        // the body alone — a PR body that says "Closes #141" where
+        // #141 is itself a PR would otherwise have us absorb that
+        // PR's workspace into this one. Symptom: PRs vanish from
+        // the inbox shortly after each poll. (`closingIssuesReferences`
+        // from GraphQL is safe — GitHub only returns issues there —
+        // but we union both sources and have to filter here.)
+        if issue_ws.pr.is_some() {
+            tracing::debug!(
+                target_workspace = %issue_key,
+                source_pr = ?workspace.pr.as_ref().map(|p| &p.id),
+                "skip merge: target is itself a PR workspace, not an issue"
+            );
+            continue;
+        }
+
         // Live-session safety net: stall and prompt rather than
         // silently absorbing the user's running work. `prompted_merge`
         // dedupes so a user staring at the modal doesn't see fresh
@@ -1080,6 +1098,17 @@ pub async fn handle_confirm_merge(
         );
         return;
     };
+    // Defensive: refuse to absorb a PR workspace. The merge code
+    // path is meant for ISSUE → PR collapse; if `issue_workspace_key`
+    // somehow points at a PR (loose body-text parser, stale modal,
+    // race), bail rather than destroy the PR row.
+    if issue_ws.pr.is_some() {
+        tracing::warn!(
+            target_workspace = %issue_workspace_key,
+            "ConfirmMerge: refusing to absorb a PR workspace into another PR"
+        );
+        return;
+    }
     let issue_label = workspace_label_for(&issue_ws, &issue_workspace_key);
     let pr_label = workspace_label_for(&pr_ws, &pr_workspace_key);
 
