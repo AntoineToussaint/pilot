@@ -9,6 +9,14 @@ rust-version.workspace = true
 links = "ghostty-vt"
 build = "build.rs"
 
+# bindgen-generated bindings.rs carries the upstream C doc comments
+# verbatim. Rustdoc tries to interpret their indented prose blocks as
+# Rust code samples and fails to compile them. The comments have no
+# runtime contract to verify, so we just opt the crate out of doctest
+# extraction — same spirit as the `lints.rust = allow` block below.
+[lib]
+doctest = false
+
 [features]
 default = ["vendored"]
 vendored = []
