@@ -9,6 +9,7 @@
 
 pub mod components;
 pub mod editors;
+pub mod intent;
 pub mod pane;
 pub mod pilot_theme;
 pub mod platform;

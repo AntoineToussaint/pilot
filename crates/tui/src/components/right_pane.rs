@@ -924,47 +924,36 @@ impl RightPane {
                 self.toggle_task_body();
                 PaneOutcome::Consumed
             }
-            // `w` (work-on-this). State-aware: same mnemonic as the
-            // sidebar's `w`, dispatched by what's actually selected.
-            //   - Comments selected with `v` → address those comments.
-            //   - Nothing selected → fall back to the workspace-level
-            //     work prompt (fix CI / implement issue / etc.) via
-            //     the shared `build_work_prompt`. Pre-fix, this branch
-            //     auto-picked the cursor-row as "the comment to
-            //     address", which surprised users: pressing `w` on a
-            //     CI-failing PR fired an address-comments prompt with
-            //     a random activity row, not a fix-CI prompt.
+            // `w` (work-on-this). All decision logic — comments
+            // selected vs. fix-CI vs. implement-issue vs. nothing —
+            // lives in `crate::intent::resolve_work`, a pure function
+            // with full (state, key) → Intent coverage in its own
+            // tests. The handler just executes whichever Intent the
+            // resolver hands back.
             (KeyCode::Char('w'), KeyModifiers::NONE) => {
-                if self.selected_activities.is_empty() {
-                    let Some((session_key, prompt)) =
-                        crate::components::sidebar::build_work_prompt(workspace)
-                    else {
-                        return PaneOutcome::Consumed;
-                    };
-                    cmds.push(Command::Spawn {
-                        session_key,
-                        session_id: None,
-                        kind: pilot_ipc::TerminalKind::Agent(
-                            self.default_agent.clone(),
-                        ),
-                        cwd: None,
-                        initial_prompt: Some(prompt),
-                    });
-                    return PaneOutcome::Consumed;
-                }
-                let mut indices: Vec<usize> =
+                let mut selected: Vec<usize> =
                     self.selected_activities.iter().copied().collect();
-                indices.sort();
-                let prompt = build_address_comments_prompt(workspace, &indices);
-                let session_key = pilot_core::SessionKey::from(&workspace.key);
-                cmds.push(Command::Spawn {
-                    session_key,
-                    session_id: None,
-                    kind: pilot_ipc::TerminalKind::Agent(self.default_agent.clone()),
-                    cwd: None,
-                    initial_prompt: Some(prompt),
-                });
-                self.selected_activities.clear();
+                selected.sort();
+                let intent = crate::intent::resolve_work(
+                    Some(workspace),
+                    &selected,
+                    &self.default_agent,
+                );
+                if let crate::intent::Intent::SpawnAgent {
+                    workspace_key,
+                    agent_id,
+                    prompt,
+                } = intent
+                {
+                    cmds.push(Command::Spawn {
+                        session_key: workspace_key,
+                        session_id: None,
+                        kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                        cwd: None,
+                        initial_prompt: prompt,
+                    });
+                    self.selected_activities.clear();
+                }
                 PaneOutcome::Consumed
             }
             // `m` marks the focused activity row as read — the
@@ -1165,51 +1154,8 @@ impl RightPane {
     }
 }
 
-/// Build the agent prompt for the `f`-on-selection flow. The agent
-/// lands in the workspace's worktree, so it has `gh` and `git` and
-/// the checked-out branch right there — the prompt focuses on what
-/// the work is rather than how to fetch context.
-fn build_address_comments_prompt(workspace: &Workspace, indices: &[usize]) -> String {
-    let pr_summary = workspace
-        .pr
-        .as_ref()
-        .map(|pr| {
-            let n = pr
-                .id
-                .key
-                .rsplit_once('#')
-                .map(|(_, n)| n)
-                .unwrap_or(&pr.id.key);
-            let repo = pr.repo.as_deref().unwrap_or("unknown");
-            let branch = pr.branch.as_deref().unwrap_or("unknown");
-            format!("PR #{n} in {repo} (branch `{branch}`)")
-        })
-        .unwrap_or_else(|| format!("workspace {}", workspace.key));
-
-    let mut comments = String::new();
-    for (i, idx) in indices.iter().enumerate() {
-        let Some(act) = workspace.activity.get(*idx) else {
-            continue;
-        };
-        comments.push_str(&format!("\n[{}] {} on {}:\n", i + 1, act.author, act.created_at));
-        if let Some(path) = &act.path {
-            if let Some(line) = act.line {
-                comments.push_str(&format!("    file: {path}:{line}\n"));
-            } else {
-                comments.push_str(&format!("    file: {path}\n"));
-            }
-        }
-        for line in act.body.lines() {
-            comments.push_str(&format!("    {line}\n"));
-        }
-    }
-
-    format!(
-        "Address the following review comments on {pr_summary}:{comments}\n\n\
-         For each comment: investigate, fix the code (or push back with a clear \
-         technical rationale), then commit. When all the comments are addressed and \
-         local checks pass, push the branch. After the push lands, reply to each \
-         comment with the commit SHA and a one-line explanation of the change."
-    )
-}
+// `build_address_comments_prompt` retired — moved into
+// `crate::intent` so the `w` resolver owns the prompt text. The
+// right pane's `w` handler now calls `intent::resolve_work` and
+// just executes the returned `Intent`.
 
