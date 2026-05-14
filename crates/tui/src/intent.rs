@@ -273,6 +273,41 @@ pub fn resolve_long_snooze(
         .unwrap_or(Intent::NoOp)
 }
 
+/// Resolve `s` (spawn a plain shell). Single-tier: a workspace must
+/// be selected. The handler previously did this check inline and
+/// dropped the spawn on the floor when no workspace was selected;
+/// returning a typed Intent (with explicit `NoOp`) makes the dead
+/// branch testable and the contextual footer can hide `s` when no
+/// workspace is selected.
+pub fn resolve_spawn_shell(workspace: Option<&Workspace>) -> Intent {
+    workspace
+        .map(|w| Intent::SpawnShell {
+            workspace_key: SessionKey::from(&w.key),
+        })
+        .unwrap_or(Intent::NoOp)
+}
+
+/// Resolve an agent shortcut (`c`/`x`/`u` by default — claude/codex/
+/// cursor; configurable via `with_agent_shortcuts`). Same shape as
+/// the shell resolver: requires a selected workspace.
+///
+/// The agent id is passed in from the keymap (the resolver doesn't
+/// care WHICH agent — that's a presentation/config detail). Empty
+/// agent id → `NoOp` so a typo in the config can't silently spawn
+/// a bare process.
+pub fn resolve_spawn_agent(workspace: Option<&Workspace>, agent_id: &str) -> Intent {
+    if agent_id.is_empty() {
+        return Intent::NoOp;
+    }
+    workspace
+        .map(|w| Intent::SpawnAgent {
+            workspace_key: SessionKey::from(&w.key),
+            agent_id: agent_id.to_string(),
+            prompt: None,
+        })
+        .unwrap_or(Intent::NoOp)
+}
+
 /// Resolve `m` (mark all read). One-shot.
 pub fn resolve_mark_read(workspace: Option<&Workspace>) -> Intent {
     workspace
@@ -683,6 +718,73 @@ mod tests {
         match intent {
             Intent::SpawnAgent { agent_id, .. } => assert_eq!(agent_id, "codex"),
             other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+    }
+
+    // ── resolve_spawn_shell ───────────────────────────────────────
+
+    #[test]
+    fn spawn_shell_no_workspace_is_noop() {
+        // Match what the old handler did (drop the spawn silently),
+        // but now it's typed + testable + the contextual footer can
+        // hide `s` when no workspace is selected.
+        assert_eq!(resolve_spawn_shell(None), Intent::NoOp);
+    }
+
+    #[test]
+    fn spawn_shell_with_workspace_emits_spawn_shell() {
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        match resolve_spawn_shell(Some(&ws)) {
+            Intent::SpawnShell { workspace_key } => {
+                assert_eq!(workspace_key.as_str(), ws.key.as_str());
+            }
+            other => panic!("expected SpawnShell, got {other:?}"),
+        }
+    }
+
+    // ── resolve_spawn_agent ───────────────────────────────────────
+
+    #[test]
+    fn spawn_agent_no_workspace_is_noop() {
+        assert_eq!(resolve_spawn_agent(None, "claude"), Intent::NoOp);
+    }
+
+    #[test]
+    fn spawn_agent_empty_id_is_noop() {
+        // Defensive: a misconfigured shortcut (empty string in the
+        // map) must NOT cause a bare-process spawn. Catch the typo
+        // here rather than relying on the daemon to reject it.
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        assert_eq!(resolve_spawn_agent(Some(&ws), ""), Intent::NoOp);
+    }
+
+    #[test]
+    fn spawn_agent_with_workspace_emits_spawn_agent_no_prompt() {
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        match resolve_spawn_agent(Some(&ws), "claude") {
+            Intent::SpawnAgent {
+                workspace_key,
+                agent_id,
+                prompt,
+            } => {
+                assert_eq!(workspace_key.as_str(), ws.key.as_str());
+                assert_eq!(agent_id, "claude");
+                assert!(prompt.is_none(), "bare spawn has no auto-prompt");
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_agent_id_passed_through_unchanged() {
+        // Resolver is agnostic — the keymap decides which agent;
+        // resolver just packages it into the Intent.
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        for id in ["claude", "codex", "cursor", "aider-custom"] {
+            match resolve_spawn_agent(Some(&ws), id) {
+                Intent::SpawnAgent { agent_id, .. } => assert_eq!(agent_id, id),
+                other => panic!("expected SpawnAgent({id}), got {other:?}"),
+            }
         }
     }
 }
