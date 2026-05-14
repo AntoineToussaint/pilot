@@ -316,6 +316,65 @@ fn out_of_scope_prompts_queue_one_at_a_time() {
 }
 
 #[test]
+fn confirm_modal_y_dismisses_through_channel_pipeline() {
+    // Regression: prior tests called `m.update(Msg::Confirmed(_))`
+    // directly, which bypassed the real channel → listener → app.tick
+    // path. The user reported that Y / N do nothing on the
+    // out-of-scope Confirm — only Esc works — so this test must drive
+    // the keypress through `dispatch_modal_key`, the same path the
+    // run loop uses.
+    let mut m = build_model();
+    m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+        workspace_key: WorkspaceKey::new("github:o/r#1"),
+        label: "o/r#1".into(),
+        title: None,
+        active_terminal_count: 1,
+    });
+    assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+    m.dispatch_modal_key(key(Key::Char('y')));
+    assert_eq!(
+        m.top_modal(),
+        None,
+        "Y must dismiss the Confirm modal (Msg::Confirmed(true))",
+    );
+}
+
+#[test]
+fn confirm_modal_n_dismisses_through_channel_pipeline() {
+    let mut m = build_model();
+    m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+        workspace_key: WorkspaceKey::new("github:o/r#1"),
+        label: "o/r#1".into(),
+        title: None,
+        active_terminal_count: 1,
+    });
+    assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+    m.dispatch_modal_key(key(Key::Char('n')));
+    assert_eq!(
+        m.top_modal(),
+        None,
+        "N must dismiss the Confirm modal (Msg::Confirmed(false))",
+    );
+}
+
+#[test]
+fn confirm_modal_esc_dismisses_through_channel_pipeline() {
+    // Sanity: Esc works today per the user's bug report. Keep this
+    // test alongside the Y / N tests so future regressions in *any*
+    // of the three keypress paths are caught.
+    let mut m = build_model();
+    m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+        workspace_key: WorkspaceKey::new("github:o/r#1"),
+        label: "o/r#1".into(),
+        title: None,
+        active_terminal_count: 1,
+    });
+    assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+    m.dispatch_modal_key(key(Key::Esc));
+    assert_eq!(m.top_modal(), None, "Esc must dismiss the Confirm modal");
+}
+
+#[test]
 fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
     // Bug previously: if the user had Help open when the daemon
     // emitted WorkspaceOutOfScope, the prompt sat in the queue

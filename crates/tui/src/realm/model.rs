@@ -1352,6 +1352,35 @@ impl<T: TerminalAdapter> Model<T> {
         self.handle_pane_key(key);
     }
 
+    /// Test entry point: drive a key through the *modal* pipeline —
+    /// send into `modal_event_tx`, poll `app.tick` until the modal
+    /// produces a Msg (or a short deadline elapses), then `update`
+    /// each Msg. Mirrors the runloop's modal branch (lines ~2049-2106
+    /// in `run_loop`). Exists because `dispatch_key` calls
+    /// `handle_pane_key`, which is gated on an empty modal stack and
+    /// therefore can't exercise key handling for a mounted Confirm,
+    /// Input, etc.
+    pub fn dispatch_modal_key(&mut self, key: RealmKey) {
+        let _ = self.modal_event_tx.send(RealmEvent::Keyboard(key));
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        loop {
+            match self.app.tick(PollStrategy::Once(Duration::ZERO)) {
+                Ok(messages) if !messages.is_empty() => {
+                    for msg in messages {
+                        self.update(msg);
+                    }
+                    return;
+                }
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /// Test entry point: drive a mouse event through `handle_mouse`
     /// after manually setting `last_area` (since `view()` would
     /// otherwise be needed to populate it).
