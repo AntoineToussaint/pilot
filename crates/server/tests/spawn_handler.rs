@@ -2,8 +2,7 @@
 //!
 //! Backend is the in-memory [`MockBackend`] — no real shells / tmux /
 //! curl. Tests drive synthetic output via `MockBackend::emit` and end
-//! sessions via `finish`. Real-backend integration coverage lives in
-//! `tests/backend.rs`, gated behind `#[ignore]`.
+//! sessions via `finish`.
 
 use pilot_ipc::{Command, Event, TerminalKind, channel};
 use pilot_server::backend::{MockBackend, SessionBackend};

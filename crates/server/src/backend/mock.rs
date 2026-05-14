@@ -14,9 +14,6 @@
 //!
 //! Coverage: this fake honors the same `SessionBackend` contract the
 //! real backends do. Tests using it exercise the daemon end-to-end.
-//! Backend-impl integration tests (the `RawPtyBackend` / `TmuxBackend`
-//! contract themselves) live behind `#[ignore]` in
-//! `crates/server/tests/backend.rs` and run via `cargo test -- --ignored`.
 
 use crate::backend::{BackendError, OutputChunk, SessionBackend, Subscription};
 use std::collections::HashMap;
