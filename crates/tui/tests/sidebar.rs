@@ -922,6 +922,149 @@ fn pr_task_with_ci(repo: &str, key: &str, ci: CiStatus) -> Task {
     t
 }
 
+// ── State × action key matrix ─────────────────────────────────────────
+//
+// Pins the behavior of every action-y sidebar key against the row
+// state under the cursor. Same shape as the `w` bug we shipped a fix
+// for: the handler dispatches differently depending on what's under
+// the cursor, and we want EVERY (state, key) cell verified so a
+// silent regression fails loudly.
+
+/// Build a sidebar with one repo and one workspace whose primary
+/// task is shaped by `mutate`. Cursor lands on the workspace row
+/// (recompute_visible falls the initial cursor past the repo
+/// header).
+fn sidebar_with_pr<F: FnOnce(&mut Task)>(mutate: F) -> Sidebar {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let mut task = make_task("owner/repo", "o/r#1", now);
+    mutate(&mut task);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(task, now)],
+        terminals: vec![],
+    });
+    s
+}
+
+#[test]
+fn w_on_ci_failing_pr_emits_fix_ci_spawn() {
+    let mut s = sidebar_with_pr(|t| t.ci = CiStatus::Failure);
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(key_code(KeyCode::Char('w')), &mut cmds);
+    let prompt = match cmds.first() {
+        Some(Command::Spawn { initial_prompt, .. }) => initial_prompt
+            .clone()
+            .expect("Spawn must carry an initial_prompt"),
+        other => panic!("expected Spawn(fix-CI), got {other:?}"),
+    };
+    assert!(prompt.contains("CI is failing"), "{prompt}");
+}
+
+#[test]
+fn w_on_ready_pr_is_noop() {
+    let mut s = sidebar_with_pr(|t| {
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
+    });
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(key_code(KeyCode::Char('w')), &mut cmds);
+    // READY = nothing to "work on" — the user should be merging,
+    // not spawning a fix-CI agent.
+    assert!(cmds.is_empty(), "w on a READY PR must not spawn anything: {cmds:?}");
+}
+
+#[test]
+fn w_on_healthy_open_pr_is_noop() {
+    // Open + pending review + green CI = nothing actionable.
+    let mut s = sidebar_with_pr(|t| {
+        t.ci = CiStatus::Success;
+        t.review = ReviewStatus::Pending;
+    });
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(key_code(KeyCode::Char('w')), &mut cmds);
+    assert!(cmds.is_empty(), "{cmds:?}");
+}
+
+#[test]
+fn shift_m_on_non_ready_pr_is_noop() {
+    // Belt-and-braces: the match guard already gates on
+    // merge_target_for_cursor; pin it.
+    let mut s = sidebar_with_pr(|t| t.ci = CiStatus::Failure);
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(shift_char('M'), &mut cmds);
+    s.handle_key(shift_char('M'), &mut cmds);
+    assert!(cmds.is_empty(), "Shift-M on a CI-failing PR must not fire: {cmds:?}");
+}
+
+#[test]
+fn action_keys_on_repo_header_are_silent_noops() {
+    // Cursor walked back onto a repo header — every action key
+    // either targets `selected_workspace()` (None on a header) or
+    // `selected_session_key()` (None on a header). They must all
+    // be silent no-ops; the footer's contextual hints should also
+    // hide the bindings, but the handlers are the safety net.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![make_workspace("owner/repo", "o/r#1", now)],
+        terminals: vec![],
+    });
+    // Move up onto the repo header (row 0).
+    s.handle_key(key_code(KeyCode::Up), &mut Vec::new());
+    assert!(
+        s.cursor_on_repo_header(),
+        "fixture: cursor must land on the repo header for this test",
+    );
+
+    for key in [
+        KeyCode::Char('w'),
+        KeyCode::Char('s'),
+        KeyCode::Char('c'),
+        KeyCode::Char('m'),
+        KeyCode::Char('z'),
+    ] {
+        let mut cmds: Vec<Command> = Vec::new();
+        s.handle_key(key_code(key), &mut cmds);
+        assert!(
+            cmds.is_empty(),
+            "{key:?} on a repo header must emit no command, got {cmds:?}",
+        );
+    }
+
+    for shift_key in ['M', 'X', 'Z', 'A'] {
+        let mut cmds: Vec<Command> = Vec::new();
+        s.handle_key(shift_char(shift_key), &mut cmds);
+        assert!(
+            cmds.is_empty(),
+            "Shift-{shift_key} on a repo header must emit no command, got {cmds:?}",
+        );
+    }
+}
+
+#[test]
+fn s_on_workspace_emits_shell_spawn() {
+    let mut s = sidebar_with_pr(|_| {});
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(key_code(KeyCode::Char('s')), &mut cmds);
+    assert_eq!(cmds.len(), 1, "{cmds:?}");
+    match &cmds[0] {
+        Command::Spawn { kind, .. } => assert!(
+            matches!(kind, TerminalKind::Shell),
+            "s must spawn Shell, got {kind:?}",
+        ),
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+}
+
+#[test]
+fn m_on_workspace_emits_mark_read() {
+    let mut s = sidebar_with_pr(|_| {});
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(key_code(KeyCode::Char('m')), &mut cmds);
+    assert_eq!(cmds.len(), 1);
+    assert!(matches!(cmds[0], Command::MarkRead { .. }), "{:?}", cmds[0]);
+}
+
 #[test]
 fn contextual_bindings_surface_merge_on_ready_pr() {
     // The whole point of contextual bindings: the user sees the
