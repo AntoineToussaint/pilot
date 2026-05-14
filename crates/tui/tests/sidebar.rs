@@ -897,3 +897,132 @@ fn subscribed_org_level_scope_does_not_render_a_header() {
         .count();
     assert_eq!(headers, 0, "org-level scope should NOT produce a header");
 }
+
+// ── `f` / `w` agent-spawn targeting ──────────────────────────────────
+
+fn issue_task(repo: &str, key: &str, body: Option<&str>) -> Task {
+    let mut t = make_task(repo, key, Utc::now());
+    let num = key.rsplit_once('#').map(|(_, n)| n).unwrap_or("1");
+    t.url = format!("https://github.com/{repo}/issues/{num}");
+    t.body = body.map(str::to_string);
+    t
+}
+
+fn pr_task_with_ci(repo: &str, key: &str, ci: CiStatus) -> Task {
+    let mut t = make_task(repo, key, Utc::now());
+    t.ci = ci;
+    t
+}
+
+#[test]
+fn fix_target_fires_only_when_ci_is_failing() {
+    // `f` is the narrow CI-fix mnemonic. PRs with green / running
+    // CI must NOT advertise the binding — otherwise the hint bar
+    // would lie and pressing `f` would no-op.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let pr = pr_task_with_ci("o/r", "o/r#1", CiStatus::Success);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    assert!(s.fix_target_for_cursor().is_none());
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    let pr = pr_task_with_ci("o/r", "o/r#2", CiStatus::Failure);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    let (_, prompt) = s.fix_target_for_cursor().expect("Failure CI must fire");
+    assert!(prompt.contains("CI is failing"), "prompt: {prompt}");
+}
+
+#[test]
+fn work_target_fires_for_ci_failure_same_as_fix() {
+    // `w` is the polymorphic "work on this" key — it should subsume
+    // the CI-failure case so users can use one key everywhere.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let pr = pr_task_with_ci("o/r", "o/r#3", CiStatus::Failure);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    let fix = s.fix_target_for_cursor();
+    let work = s.work_target_for_cursor();
+    assert!(work.is_some());
+    assert_eq!(
+        work.map(|(_, p)| p),
+        fix.map(|(_, p)| p),
+        "w on a CI-failing PR must produce the same prompt as f",
+    );
+}
+
+#[test]
+fn work_target_fires_for_issue_with_implement_prompt() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let issue = issue_task("o/r", "o/r#42", Some("Stack overflow when …"));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(issue, Utc::now())],
+        terminals: vec![],
+    });
+    let (_, prompt) = s
+        .work_target_for_cursor()
+        .expect("issue must produce a work target");
+    assert!(
+        prompt.contains("Implement GitHub issue #42"),
+        "prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("Closes #42"),
+        "prompt must instruct the agent to close the issue: {prompt}"
+    );
+    assert!(
+        prompt.contains("Stack overflow when"),
+        "prompt must include the issue body: {prompt}"
+    );
+}
+
+#[test]
+fn work_target_skips_passing_pr_with_no_action() {
+    // PR exists, CI green, no review issues — nothing to "work
+    // on". `w` must hide itself so the hint bar stays honest.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let pr = pr_task_with_ci("o/r", "o/r#5", CiStatus::Success);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    assert!(s.work_target_for_cursor().is_none());
+}
+
+#[test]
+fn work_key_emits_spawn_command_on_issue() {
+    // End-to-end: pressing `w` on an issue row emits a Spawn(Agent)
+    // command with the implement-issue prompt baked in.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let issue = issue_task("o/r", "o/r#7", Some("Migrate to Postgres 16"));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(issue, Utc::now())],
+        terminals: vec![],
+    });
+
+    let mut cmds: Vec<Command> = Vec::new();
+    let _ = s.handle_key(key_code(KeyCode::Char('w')), &mut cmds);
+
+    assert_eq!(cmds.len(), 1, "exactly one Spawn must fire");
+    match &cmds[0] {
+        Command::Spawn {
+            kind,
+            initial_prompt,
+            ..
+        } => {
+            assert!(
+                matches!(kind, TerminalKind::Agent(_)),
+                "must spawn an agent (not shell), got {kind:?}",
+            );
+            let prompt = initial_prompt.as_deref().unwrap_or("");
+            assert!(prompt.contains("Implement GitHub issue #7"), "{prompt}");
+        }
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+}

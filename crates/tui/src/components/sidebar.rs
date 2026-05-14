@@ -274,6 +274,41 @@ impl Sidebar {
         }
     }
 
+    /// If the row under the cursor is something the user can "work
+    /// on" right now, return `(session_key, work_prompt)` ready for
+    /// `Command::Spawn`. Polymorphic by task type:
+    ///
+    /// - **GitHub issue** → ask the agent to implement it (branch
+    ///   from the default base, code it up, open a PR closing the
+    ///   issue).
+    /// - **PR with `ci == Failure`** → reuse the existing
+    ///   `fix_target_for_cursor` prompt.
+    /// - **Anything else** → None (key hides itself in the hint bar).
+    ///
+    /// This is the entry point for the `w` ("work on this") keybinding.
+    /// It supersedes the narrower `f` (kept for muscle memory and the
+    /// CI-fail case it originally covered).
+    pub fn work_target_for_cursor(&self) -> Option<(SessionKey, String)> {
+        // CI-failure path: defer to fix_target_for_cursor so the
+        // prompt + matching predicate live in one place.
+        if let Some(target) = self.fix_target_for_cursor() {
+            return Some(target);
+        }
+
+        // Issue path: cursor is on a workspace whose primary task is
+        // an issue (no PR linked yet). We use `gh_issues.first()` and
+        // require `pr` to be None — once a PR shows up, the workspace
+        // collapses (via `closingIssuesReferences`) and the user
+        // should be working from the PR side instead.
+        let workspace = self.selected_workspace()?;
+        if workspace.pr.is_some() {
+            return None;
+        }
+        let issue = workspace.gh_issues.first()?;
+        let session_key = SessionKey::from(&workspace.key);
+        Some((session_key, build_implement_issue_prompt(issue)))
+    }
+
     /// If the row under the cursor is a PR with `ci == Fail`, return
     /// `(session_key, fix_prompt)` ready for `Command::Spawn`. None
     /// otherwise — used both by the `f` keybinding match guard and
@@ -845,6 +880,7 @@ impl Sidebar {
             Binding { keys: "x", label: "codex" },
             Binding { keys: "u", label: "cursor" },
             Binding { keys: "f", label: "fix CI" },
+            Binding { keys: "w", label: "work on this" },
             Binding { keys: "m", label: "mark all read" },
             Binding { keys: "/", label: "search" },
         ]
@@ -952,6 +988,30 @@ impl Sidebar {
                 };
                 let agent_id = self.default_agent.clone();
                 tracing::info!(%session_key, %agent_id, "sidebar: emitting Spawn(Agent) with fix prompt");
+                cmds.push(Command::Spawn {
+                    session_key,
+                    session_id: self.selected_session_id(),
+                    kind: TerminalKind::Agent(agent_id),
+                    cwd: None,
+                    initial_prompt: Some(prompt),
+                });
+                PaneOutcome::Consumed
+            }
+
+            // `w` for "work on this" — broader sibling of `f`. Spawns
+            // the default agent with a context-aware prompt:
+            //  - on an issue row → implement the issue
+            //  - on a PR row with CI failing → same as `f` (fix)
+            // Match guard hides the key in the hint bar when neither
+            // case applies, so users see `w` only where it'll fire.
+            (KeyCode::Char('w'), KeyModifiers::NONE)
+                if self.work_target_for_cursor().is_some() =>
+            {
+                let Some((session_key, prompt)) = self.work_target_for_cursor() else {
+                    return PaneOutcome::Consumed;
+                };
+                let agent_id = self.default_agent.clone();
+                tracing::info!(%session_key, %agent_id, "sidebar: emitting Spawn(Agent) with work prompt");
                 cmds.push(Command::Spawn {
                     session_key,
                     session_id: self.selected_session_id(),
@@ -1622,6 +1682,35 @@ struct StatusPill {
 /// the "needs attention" counter on the collapsed repo header.
 /// Each signal (unread / CI / review / agent-asking / mentioned)
 /// is independently toggleable via `~/.pilot/config.yaml::attention`.
+/// Build the agent prompt for `w` ("work on this") when the focused
+/// task is a GitHub issue. The agent lands in the issue workspace's
+/// worktree with `gh` + `git` available, so the prompt frames the
+/// work (issue context + acceptance criteria) and lets the agent
+/// handle the branch + PR mechanics.
+fn build_implement_issue_prompt(issue: &pilot_core::Task) -> String {
+    let issue_number = issue
+        .id
+        .key
+        .rsplit_once('#')
+        .map(|(_, n)| n)
+        .unwrap_or(&issue.id.key);
+    let repo = issue.repo.as_deref().unwrap_or("the repository");
+    let body_block = match issue.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(body) => format!("\n\nIssue body:\n{body}\n"),
+        None => String::new(),
+    };
+    format!(
+        "Implement GitHub issue #{issue_number} in {repo}: {title}.\
+         {body_block}\
+         \nWalk through it: create a fresh branch from the repo's default base, \
+         implement the change end-to-end (code + tests), run the project's local \
+         checks until they pass, then `gh pr create` with a body that includes \
+         `Closes #{issue_number}` so this issue and the resulting PR collapse to \
+         a single row in pilot. Reply with the PR URL when it's open.",
+        title = issue.title,
+    )
+}
+
 fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig) -> bool {
     if cfg.unread && w.unread_count() > 0 {
         return true;

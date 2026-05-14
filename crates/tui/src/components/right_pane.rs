@@ -913,13 +913,16 @@ impl RightPane {
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
-        // Split vertically: header (always visible), separator, then
-        // the activity section. The activity section's height varies
-        // with collapse state — `Min(0)` gives it whatever's left,
-        // including just the header row when collapsed.
+        // Split vertically: header, separator, optional task body
+        // (only when the focused PR/issue has a description), then
+        // the activity section. The activity section's `Min(0)` gives
+        // it whatever's left after the description + header take
+        // their space.
+        let body_height = self.task_body_height(area.width);
         let chunks = Layout::vertical([
             Constraint::Length(4),
             Constraint::Length(1), // separator line
+            Constraint::Length(body_height),
             Constraint::Min(0),
         ])
         .split(area);
@@ -932,7 +935,78 @@ impl RightPane {
             .border_style(Style::default().fg(Color::DarkGray));
         frame.render_widget(sep, chunks[1]);
 
-        let _ = self.render_activity(chunks[2], frame, focused);
+        if body_height > 0 {
+            self.render_task_body(chunks[2], frame);
+        }
+
+        let _ = self.render_activity(chunks[3], frame, focused);
+    }
+
+    /// Rows reserved for the task-body section. 0 when the focused
+    /// task has no body (or no task at all). Capped at
+    /// `TASK_BODY_MAX_ROWS` so a 200-line PR description never crowds
+    /// the activity feed off-screen — the user can read the full
+    /// thing on GitHub if needed.
+    fn task_body_height(&self, width: u16) -> u16 {
+        const TASK_BODY_MAX_ROWS: u16 = 8;
+        let Some(workspace) = &self.workspace else {
+            return 0;
+        };
+        let Some(task) = workspace.primary_task() else {
+            return 0;
+        };
+        let body = task
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(body) = body else {
+            return 0;
+        };
+        let rendered = crate::components::comment_render::render_body(
+            body,
+            width.saturating_sub(2),
+            TASK_BODY_MAX_ROWS as usize,
+        );
+        rendered.len().min(TASK_BODY_MAX_ROWS as usize) as u16
+    }
+
+    /// Render the focused task's body using the same lightweight
+    /// markdown pipeline the activity feed uses. Issues benefit most
+    /// (the body IS the work brief), but PR descriptions get the
+    /// same treatment — there's no reason to hide them.
+    fn render_task_body(&self, area: Rect, frame: &mut Frame) {
+        const TASK_BODY_MAX_ROWS: u16 = 8;
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let Some(task) = workspace.primary_task() else {
+            return;
+        };
+        let Some(body) = task
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return;
+        };
+        let lines = crate::components::comment_render::render_body(
+            body,
+            area.width.saturating_sub(2),
+            TASK_BODY_MAX_ROWS as usize,
+        );
+        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        // One-cell left margin so the body indents past the header's
+        // crumbs + state pill — reads as "this belongs to the task
+        // above" rather than as another full-width section.
+        let inner = Rect {
+            x: area.x.saturating_add(1),
+            y: area.y,
+            width: area.width.saturating_sub(1),
+            height: area.height,
+        };
+        frame.render_widget(para, inner);
     }
 }
 
