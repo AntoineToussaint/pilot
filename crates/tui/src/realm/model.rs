@@ -236,6 +236,11 @@ pub struct Model<T: TerminalAdapter> {
     /// module-level `const`s — read from `~/.pilot/config.yaml::ui`,
     /// or `UiDefaults::default()` when unset / not loaded.
     ui_defaults: pilot_config::UiDefaults,
+    /// User-remappable key bindings. Today wires `quit` (`q q`),
+    /// `help` (`?`), and `settings` (`,`); the rest of the giant
+    /// `handle_pane_key` match is still hardcoded and migrates here
+    /// in follow-up commits. Read from `~/.pilot/config.yaml::ui.keybindings`.
+    keybindings: pilot_config::Keybindings,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -336,6 +341,7 @@ impl<T: TerminalAdapter> Model<T> {
             adopt_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: pilot_config::UiDefaults::default(),
+            keybindings: pilot_config::Keybindings::default(),
         }
     }
 }
@@ -500,6 +506,14 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded consts.
         self.ui_defaults = ui.clone();
         self.right.apply_ui_defaults(ui);
+    }
+
+    /// Apply user-supplied key remaps (`~/.pilot/config.yaml::ui.keybindings`).
+    /// Today wires `quit` / `help` / `settings`; more bindings move
+    /// in as the hardcoded `match` arms in `handle_pane_key` migrate
+    /// to the table.
+    pub fn apply_keybindings(&mut self, kb: pilot_config::Keybindings) {
+        self.keybindings = kb;
     }
 
     /// Push the GitHub-style scope ids (e.g. `github:owner/repo`) the
@@ -1271,11 +1285,18 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
-            Key::Char('q')
-                if key.modifiers.is_empty() && self.focus != PaneFocus::Terminals =>
+            _ if self.focus != PaneFocus::Terminals
+                && self.matches_quit_chord(&key) =>
             {
-                // q-q double-tap: first q outside a terminal arms the
-                // latch; second q within `ui.quit_double_tap_window` quits.
+                // Quit chord (default `q q`): first key arms the
+                // latch; second key within `ui.quit_double_tap_window`
+                // fires. Single-key bindings (e.g., a user remap to
+                // `Ctrl-q`) fire on the first press.
+                let quit_chord = self.keybindings.chord(pilot_config::Action::Quit);
+                if quit_chord.len() <= 1 {
+                    self.quit = true;
+                    return;
+                }
                 let now = std::time::Instant::now();
                 if let Some(armed_at) = self.q_armed_at
                     && now.duration_since(armed_at) <= self.ui_defaults.quit_double_tap_window
@@ -1287,8 +1308,8 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
-            Key::Char('?')
-                if key.modifiers.is_empty() && self.focus != PaneFocus::Terminals =>
+            _ if self.focus != PaneFocus::Terminals
+                && self.matches_action(&key, pilot_config::Action::Help) =>
             {
                 self.q_armed_at = None;
                 self.mount_help();
@@ -1384,8 +1405,8 @@ impl<T: TerminalAdapter> Model<T> {
             // mnemonic from VS Code / Sublime ("Cmd-," for
             // settings). Disabled inside a terminal so the shell
             // can still bind it.
-            Key::Char(',')
-                if key.modifiers.is_empty() && self.focus != PaneFocus::Terminals =>
+            _ if self.focus != PaneFocus::Terminals
+                && self.matches_action(&key, pilot_config::Action::Settings) =>
             {
                 self.q_armed_at = None;
                 self.open_settings();
@@ -1585,6 +1606,23 @@ impl<T: TerminalAdapter> Model<T> {
     /// Test accessor — read-only handle to the sidebar wrapper.
     pub fn sidebar(&self) -> &crate::realm::components::sidebar::Sidebar {
         &self.sidebar
+    }
+
+    /// Compare an incoming `RealmKey` against the chord for `action`.
+    /// Single-key chords (`?`, `,`) match on the first key. The
+    /// `quit` chord is handled separately because it requires the
+    /// arm/fire double-tap.
+    fn matches_action(&self, key: &RealmKey, action: pilot_config::Action) -> bool {
+        let chord = self.keybindings.chord(action);
+        chord.first().is_some_and(|spec| key_matches(key, spec))
+    }
+
+    /// Quit-specific predicate: matches the FIRST key of the quit
+    /// chord. The caller is responsible for handling the latch /
+    /// second-key timing (or firing immediately when the chord is
+    /// a single key).
+    fn matches_quit_chord(&self, key: &RealmKey) -> bool {
+        self.matches_action(key, pilot_config::Action::Quit)
     }
 
     /// DetachSpec for the focused pane, or None if it can't detach
@@ -2480,6 +2518,37 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Does this tuirealm `KeyEvent` match the config-supplied
+/// `KeySpec`? Bridges crates/config (which doesn't depend on
+/// tuirealm or crossterm — by design) and the runtime key event.
+/// Returns false on key codes we don't currently advertise as
+/// remappable (function keys, mouse-encoded, …) so a YAML typo
+/// silently does nothing instead of triggering the wrong action.
+fn key_matches(key: &RealmKey, spec: &pilot_config::KeySpec) -> bool {
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        Key::Char(c) => spec.matches_char(c, shift, ctrl, alt),
+        Key::Enter => spec.matches_named("enter", shift, ctrl, alt),
+        Key::Esc => spec.matches_named("esc", shift, ctrl, alt),
+        Key::Tab => spec.matches_named("tab", shift, ctrl, alt),
+        Key::BackTab => spec.matches_named("backtab", shift, ctrl, alt),
+        Key::Backspace => spec.matches_named("backspace", shift, ctrl, alt),
+        Key::Up => spec.matches_named("up", shift, ctrl, alt),
+        Key::Down => spec.matches_named("down", shift, ctrl, alt),
+        Key::Left => spec.matches_named("left", shift, ctrl, alt),
+        Key::Right => spec.matches_named("right", shift, ctrl, alt),
+        Key::Home => spec.matches_named("home", shift, ctrl, alt),
+        Key::End => spec.matches_named("end", shift, ctrl, alt),
+        Key::PageUp => spec.matches_named("pageup", shift, ctrl, alt),
+        Key::PageDown => spec.matches_named("pagedown", shift, ctrl, alt),
+        Key::Delete => spec.matches_named("delete", shift, ctrl, alt),
+        Key::Insert => spec.matches_named("insert", shift, ctrl, alt),
+        _ => false,
+    }
 }
 
 fn crossterm_to_realm(key: crossterm::event::KeyEvent) -> RealmKey {

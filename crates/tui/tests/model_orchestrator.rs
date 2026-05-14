@@ -54,6 +54,33 @@ fn tab_cycles_focus_through_panes() {
 }
 
 #[test]
+fn remapped_quit_binding_fires_on_single_key_chord() {
+    // User puts `keybindings.quit: "Ctrl-q"` in YAML. A single
+    // Ctrl-q must quit immediately — no double-tap latch since the
+    // chord is one key. Pins that `apply_keybindings` actually
+    // takes effect and the runtime matcher honors it.
+    let mut m = build_model();
+    m.apply_keybindings(pilot_config::Keybindings {
+        quit: "Ctrl-q".into(),
+        ..pilot_config::Keybindings::default()
+    });
+    m.dispatch_key(key_with(Key::Char('q'), KeyModifiers::CONTROL));
+    assert!(m.quit, "single-key remap must fire on first press");
+}
+
+#[test]
+fn remapped_help_binding_mounts_help_modal() {
+    // Remap help to lowercase `h` and verify the modal opens.
+    let mut m = build_model();
+    m.apply_keybindings(pilot_config::Keybindings {
+        help: "h".into(),
+        ..pilot_config::Keybindings::default()
+    });
+    m.dispatch_key(key(Key::Char('h')));
+    assert_eq!(m.top_modal(), Some(&Id::Help));
+}
+
+#[test]
 fn enter_on_sidebar_focuses_activity_pane() {
     // Used to be a dead binding (advertised "open" in the keymap
     // but never matched). Now it jumps the user from the row into

@@ -160,6 +160,160 @@ pub struct UiSection {
     /// `/tmp/pilot.log`. Future: respect `$XDG_STATE_HOME` /
     /// `~/.pilot/logs/pilot.log` as a smarter default.
     pub log_path: Option<std::path::PathBuf>,
+    /// Per-action keybindings. Lets users remap `q` (quit), `?` (help),
+    /// and friends without recompiling. Action ids are kebab-case (see
+    /// [`crate::Action`]); values are key-spec strings like `"q q"`,
+    /// `"Shift-M"`, `"Ctrl-Enter"`. Unset entries fall back to the
+    /// built-in defaults in `Keybindings::default()`.
+    pub keybindings: Keybindings,
+}
+
+/// Identifiers for the actions a keybinding can target. Adding a
+/// new entry here is the first step to making any pilot action
+/// user-remappable; the corresponding `Keybindings::default()` line
+/// and `handle_pane_key` match arm extend the wiring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    /// `q q` — quit.
+    Quit,
+    /// `?` — open the Help modal.
+    Help,
+    /// `,` — open the Settings palette.
+    Settings,
+}
+
+/// One keystroke pattern: `code` (a single char or named key) plus
+/// modifier flags. Parsed from YAML strings like `"q"`, `"Shift-M"`,
+/// `"Ctrl-Enter"`. Sequences (e.g., `"q q"`) become `Vec<KeySpec>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeySpec {
+    pub code: String,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+impl KeySpec {
+    pub fn plain(c: &str) -> Self {
+        Self {
+            code: c.to_string(),
+            shift: false,
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    /// Does this spec match a one-character keystroke `c` with the
+    /// given modifier flags? The consumer maps its `KeyEvent` into
+    /// (`char`, shift, ctrl, alt) before calling — keeps this crate
+    /// free of crossterm / tuirealm types.
+    pub fn matches_char(&self, c: char, shift: bool, ctrl: bool, alt: bool) -> bool {
+        self.code.len() == 1
+            && self.code.chars().next() == Some(c)
+            && self.shift == shift
+            && self.ctrl == ctrl
+            && self.alt == alt
+    }
+
+    /// Does this spec match a named key (`Enter`, `Tab`, `Esc`, …)?
+    /// Same modifier rule as `matches_char`. Name comparison is
+    /// case-insensitive so `"enter"` and `"Enter"` both work.
+    pub fn matches_named(&self, name: &str, shift: bool, ctrl: bool, alt: bool) -> bool {
+        self.code.eq_ignore_ascii_case(name)
+            && self.shift == shift
+            && self.ctrl == ctrl
+            && self.alt == alt
+    }
+
+    /// Parse a single token like `Shift-M`, `Ctrl-Enter`, `q`. Returns
+    /// `None` when the modifier prefix is unrecognised. Whitespace
+    /// inside the token is rejected — callers split on space first.
+    pub fn parse(token: &str) -> Option<Self> {
+        let mut shift = false;
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut rest = token;
+        loop {
+            let lower = rest.to_ascii_lowercase();
+            if let Some(r) = lower.strip_prefix("shift-") {
+                shift = true;
+                rest = &rest[rest.len() - r.len()..];
+            } else if let Some(r) = lower.strip_prefix("ctrl-") {
+                ctrl = true;
+                rest = &rest[rest.len() - r.len()..];
+            } else if let Some(r) = lower.strip_prefix("alt-") {
+                alt = true;
+                rest = &rest[rest.len() - r.len()..];
+            } else {
+                break;
+            }
+        }
+        if rest.is_empty() || rest.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some(Self {
+            code: rest.to_string(),
+            shift,
+            ctrl,
+            alt,
+        })
+    }
+
+    /// Parse a whitespace-separated chord like `"q q"` into a
+    /// sequence of `KeySpec`s. Returns the first-token parse error
+    /// as `None` so callers can fall back to defaults.
+    pub fn parse_chord(s: &str) -> Option<Vec<KeySpec>> {
+        let mut out = Vec::new();
+        for tok in s.split_whitespace() {
+            out.push(Self::parse(tok)?);
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+}
+
+/// User-remappable keybindings. Each action maps to a chord
+/// (`Vec<KeySpec>`) — single-key actions have a one-element vec;
+/// `q q` (quit) is two elements. Missing entries fall back to
+/// `Keybindings::default()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Keybindings {
+    pub quit: String,
+    pub help: String,
+    pub settings: String,
+}
+
+impl Default for Keybindings {
+    fn default() -> Self {
+        Self {
+            quit: "q q".into(),
+            help: "?".into(),
+            settings: ",".into(),
+        }
+    }
+}
+
+impl Keybindings {
+    /// Resolve the binding string for a logical action into a chord.
+    /// Falls back to the schema default when the user-supplied string
+    /// fails to parse — a typo in YAML shouldn't lock the user out
+    /// of `q q` quit.
+    pub fn chord(&self, action: Action) -> Vec<KeySpec> {
+        let user = match action {
+            Action::Quit => &self.quit,
+            Action::Help => &self.help,
+            Action::Settings => &self.settings,
+        };
+        KeySpec::parse_chord(user).unwrap_or_else(|| {
+            let fallback = match action {
+                Action::Quit => "q q",
+                Action::Help => "?",
+                Action::Settings => ",",
+            };
+            KeySpec::parse_chord(fallback)
+                .expect("fallback chord must parse — code-only constant")
+        })
+    }
 }
 
 /// Concrete UI settings with every `Option<T>` from `UiSection`
@@ -722,6 +876,63 @@ repos:
         assert_eq!(r.short_snooze, d.short_snooze);
         assert_eq!(r.long_snooze, d.long_snooze);
         assert_eq!(r.log_path, d.log_path);
+    }
+
+    #[test]
+    fn keyspec_parses_plain_char() {
+        let k = KeySpec::parse("q").unwrap();
+        assert_eq!(k.code, "q");
+        assert!(!k.shift && !k.ctrl && !k.alt);
+    }
+
+    #[test]
+    fn keyspec_parses_modifiers() {
+        let k = KeySpec::parse("Shift-M").unwrap();
+        assert_eq!(k.code, "M");
+        assert!(k.shift && !k.ctrl);
+        let k = KeySpec::parse("Ctrl-Enter").unwrap();
+        assert_eq!(k.code, "Enter");
+        assert!(k.ctrl);
+    }
+
+    #[test]
+    fn keyspec_chord_splits_on_whitespace() {
+        let chord = KeySpec::parse_chord("q q").unwrap();
+        assert_eq!(chord.len(), 2);
+        assert_eq!(chord[0].code, "q");
+    }
+
+    #[test]
+    fn keybindings_default_round_trip() {
+        let k = Keybindings::default();
+        assert_eq!(k.chord(Action::Quit).len(), 2);
+        assert_eq!(k.chord(Action::Help)[0].code, "?");
+        assert_eq!(k.chord(Action::Settings)[0].code, ",");
+    }
+
+    #[test]
+    fn keybindings_user_override_wins() {
+        let k = Keybindings {
+            quit: "Ctrl-c".into(),
+            ..Default::default()
+        };
+        let chord = k.chord(Action::Quit);
+        assert_eq!(chord.len(), 1);
+        assert_eq!(chord[0].code, "c");
+        assert!(chord[0].ctrl);
+    }
+
+    #[test]
+    fn keybindings_typo_falls_back_to_default() {
+        // User wrote nonsense for `quit`; we don't lock them out —
+        // the default chord stays in effect.
+        let k = Keybindings {
+            quit: "  ".into(), // empty after split_whitespace
+            ..Default::default()
+        };
+        let chord = k.chord(Action::Quit);
+        assert_eq!(chord.len(), 2, "typo must NOT eat the quit binding");
+        assert_eq!(chord[0].code, "q");
     }
 
     #[test]

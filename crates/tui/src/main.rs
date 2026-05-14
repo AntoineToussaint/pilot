@@ -358,6 +358,7 @@ async fn run_embedded_realm(
             .into_iter()
             .collect();
         let ui_defaults = user_config.ui.resolved();
+        let keybindings = user_config.ui.keybindings.clone();
         model.apply_sidebar_config(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
@@ -366,6 +367,7 @@ async fn run_embedded_realm(
             &user_config.display,
             &ui_defaults,
         );
+        model.apply_keybindings(keybindings);
         model = model.with_splits(
             user_config.ui.sidebar_pct,
             user_config.ui.right_top_pct,
