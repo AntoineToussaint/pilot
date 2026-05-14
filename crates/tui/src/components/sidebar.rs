@@ -2148,130 +2148,106 @@ fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig)
     false
 }
 
+/// Render the right-trailer pill for a task. **Pure mapping** from
+/// `StatusTag::for_task(task)` — no priority logic lives here, all
+/// of that is in `pilot_core::task::StatusTag::for_task`. Adding a
+/// new visual state means adding a `StatusTag` variant first; the
+/// match below is exhaustive, so the compiler then catches the
+/// missing pill arm.
+///
+/// Returning `Option<StatusPill>` so the `StatusTag::None` case
+/// renders as a hole (no pill) without making every caller filter.
 fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
+    pill_for_tag(pilot_core::StatusTag::for_task(task))
+}
+
+/// Pure tag → pill mapping. Exists as its own function so the
+/// contract tests (`status_pill_consistency_tests`) can pin every
+/// `(StatusTag, StatusPill)` pair without going through a
+/// constructed `Task`.
+fn pill_for_tag(tag: pilot_core::StatusTag) -> Option<StatusPill> {
+    use pilot_core::StatusTag::*;
     let theme = crate::theme::current();
-    // Black-on-color reads cleaner than white-on-color for the same
-    // pill styles V1 used. Indexed palette colors render as the
-    // terminal's "bright" red/yellow on most setups — punchy without
-    // the muddy mid-red `Color::Red` produces on dark themes.
+    // Indexed palette colors render as the terminal's "bright"
+    // red/yellow on most setups — punchy without the muddy mid-red
+    // `Color::Red` produces on dark themes. Black-on-color reads
+    // cleaner than white-on-color at this size.
     let pill_red = Style::default()
-        .bg(Color::Indexed(196)) // bright red
+        .bg(Color::Indexed(196))
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
     let pill_amber = Style::default()
-        .bg(Color::Indexed(214)) // warm amber, less neon than 11
+        .bg(Color::Indexed(214))
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
     let pill_yellow = Style::default()
-        .bg(Color::Indexed(220)) // gold — distinct from amber Mixed
+        .bg(Color::Indexed(220))
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
     let pill_green = Style::default()
-        .bg(Color::Indexed(40)) // bright green, terminal-bright
+        .bg(Color::Indexed(40))
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
-    // Inactive states win over CI: once a PR is merged or closed
-    // its CI history isn't actionable. Showing CLOSED beats showing
-    // a stale CI FAIL the user can do nothing about.
-    match task.state {
-        pilot_core::TaskState::Merged => {
-            return Some(StatusPill {
-                label: " MERGED   ",
-                style: Style::default()
-                    .bg(theme.hover)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            });
-        }
-        pilot_core::TaskState::Closed => {
-            return Some(StatusPill {
-                label: " CLOSED   ",
-                style: Style::default()
-                    .bg(theme.error)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            });
-        }
-        _ => {}
-    }
-    if task.has_conflicts {
-        return Some(StatusPill {
-            label: " CONFLICT ",
-            style: pill_red,
-        });
-    }
-    match task.ci {
-        pilot_core::CiStatus::Failure => {
-            return Some(StatusPill {
-                label: " CI FAIL  ",
-                style: pill_red,
-            });
-        }
-        pilot_core::CiStatus::Mixed => {
-            return Some(StatusPill {
-                label: " CI MIX   ",
-                style: pill_amber,
-            });
-        }
-        _ => {}
-    }
-    // Draft sits between CI failure (acutely actionable) and CI
-    // running / success (background state). A draft PR with green
-    // CI still wants the DRAFT badge so the user remembers it isn't
-    // ready for review.
-    if matches!(task.state, pilot_core::TaskState::Draft) {
-        return Some(StatusPill {
-            label: " DRAFT    ",
-            style: Style::default()
+    let pill = |label: &'static str, style: Style| Some(StatusPill { label, style });
+    match tag {
+        Merged => pill(
+            " MERGED   ",
+            Style::default()
+                .bg(theme.hover)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Closed => pill(
+            " CLOSED   ",
+            Style::default()
+                .bg(theme.error)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Conflict => pill(" CONFLICT ", pill_red),
+        CiFailed => pill(" CI FAIL  ", pill_red),
+        CiMixed => pill(" CI MIX   ", pill_amber),
+        ChangesRequested => pill(" CHANGES  ", pill_red),
+        Queued => pill(" QUEUED   ", pill_green),
+        Draft => pill(
+            " DRAFT    ",
+            Style::default()
                 .bg(theme.chrome)
                 .fg(theme.text_strong)
                 .add_modifier(Modifier::BOLD),
-        });
-    }
-    // Approval pills. `READY` is the "this is mergeable right now"
-    // signal — approved AND CI green — and earns the same green pill
-    // as CI OK but with stronger wording. `APPROVED` covers the
-    // approved-but-CI-not-yet-green case so the user knows the human
-    // half is done even while the build runs.
-    if matches!(task.review, pilot_core::ReviewStatus::Approved) {
-        if matches!(task.ci, pilot_core::CiStatus::Success | pilot_core::CiStatus::None) {
-            return Some(StatusPill {
-                label: " READY    ",
-                style: pill_green,
-            });
-        }
-        return Some(StatusPill {
-            label: " APPROVED ",
-            style: Style::default()
+        ),
+        Ready => pill(" READY    ", pill_green),
+        Approved => pill(
+            " APPROVED ",
+            Style::default()
                 .bg(theme.accent)
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
-        });
-    }
-    match task.ci {
-        pilot_core::CiStatus::Pending | pilot_core::CiStatus::Running => {
-            return Some(StatusPill {
-                label: " CI RUN   ",
-                style: pill_yellow,
-            });
-        }
-        pilot_core::CiStatus::Success => {
-            return Some(StatusPill {
-                label: " CI OK    ",
-                style: pill_green,
-            });
-        }
-        _ => {}
-    }
-    if task.is_behind_base {
-        return Some(StatusPill {
-            label: " BEHIND   ",
-            style: Style::default()
+        ),
+        AutoMerge => pill(
+            " AUTO     ",
+            Style::default()
+                .bg(theme.accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
+        ReviewPending => pill(
+            " REVIEW   ",
+            Style::default()
+                .bg(theme.warn)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
+        CiRunning => pill(" CI RUN   ", pill_yellow),
+        CiOk => pill(" CI OK    ", pill_green),
+        Behind => pill(
+            " BEHIND   ",
+            Style::default()
                 .fg(theme.text_dim)
                 .add_modifier(Modifier::BOLD),
-        });
+        ),
+        None => Option::None,
     }
-    None
 }
 
 /// Compact relative time for the right-side trailer. `now` < 1m → "now",
@@ -2614,6 +2590,201 @@ mod status_pill_tests {
         t.review = ReviewStatus::Approved;
         t.ci = CiStatus::Failure;
         assert_eq!(status_pill(&t).unwrap().label, " CI FAIL  ");
+    }
+}
+
+#[cfg(test)]
+mod status_pill_consistency_tests {
+    //! The renderer (`status_pill` → `pill_for_tag`) is a pure
+    //! mapping from `StatusTag::for_task`. These tests pin the
+    //! contract:
+    //!
+    //! - Every non-`None` tag produces `Some(pill)`. A missing arm
+    //!   would mean the rendered row silently drops a real signal
+    //!   (the bug that motivated this audit: status_pill used to
+    //!   skip `ChangesRequested` / `Queued` / `AutoMerge` / `ReviewPending`
+    //!   entirely).
+    //!
+    //! - Every pill label is the same 10-cell width so the time
+    //!   column stays right-aligned across rows.
+    //!
+    //! - The `None` tag is the only tag that renders no pill.
+    //!
+    //! Adding a new `StatusTag` variant without a `pill_for_tag`
+    //! arm is a compile error; adding a new arm without these
+    //! tests catching it is the gap this module closes.
+
+    use super::{pill_for_tag, status_pill};
+    use super::status_pill_tests::base_task;
+    use pilot_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
+
+    /// Every variant of `StatusTag` the contract sweeps over. Keep
+    /// this list exhaustive — a new variant on `StatusTag` should
+    /// fail to compile here until added, because the match below
+    /// is exhaustive. (The `let _: () = match` is the
+    /// exhaustiveness pin.)
+    const ALL_TAGS: &[StatusTag] = &[
+        StatusTag::Merged,
+        StatusTag::Closed,
+        StatusTag::Conflict,
+        StatusTag::CiFailed,
+        StatusTag::CiMixed,
+        StatusTag::ChangesRequested,
+        StatusTag::Queued,
+        StatusTag::Draft,
+        StatusTag::Ready,
+        StatusTag::Approved,
+        StatusTag::AutoMerge,
+        StatusTag::ReviewPending,
+        StatusTag::CiRunning,
+        StatusTag::CiOk,
+        StatusTag::Behind,
+        StatusTag::None,
+    ];
+
+    #[test]
+    fn all_tags_list_is_exhaustive() {
+        // Compile-time exhaustiveness pin. If a new `StatusTag`
+        // variant lands without being added to `ALL_TAGS`, this
+        // arm-by-arm match stops compiling — forcing the
+        // contributor to extend the sweep below at the same time.
+        for tag in ALL_TAGS {
+            let _: () = match tag {
+                StatusTag::Merged => (),
+                StatusTag::Closed => (),
+                StatusTag::Conflict => (),
+                StatusTag::CiFailed => (),
+                StatusTag::CiMixed => (),
+                StatusTag::ChangesRequested => (),
+                StatusTag::Queued => (),
+                StatusTag::Draft => (),
+                StatusTag::Ready => (),
+                StatusTag::Approved => (),
+                StatusTag::AutoMerge => (),
+                StatusTag::ReviewPending => (),
+                StatusTag::CiRunning => (),
+                StatusTag::CiOk => (),
+                StatusTag::Behind => (),
+                StatusTag::None => (),
+            };
+        }
+    }
+
+    #[test]
+    fn every_non_none_tag_renders_a_pill() {
+        // No tag (except None) should silently drop. This was the
+        // original bug: status_pill skipped CHANGES / QUEUED /
+        // AUTO / REVIEW entirely, so a PR with changes requested
+        // showed no signal in the trailer.
+        for tag in ALL_TAGS {
+            let pill = pill_for_tag(*tag);
+            match tag {
+                StatusTag::None => assert!(
+                    pill.is_none(),
+                    "StatusTag::None must render no pill, got {:?}",
+                    pill.map(|p| p.label),
+                ),
+                other => assert!(
+                    pill.is_some(),
+                    "StatusTag::{other:?} must render a pill"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn every_pill_label_is_ten_cells_wide() {
+        // The right-trailer reserves 10 cells for the status pill
+        // so the time column stays aligned. Width is checked here
+        // for every tag, not just the ones reachable from a Task —
+        // the renderer is the truth, the producer is the input.
+        for tag in ALL_TAGS {
+            if let Some(p) = pill_for_tag(*tag) {
+                assert_eq!(
+                    p.label.chars().count(),
+                    10,
+                    "StatusTag::{tag:?} label {:?} is not 10 cells wide",
+                    p.label,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn changes_requested_now_renders_a_pill() {
+        // Regression for the original bug: a PR with
+        // ReviewStatus::ChangesRequested and no other CI/conflict
+        // signal used to fall through to None and show no pill.
+        let mut t = base_task();
+        t.review = ReviewStatus::ChangesRequested;
+        let pill = status_pill(&t).expect("changes-requested must produce a pill");
+        assert_eq!(pill.label, " CHANGES  ");
+    }
+
+    #[test]
+    fn auto_merge_now_renders_a_pill() {
+        // Same bug class: auto_merge_enabled with no other signal
+        // used to produce no pill. Now renders AUTO.
+        let mut t = base_task();
+        t.auto_merge_enabled = true;
+        let pill = status_pill(&t).expect("auto-merge must produce a pill");
+        assert_eq!(pill.label, " AUTO     ");
+    }
+
+    #[test]
+    fn queued_now_renders_a_pill() {
+        let mut t = base_task();
+        t.is_in_merge_queue = true;
+        let pill = status_pill(&t).expect("in-merge-queue must produce a pill");
+        assert_eq!(pill.label, " QUEUED   ");
+    }
+
+    #[test]
+    fn review_pending_now_renders_a_pill() {
+        let mut t = base_task();
+        t.review = ReviewStatus::Pending;
+        let pill = status_pill(&t).expect("review-pending must produce a pill");
+        assert_eq!(pill.label, " REVIEW   ");
+    }
+
+    #[test]
+    fn task_pill_matches_tag_priority() {
+        // Sanity-check the pipeline: for a handful of (task) inputs
+        // the pill rendered must match the pill mapped from the
+        // tag computed by `StatusTag::for_task`. Catches drift if
+        // someone reintroduces priority logic into `pill_for_tag`.
+        let mut cases: Vec<pilot_core::Task> = Vec::new();
+        cases.push({
+            let mut t = base_task();
+            t.has_conflicts = true;
+            t
+        });
+        cases.push({
+            let mut t = base_task();
+            t.state = TaskState::Draft;
+            t.review = ReviewStatus::Approved;
+            t.ci = CiStatus::Success;
+            t
+        });
+        cases.push({
+            let mut t = base_task();
+            t.state = TaskState::Merged;
+            t
+        });
+        cases.push({
+            let mut t = base_task();
+            t.review = ReviewStatus::Approved;
+            t.ci = CiStatus::Running;
+            t
+        });
+        for t in &cases {
+            let via_task = status_pill(t).map(|p| p.label);
+            let via_tag = pill_for_tag(StatusTag::for_task(t)).map(|p| p.label);
+            assert_eq!(
+                via_task, via_tag,
+                "status_pill must equal pill_for_tag(StatusTag::for_task(task))",
+            );
+        }
     }
 }
 

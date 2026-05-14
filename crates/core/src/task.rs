@@ -218,28 +218,53 @@ pub enum ActionPriority {
 }
 
 /// Status badge displayed on a PR row — derived purely from task fields.
-/// Priority order matters: the first matching variant wins.
+///
+/// **Single source of truth for the right-trailer pill on every PR row.**
+/// The renderer (`crate::tui::components::sidebar::status_pill`) is a
+/// pure mapping `StatusTag → Option<StatusPill>` over the active theme;
+/// no priority logic lives there. Adding a new visual state means
+/// adding a variant here, updating `for_task`, and adding the pill
+/// label/style — the renderer mapping is exhaustive so the compiler
+/// catches a missing arm.
+///
+/// Priority order matters: the first matching variant in `for_task`
+/// wins. Comments at each branch explain why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusTag {
+    /// PR is merged. Past-tense state — trumps everything CI / review
+    /// related because there's nothing actionable left.
+    Merged,
+    /// PR is closed (without merge). Same logic as Merged.
+    Closed,
     /// Has merge conflicts with the base branch.
     Conflict,
     /// CI is failing.
     CiFailed,
+    /// CI is partially green / partially failing.
+    CiMixed,
     /// A reviewer requested changes.
     ChangesRequested,
     /// Actually sitting in GitHub's merge queue.
     Queued,
-    /// Approved + CI green — ready to merge now.
-    Ready,
-    /// Auto-merge is armed (will merge when reviews + CI pass). Not the same
-    /// as Queued — the PR may still be un-approved.
-    AutoMerge,
-    /// Awaiting review.
-    ReviewPending,
-    /// CI is still running.
-    CiRunning,
-    /// PR is a draft.
+    /// PR is a draft. Sits ABOVE approval/CI green so a draft PR with
+    /// passing CI still reads as DRAFT — the user needs the reminder
+    /// that it isn't ready for review.
     Draft,
+    /// Approved + CI green or unset — ready to merge now.
+    Ready,
+    /// Approved but CI not yet green. Signals "human half done."
+    Approved,
+    /// Auto-merge is armed (will merge when reviews + CI pass). Not the
+    /// same as Queued — the PR may still be un-approved.
+    AutoMerge,
+    /// Awaiting review (review explicitly requested or pending).
+    ReviewPending,
+    /// CI is still running / pending.
+    CiRunning,
+    /// CI is green (and nothing more interesting applies).
+    CiOk,
+    /// Branch is behind base — informational.
+    Behind,
     /// Nothing interesting — no badge.
     None,
 }
@@ -247,48 +272,83 @@ pub enum StatusTag {
 impl StatusTag {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Merged => "MERGED",
+            Self::Closed => "CLOSED",
             Self::Conflict => "CONFLICT",
             Self::CiFailed => "CI FAIL",
+            Self::CiMixed => "CI MIX",
             Self::ChangesRequested => "CHANGES",
             Self::Queued => "QUEUED",
+            Self::Draft => "DRAFT",
             Self::Ready => "READY",
+            Self::Approved => "APPROVED",
             Self::AutoMerge => "AUTO",
             Self::ReviewPending => "REVIEW",
             Self::CiRunning => "CI...",
-            Self::Draft => "DRAFT",
+            Self::CiOk => "CI OK",
+            Self::Behind => "BEHIND",
             Self::None => "",
         }
     }
 
     /// Derive the status tag for a task. Pure — unit-testable.
     ///
-    /// Priority (first match wins): conflict → CI fail → changes requested
-    /// → actually-queued → ready → auto-merge armed → review pending →
-    /// CI running → draft → none.
+    /// Priority (first match wins):
+    /// `Merged` → `Closed` → `Conflict` → `CiFailed` → `CiMixed` →
+    /// `ChangesRequested` → `Queued` → `Draft` → `Ready` → `Approved`
+    /// → `AutoMerge` → `ReviewPending` → `CiRunning` → `CiOk` →
+    /// `Behind` → `None`.
     pub fn for_task(task: &Task) -> Self {
-        if task.has_conflicts {
-            Self::Conflict
-        } else if task.ci == CiStatus::Failure {
-            Self::CiFailed
-        } else if task.review == ReviewStatus::ChangesRequested {
-            Self::ChangesRequested
-        } else if task.is_in_merge_queue {
-            Self::Queued
-        } else if task.review == ReviewStatus::Approved
-            && matches!(task.ci, CiStatus::Success | CiStatus::None)
-        {
-            Self::Ready
-        } else if task.auto_merge_enabled {
-            Self::AutoMerge
-        } else if task.review == ReviewStatus::Pending {
-            Self::ReviewPending
-        } else if matches!(task.ci, CiStatus::Running | CiStatus::Pending) {
-            Self::CiRunning
-        } else if matches!(task.state, TaskState::Draft) {
-            Self::Draft
-        } else {
-            Self::None
+        // Inactive states win over everything: a merged PR's CI
+        // history isn't actionable, so showing MERGED beats showing
+        // a stale CI FAIL.
+        match task.state {
+            TaskState::Merged => return Self::Merged,
+            TaskState::Closed => return Self::Closed,
+            _ => {}
         }
+        if task.has_conflicts {
+            return Self::Conflict;
+        }
+        match task.ci {
+            CiStatus::Failure => return Self::CiFailed,
+            CiStatus::Mixed => return Self::CiMixed,
+            _ => {}
+        }
+        if task.review == ReviewStatus::ChangesRequested {
+            return Self::ChangesRequested;
+        }
+        if task.is_in_merge_queue {
+            return Self::Queued;
+        }
+        // Draft sits between CI failure (acutely actionable) and the
+        // approval/CI-green signals. A draft PR with green CI still
+        // wants the DRAFT badge so the user remembers it isn't ready
+        // for review.
+        if matches!(task.state, TaskState::Draft) {
+            return Self::Draft;
+        }
+        if task.review == ReviewStatus::Approved {
+            if matches!(task.ci, CiStatus::Success | CiStatus::None) {
+                return Self::Ready;
+            }
+            return Self::Approved;
+        }
+        if task.auto_merge_enabled {
+            return Self::AutoMerge;
+        }
+        if task.review == ReviewStatus::Pending {
+            return Self::ReviewPending;
+        }
+        match task.ci {
+            CiStatus::Pending | CiStatus::Running => return Self::CiRunning,
+            CiStatus::Success => return Self::CiOk,
+            _ => {}
+        }
+        if task.is_behind_base {
+            return Self::Behind;
+        }
+        Self::None
     }
 }
 
@@ -415,13 +475,81 @@ mod status_tag_tests {
     }
 
     #[test]
-    fn draft_only_shows_when_nothing_else_applies() {
+    fn draft_beats_approval_signals() {
+        // A draft PR with passing CI + approval must still read as
+        // DRAFT — APPROVED on a draft is misleading because the PR
+        // isn't ready for review. Pinned by the sidebar's pill
+        // rendering; the priority lives in `StatusTag::for_task` so
+        // there's a single source of truth.
         let mut t = base();
         t.state = TaskState::Draft;
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
         assert_eq!(StatusTag::for_task(&t), StatusTag::Draft);
-        // But CI failure still wins.
+        // CI failure still wins — that's acutely actionable.
         t.ci = CiStatus::Failure;
         assert_eq!(StatusTag::for_task(&t), StatusTag::CiFailed);
+    }
+
+    #[test]
+    fn merged_trumps_everything() {
+        let mut t = base();
+        t.state = TaskState::Merged;
+        t.has_conflicts = true; // ignored
+        t.ci = CiStatus::Failure; // ignored
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Merged);
+    }
+
+    #[test]
+    fn closed_trumps_ci_and_review() {
+        let mut t = base();
+        t.state = TaskState::Closed;
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Failure;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Closed);
+    }
+
+    #[test]
+    fn ci_mixed_after_failure_before_changes() {
+        let mut t = base();
+        t.ci = CiStatus::Mixed;
+        t.review = ReviewStatus::ChangesRequested;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::CiMixed);
+        // CI Failure still wins over Mixed.
+        t.ci = CiStatus::Failure;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::CiFailed);
+    }
+
+    #[test]
+    fn approved_without_ci_green_is_approved_not_ready() {
+        // Approved but CI is still running → APPROVED (human half
+        // done, build still going). Approved + green CI → READY.
+        let mut t = base();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Running;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Approved);
+        t.ci = CiStatus::Success;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Ready);
+        // CI None counts as "no CI configured" → also Ready.
+        t.ci = CiStatus::None;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Ready);
+    }
+
+    #[test]
+    fn ci_ok_when_green_with_no_review_signals() {
+        let mut t = base();
+        t.ci = CiStatus::Success;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::CiOk);
+    }
+
+    #[test]
+    fn behind_only_when_nothing_else_applies() {
+        let mut t = base();
+        t.is_behind_base = true;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Behind);
+        // But CI signals still win.
+        t.ci = CiStatus::Running;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::CiRunning);
     }
 
     #[test]
