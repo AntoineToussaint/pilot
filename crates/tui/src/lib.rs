@@ -8,6 +8,7 @@
 //! `crate::components`.
 
 pub mod components;
+pub mod confirm_latch;
 pub mod editors;
 pub mod intent;
 pub mod pane;

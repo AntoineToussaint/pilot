@@ -25,7 +25,9 @@
 //!   across refreshes — the same row stays under the cursor even
 //!   when another workspace gets inserted above it.
 //! - `mailbox`: which view we're showing (Inbox vs Snoozed).
-//! - `kill_pending`: two-press guard for `Shift-X`.
+//! - `kill_latch` / `merge_latch` / `long_snooze_latch`: two-press
+//!   guards for `Shift-X` / `Shift-M` / `Shift-Z`. Each is a
+//!   `ConfirmLatch<SessionKey>` (see `crate::confirm_latch`).
 
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -129,25 +131,24 @@ pub struct Sidebar {
     /// j/k handlers maintain that invariant.
     cursor: usize,
     mailbox: Mailbox,
-    /// If set, `Shift-M` has been pressed once on this row. A
-    /// second `Shift-M` confirms and fires `Command::MergePr`. Any
-    /// other key disarms — same two-press pattern as `Shift-X`,
-    /// since a merge is irreversible.
-    merge_pending: Option<SessionKey>,
-    /// If set, `Shift-Z` has been pressed once on this row. A
-    /// second `Shift-Z` confirms and snoozes for ~1 year. Without
-    /// the latch, a single fat-fingered keypress muted the
-    /// workspace for 365 days with no undo affordance.
-    long_snooze_pending: Option<SessionKey>,
+    /// Two-press confirm latch for `Shift-M` (merge). Generic
+    /// `ConfirmLatch<SessionKey>` replaces the three hand-rolled
+    /// `Option<SessionKey>` fields these used to be (kill / merge /
+    /// long-snooze) — same contract, one source of truth.
+    merge_latch: crate::confirm_latch::ConfirmLatch<SessionKey>,
+    /// Two-press confirm latch for `Shift-Z` (1-year snooze).
+    long_snooze_latch: crate::confirm_latch::ConfirmLatch<SessionKey>,
     /// `z` snooze duration. Configurable via
     /// `~/.pilot/config.yaml::ui.short_snooze` (default 4h).
     short_snooze: std::time::Duration,
     /// `Shift-Z` long-snooze duration. Configurable via
     /// `ui.long_snooze` (default 1 year).
     long_snooze: std::time::Duration,
-    /// If set, `Shift-X` has been pressed once on this row. A
-    /// second press executes the kill. Any other key clears.
-    kill_pending: Option<SessionKey>,
+    /// Two-press confirm latch for `Shift-X` (kill workspace).
+    /// First press arms; second press fires. Generic
+    /// `ConfirmLatch<SessionKey>` shared with the merge / long-
+    /// snooze latches above.
+    kill_latch: crate::confirm_latch::ConfirmLatch<SessionKey>,
     /// Per-key agent id map. Defaults to `c => "claude", x => "codex",
     /// u => "cursor"`. AppRoot can override via `with_agent_shortcuts`
     /// for users with Aider / custom CLIs configured.
@@ -195,9 +196,9 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             mailbox: Mailbox::Inbox,
-            kill_pending: None,
-            merge_pending: None,
-            long_snooze_pending: None,
+            kill_latch: crate::confirm_latch::ConfirmLatch::new(),
+            merge_latch: crate::confirm_latch::ConfirmLatch::new(),
+            long_snooze_latch: crate::confirm_latch::ConfirmLatch::new(),
             short_snooze: pilot_config::UiDefaults::default().short_snooze,
             long_snooze: pilot_config::UiDefaults::default().long_snooze,
             agent_shortcuts,
@@ -503,7 +504,7 @@ impl Sidebar {
     }
 
     pub fn kill_armed(&self) -> Option<&SessionKey> {
-        self.kill_pending.as_ref()
+        self.kill_latch.armed()
     }
 
     /// Total unread activity items across all VISIBLE workspaces. Used
@@ -1006,27 +1007,24 @@ impl Sidebar {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
-        // Any key other than Shift-X disarms the kill confirmation.
+        // Each two-press latch disarms when its trigger key isn't
+        // the next press. Single source of truth for the "first
+        // press arms, second press fires, anything else disarms"
+        // contract is `crate::confirm_latch::ConfirmLatch`.
         let is_shift_x =
             key.code == KeyCode::Char('X') && key.modifiers.contains(KeyModifiers::SHIFT);
-        if self.kill_pending.is_some() && !is_shift_x {
-            self.kill_pending = None;
+        if !is_shift_x {
+            self.kill_latch.disarm();
         }
-        // Same two-press latch for Shift-M (merge) — irreversible
-        // action, so we require a deliberate second press.
         let is_shift_m =
             key.code == KeyCode::Char('M') && key.modifiers.contains(KeyModifiers::SHIFT);
-        if self.merge_pending.is_some() && !is_shift_m {
-            self.merge_pending = None;
+        if !is_shift_m {
+            self.merge_latch.disarm();
         }
-        // Same latch for Shift-Z (1-year snooze) — one accidental
-        // press used to mute a workspace for a year with no undo
-        // affordance. The first press arms `long_snooze_pending`,
-        // shows a `[snooze 1y?]` indicator; the second confirms.
         let is_shift_z =
             key.code == KeyCode::Char('Z') && key.modifiers.contains(KeyModifiers::SHIFT);
-        if self.long_snooze_pending.is_some() && !is_shift_z {
-            self.long_snooze_pending = None;
+        if !is_shift_z {
+            self.long_snooze_latch.disarm();
         }
 
         match (key.code, key.modifiers) {
@@ -1094,20 +1092,38 @@ impl Sidebar {
             // cases, plus the right-pane `w` for selected comments,
             // so the user has one work key everywhere.)
             (KeyCode::Char('w'), KeyModifiers::NONE)
-                if self.work_target_for_cursor().is_some() =>
+                if matches!(
+                    crate::intent::resolve_work(
+                        self.selected_workspace(),
+                        &[],
+                        &self.default_agent,
+                    ),
+                    crate::intent::Intent::SpawnAgent { .. }
+                ) =>
             {
-                let Some((session_key, prompt)) = self.work_target_for_cursor() else {
-                    return PaneOutcome::Consumed;
-                };
-                let agent_id = self.default_agent.clone();
-                tracing::info!(%session_key, %agent_id, "sidebar: emitting Spawn(Agent) with work prompt");
-                cmds.push(Command::Spawn {
-                    session_key,
-                    session_id: self.selected_session_id(),
-                    kind: TerminalKind::Agent(agent_id),
-                    cwd: None,
-                    initial_prompt: Some(prompt),
-                });
+                // Sidebar `w` never has selected-comments (the activity
+                // pane owns that selection state), so pass an empty
+                // slice — the resolver does the priority chain.
+                let intent = crate::intent::resolve_work(
+                    self.selected_workspace(),
+                    &[],
+                    &self.default_agent,
+                );
+                if let crate::intent::Intent::SpawnAgent {
+                    workspace_key,
+                    agent_id,
+                    prompt,
+                } = intent
+                {
+                    tracing::info!(%workspace_key, %agent_id, "sidebar: emitting Spawn(Agent) with work prompt");
+                    cmds.push(Command::Spawn {
+                        session_key: workspace_key,
+                        session_id: self.selected_session_id(),
+                        kind: TerminalKind::Agent(agent_id),
+                        cwd: None,
+                        initial_prompt: prompt,
+                    });
+                }
                 PaneOutcome::Consumed
             }
 
@@ -1134,7 +1150,9 @@ impl Sidebar {
 
             // ── Session actions ───────────────────────────────────────
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                if let Some(session_key) = self.selected_session_key().cloned() {
+                if let crate::intent::Intent::MarkAllRead { session_key } =
+                    crate::intent::resolve_mark_read(self.selected_workspace())
+                {
                     cmds.push(Command::MarkRead { session_key });
                 }
                 PaneOutcome::Consumed
@@ -1144,41 +1162,50 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
             (KeyCode::Char('z'), KeyModifiers::NONE) => {
-                let Some(session_key) = self.selected_session_key().cloned() else {
-                    return PaneOutcome::Consumed;
-                };
+                // Toggle: snooze if not snoozed, otherwise unsnooze.
+                // The resolver makes the decision based on
+                // `workspace.snoozed_until`; this handler just
+                // executes whichever Intent it returns.
                 let now = chrono::Utc::now();
-                let already = self
-                    .workspaces
-                    .get(&session_key)
-                    .map(|w| w.is_snoozed(now))
-                    .unwrap_or(false);
-                if already {
-                    cmds.push(Command::Unsnooze { session_key });
-                } else {
-                    let until = now
-                        + chrono::Duration::from_std(self.short_snooze)
-                            .unwrap_or(chrono::Duration::hours(4));
-                    cmds.push(Command::Snooze { session_key, until });
+                let intent = crate::intent::resolve_short_snooze(
+                    self.selected_workspace(),
+                    now,
+                    self.short_snooze,
+                );
+                match intent {
+                    crate::intent::Intent::Snooze { session_key, duration } => {
+                        let until = now
+                            + chrono::Duration::from_std(duration)
+                                .unwrap_or(chrono::Duration::hours(4));
+                        cmds.push(Command::Snooze { session_key, until });
+                    }
+                    crate::intent::Intent::Unsnooze { session_key } => {
+                        cmds.push(Command::Unsnooze { session_key });
+                    }
+                    _ => {}
                 }
                 PaneOutcome::Consumed
             }
             (KeyCode::Char('Z'), m) if m.contains(KeyModifiers::SHIFT) => {
                 // Two-press confirm — 1-year snooze is effectively
-                // "hide forever" and there's no obvious undo from
-                // the inbox view. First press arms; second fires.
+                // "hide forever" with no obvious undo. The
+                // `ConfirmLatch::arm_or_fire` returns true on the
+                // SECOND consecutive press; otherwise it arms +
+                // returns false. The actual snooze duration lives
+                // in the Intent the resolver returns.
                 let Some(session_key) = self.selected_session_key().cloned() else {
                     return PaneOutcome::Consumed;
                 };
-                if self.long_snooze_pending.as_ref() == Some(&session_key) {
-                    self.long_snooze_pending = None;
-                    let now = chrono::Utc::now();
-                    let until = now
-                        + chrono::Duration::from_std(self.long_snooze)
+                if !self.long_snooze_latch.arm_or_fire(session_key.clone()) {
+                    return PaneOutcome::Consumed;
+                }
+                let workspace = self.selected_workspace();
+                let intent = crate::intent::resolve_long_snooze(workspace, self.long_snooze);
+                if let crate::intent::Intent::Snooze { session_key, duration } = intent {
+                    let until = chrono::Utc::now()
+                        + chrono::Duration::from_std(duration)
                             .unwrap_or(chrono::Duration::days(365));
                     cmds.push(Command::Snooze { session_key, until });
-                } else {
-                    self.long_snooze_pending = Some(session_key);
                 }
                 PaneOutcome::Consumed
             }
@@ -1197,37 +1224,44 @@ impl Sidebar {
             }
 
             // ── Kill session (two-press confirmation) ─────────────────
+            // `resolve_kill` produces the Intent unconditionally
+            // when a workspace is focused; the `ConfirmLatch` here
+            // gates the actual fire on the second consecutive press.
             (KeyCode::Char('X'), m) if m.contains(KeyModifiers::SHIFT) => {
                 let Some(session_key) = self.selected_session_key().cloned() else {
                     return PaneOutcome::Consumed;
                 };
-                if self.kill_pending.as_ref() == Some(&session_key) {
-                    self.kill_pending = None;
+                if !self.kill_latch.arm_or_fire(session_key.clone()) {
+                    return PaneOutcome::Consumed;
+                }
+                let intent = crate::intent::resolve_kill(self.selected_workspace());
+                if let crate::intent::Intent::KillWorkspace { session_key } = intent {
                     cmds.push(Command::Kill { session_key });
-                } else {
-                    self.kill_pending = Some(session_key);
                 }
                 PaneOutcome::Consumed
             }
 
             // ── Merge PR (two-press confirmation) ─────────────────────
-            // Fires only when the focused row is a READY PR — the
-            // match guard reads `merge_target_for_cursor` so the
-            // contextual footer + this handler agree on availability.
+            // Match guard reads `resolve_merge` so the contextual
+            // footer hint + this handler share one predicate. The
+            // latch turns the irreversible action into a deliberate
+            // two-press confirm.
             (KeyCode::Char('M'), m)
                 if m.contains(KeyModifiers::SHIFT)
-                    && self.merge_target_for_cursor().is_some() =>
+                    && matches!(
+                        crate::intent::resolve_merge(self.selected_workspace()),
+                        crate::intent::Intent::MergePr { .. }
+                    ) =>
             {
-                let Some(workspace_key) = self.merge_target_for_cursor() else {
+                let intent = crate::intent::resolve_merge(self.selected_workspace());
+                let crate::intent::Intent::MergePr { workspace_key } = intent else {
                     return PaneOutcome::Consumed;
                 };
                 let session_key: SessionKey = (&workspace_key).into();
-                if self.merge_pending.as_ref() == Some(&session_key) {
-                    self.merge_pending = None;
-                    cmds.push(Command::MergePr { workspace_key });
-                } else {
-                    self.merge_pending = Some(session_key);
+                if !self.merge_latch.arm_or_fire(session_key) {
+                    return PaneOutcome::Consumed;
                 }
+                cmds.push(Command::MergePr { workspace_key });
                 PaneOutcome::Consumed
             }
 
@@ -1510,11 +1544,11 @@ impl Sidebar {
                         Style::default()
                     };
                     let prefix = if is_cursor { "  ▸ " } else { "    " };
-                    let kill_mark = if self.kill_pending.as_ref() == Some(key) {
+                    let kill_mark = if self.kill_latch.armed() == Some(key) {
                         " [kill?]"
-                    } else if self.merge_pending.as_ref() == Some(key) {
+                    } else if self.merge_latch.armed() == Some(key) {
                         " [merge?]"
-                    } else if self.long_snooze_pending.as_ref() == Some(key) {
+                    } else if self.long_snooze_latch.armed() == Some(key) {
                         " [snooze 1y?]"
                     } else {
                         ""

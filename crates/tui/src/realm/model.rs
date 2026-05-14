@@ -1371,8 +1371,10 @@ impl<T: TerminalAdapter> Model<T> {
                 && self.matches_action(&key, pilot_config::Action::Reply) =>
             {
                 self.q_armed_at = None;
-                if let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() {
-                    self.mount_reply(workspace_key);
+                let intent = crate::intent::resolve_reply(self.sidebar.selected_workspace());
+                if let crate::intent::Intent::MountReply { workspace_key } = intent {
+                    let session_key: pilot_core::SessionKey = (&workspace_key).into();
+                    self.mount_reply(session_key);
                 }
                 return;
             }
@@ -1382,7 +1384,12 @@ impl<T: TerminalAdapter> Model<T> {
                 && self.matches_action(&key, pilot_config::Action::OpenEditor) =>
             {
                 self.q_armed_at = None;
-                self.open_editor();
+                if matches!(
+                    crate::intent::resolve_open_editor(self.sidebar.selected_workspace()),
+                    crate::intent::Intent::OpenEditor
+                ) {
+                    self.open_editor();
+                }
                 return;
             }
             // `n` from the sidebar: prompt for a workspace name and
@@ -1391,7 +1398,12 @@ impl<T: TerminalAdapter> Model<T> {
                 && self.matches_action(&key, pilot_config::Action::NewWorkspace) =>
             {
                 self.q_armed_at = None;
-                self.mount_new_workspace_input();
+                if matches!(
+                    crate::intent::resolve_new_workspace(),
+                    crate::intent::Intent::MountNewWorkspaceInput
+                ) {
+                    self.mount_new_workspace_input();
+                }
                 return;
             }
             // `,` opens the Settings palette — small picker with
@@ -1417,24 +1429,20 @@ impl<T: TerminalAdapter> Model<T> {
                 && self.matches_action(&key, pilot_config::Action::AdoptSessions) =>
             {
                 self.q_armed_at = None;
-                let source = self.sidebar.selected_workspace().and_then(|w| {
-                    if w.sessions.is_empty() {
-                        None
-                    } else {
-                        Some(pilot_core::WorkspaceKey::new(w.key.as_str()))
+                // `resolve_adopt` makes the "do I have sessions to
+                // adopt?" decision and returns either MountAdoptPicker
+                // or a Notice. Handler just executes whichever Intent
+                // it gets back.
+                match crate::intent::resolve_adopt(self.sidebar.selected_workspace()) {
+                    crate::intent::Intent::MountAdoptPicker { source_key } => {
+                        self.mount_adopt_picker(source_key);
                     }
-                });
-                if let Some(source_key) = source {
-                    self.mount_adopt_picker(source_key);
-                } else {
-                    use crate::realm::components::footer::{
-                        Notice, NoticeSeverity,
-                    };
-                    self.status.notice = Some(Notice::new(
-                        "no sessions on the focused workspace to adopt",
-                        NoticeSeverity::Info,
-                    ));
-                    self.redraw = true;
+                    crate::intent::Intent::Notice(msg) => {
+                        use crate::realm::components::footer::{Notice, NoticeSeverity};
+                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
+                        self.redraw = true;
+                    }
+                    _ => {}
                 }
                 return;
             }
