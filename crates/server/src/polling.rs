@@ -858,6 +858,40 @@ async fn upsert_into_workspace_key(
     key: &WorkspaceKey,
     task: Task,
 ) {
+    // 1. PREPARE: build the workspace's final in-memory state.
+    //    Includes the optional issue-collapse merge — if a PR
+    //    polls in with `closes_issues`, we fold standalone issue
+    //    workspaces into it here. Async (touches the store +
+    //    `terminal_meta`) but doesn't yet write the PR's own row.
+    let mut workspace = prepare_upsert(config, key, task).await;
+
+    // 2. MIGRATE: rename worktree dirs to match the (possibly
+    //    new) PR slug. Async git operation. If it fails, log
+    //    loudly but continue to commit the metadata — the next
+    //    spawn re-provisions paths and a partial mismatch is
+    //    survivable; a missing broadcast is not.
+    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut workspace).await;
+
+    // 3. COMMIT: persist the final state + broadcast it. Failures
+    //    here log at `error` so an operator can spot a workspace
+    //    that won't survive restart.
+    commit_upsert(config, key, workspace);
+}
+
+/// Pure-ish prepare step: load the existing workspace (if any),
+/// attach the incoming task, and run the issue-collapse merge. No
+/// store writes, no `WorkspaceUpserted` broadcast — the returned
+/// `Workspace` is what we'll commit in step 3.
+///
+/// Split out from `upsert_into_workspace_key` so a future test can
+/// drive the prepare step against a mock store without committing
+/// real state — the "did the merge attach the issue task?" question
+/// is now answerable without the full IPC bus + store side effects.
+async fn prepare_upsert(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    task: Task,
+) -> Workspace {
     let existing = config
         .store
         .get_workspace(key)
@@ -874,19 +908,18 @@ async fn upsert_into_workspace_key(
         None => Workspace::from_task(task, Utc::now()),
     };
 
-    // If this workspace's primary task is a PR that closes issues,
-    // pull any standalone issue workspaces into it. Runs **before**
-    // session-path migration so the migration sees the final session
-    // set (issue sessions included) and renames their worktrees to
-    // the PR slug in one pass.
+    // Issue-collapse pass — see `merge_closing_issue_workspaces`.
+    // Happens here (in prepare) so the migration step sees the
+    // final session set and renames worktrees in one pass.
     merge_closing_issue_workspaces(config, &mut workspace).await;
+    workspace
+}
 
-    // PR-attach migration runs **before** persistence + broadcast so
-    // observers never see a stale `worktree_path`. Most polls are
-    // no-ops here (current slug already matches the persisted path).
-    // The migration is a tokio-async git operation so we await it.
-    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut workspace).await;
-
+/// Side-effect-only commit: serialize + persist + broadcast.
+/// Pulled out so the failure modes are isolated — a store-write
+/// error doesn't suppress the bus broadcast, and a bus-send error
+/// doesn't take down the daemon.
+fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace: Workspace) {
     let json = serde_json::to_string(&workspace).ok();
     let record = WorkspaceRecord {
         key: key.as_str().to_string(),
@@ -894,9 +927,10 @@ async fn upsert_into_workspace_key(
         workspace_json: json,
     };
     if let Err(e) = config.store.save_workspace(&record) {
-        // Bumped to error: a store write failure means the workspace
-        // we just broadcast won't survive a restart. Caller side
-        // can't currently see this, but at least the log is loud.
+        // Bumped to error: a store write failure means the
+        // workspace we just broadcast won't survive a restart.
+        // Caller side can't currently see this, but at least the
+        // log is loud.
         tracing::error!(
             workspace_key = %record.key,
             "save_workspace failed: {e}"
