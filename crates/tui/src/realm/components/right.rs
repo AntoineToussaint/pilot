@@ -96,6 +96,11 @@ impl Right {
         self.inner.keymap()
     }
 
+    /// State-aware short list for the footer hint bar.
+    pub fn contextual_bindings(&self) -> Vec<crate::pane::Binding> {
+        self.inner.contextual_bindings()
+    }
+
     /// Forward to the inner pane's detach spec, if any.
     pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
         self.inner.detachable()

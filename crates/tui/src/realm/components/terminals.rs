@@ -109,6 +109,13 @@ impl Terminals {
         self.inner.keymap()
     }
 
+    /// State-aware short list for the footer hint bar. The terminal
+    /// pane's static keymap is already tight (3 entries) so we just
+    /// reuse it — most keys forward to the PTY anyway.
+    pub fn contextual_bindings(&self) -> Vec<crate::pane::Binding> {
+        self.inner.keymap().to_vec()
+    }
+
     /// Detach spec for the focused tile, if any (delegates to the
     /// inner stack's `detachable()` which scopes to the active tab).
     pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {

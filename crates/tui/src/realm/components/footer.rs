@@ -57,7 +57,7 @@ impl Notice {
 pub fn render(
     f: &mut Frame,
     area: Rect,
-    keymap: &'static [Binding],
+    keymap: &[Binding],
     polling_status: Option<(&str, &str)>, // (spinner, label)
     notice: Option<&Notice>,
 ) {

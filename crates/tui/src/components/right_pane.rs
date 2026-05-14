@@ -708,6 +708,46 @@ impl RightPane {
     }
 
     /// Bindings shown in the hint bar.
+    /// State-aware short list for the footer hint bar. Surfaces the
+    /// keys most useful given what the user is currently looking at:
+    /// `w address comments` only when comments are selected, `b` only
+    /// when there's a body to toggle, etc. Full alphabet stays in
+    /// `keymap()` (consumed by the `?` help modal).
+    pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
+        use crate::Binding;
+        let mut out: Vec<Binding> = Vec::with_capacity(6);
+        out.push(Binding { keys: "j/k", label: "scroll" });
+
+        let has_workspace = self.workspace.is_some();
+        let has_activity = self
+            .workspace
+            .as_ref()
+            .map(|w| !w.activity.is_empty())
+            .unwrap_or(false);
+        let has_selection = !self.selected_activities.is_empty();
+        let has_body = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.primary_task())
+            .and_then(|t| t.body.as_deref())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+
+        if has_workspace {
+            out.push(Binding { keys: "r", label: "reply" });
+        }
+        if has_selection {
+            out.push(Binding { keys: "w", label: "address comments" });
+        } else if has_activity {
+            out.push(Binding { keys: "v", label: "select" });
+            out.push(Binding { keys: "w", label: "address this" });
+        }
+        if has_body {
+            out.push(Binding { keys: "b", label: "description" });
+        }
+        out
+    }
+
     pub fn keymap(&self) -> &'static [crate::Binding] {
         use crate::Binding;
         // Pane-local bindings only — Tab, q-q, ? and the global

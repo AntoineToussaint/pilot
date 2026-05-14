@@ -923,6 +923,54 @@ fn pr_task_with_ci(repo: &str, key: &str, ci: CiStatus) -> Task {
 }
 
 #[test]
+fn contextual_bindings_surface_merge_on_ready_pr() {
+    // The whole point of contextual bindings: the user sees the
+    // merge shortcut in the footer at the moment it's actually
+    // available, not buried in a static alphabet of every key.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let mut pr = make_task("o/r", "o/r#1", Utc::now());
+    pr.review = ReviewStatus::Approved;
+    pr.ci = CiStatus::Success;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    let labels: Vec<&str> = s
+        .contextual_bindings()
+        .iter()
+        .map(|b| b.label)
+        .collect();
+    assert!(
+        labels.contains(&"merge"),
+        "READY PR must surface the merge binding, got {labels:?}",
+    );
+}
+
+#[test]
+fn contextual_bindings_surface_fix_ci_when_red() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let mut pr = make_task("o/r", "o/r#1", Utc::now());
+    pr.ci = CiStatus::Failure;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(pr, Utc::now())],
+        terminals: vec![],
+    });
+    let labels: Vec<&str> = s
+        .contextual_bindings()
+        .iter()
+        .map(|b| b.label)
+        .collect();
+    assert!(
+        labels.contains(&"fix CI"),
+        "CI-failing PR must surface fix CI, got {labels:?}",
+    );
+    assert!(
+        !labels.contains(&"merge"),
+        "merge must NOT show when CI is failing, got {labels:?}",
+    );
+}
+
+#[test]
 fn merge_target_fires_when_pr_is_ready() {
     // READY = approved + green CI (or no CI). The merge key should
     // only advertise itself for rows GitHub will actually let us

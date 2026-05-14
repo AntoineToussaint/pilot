@@ -788,13 +788,16 @@ impl<T: TerminalAdapter> Model<T> {
             .polling
             .as_ref()
             .map(|p| (p.spinner_glyph(), p.status_label()));
-        // Resolve the focused pane's keymap for the footer's left
-        // hint zone before entering the closure (avoids borrow
-        // conflicts with `terminal.draw`).
-        let keymap: &'static [crate::pane::Binding] = match self.focus {
-            PaneFocus::Sidebar => self.sidebar.keymap(),
-            PaneFocus::Right => self.right.keymap(),
-            PaneFocus::Terminals => self.terminals.keymap(),
+        // Resolve the focused pane's CONTEXTUAL bindings for the
+        // footer hint bar. Contextual = state-aware short list
+        // ("Shift-M merge" when the row is READY, "w fix CI" when
+        // CI is failing, etc.) so the user always sees what's
+        // actionable right now, not a generic alphabet. The full
+        // keymap stays in `?` help.
+        let keymap: Vec<crate::pane::Binding> = match self.focus {
+            PaneFocus::Sidebar => self.sidebar.contextual_bindings(),
+            PaneFocus::Right => self.right.contextual_bindings(),
+            PaneFocus::Terminals => self.terminals.contextual_bindings(),
         };
         let notice = self.status.notice.clone();
         let mut captured_area = Rect::default();
@@ -812,7 +815,7 @@ impl<T: TerminalAdapter> Model<T> {
             crate::realm::components::footer::render(
                 f,
                 footer_area,
-                keymap,
+                &keymap,
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );

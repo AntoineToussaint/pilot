@@ -166,6 +166,11 @@ impl Sidebar {
         self.inner.keymap()
     }
 
+    /// State-aware short list for the footer hint bar.
+    pub fn contextual_bindings(&self) -> Vec<crate::pane::Binding> {
+        self.inner.contextual_bindings()
+    }
+
     /// Click-to-select a row. Returns true on a hit.
     pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
         self.inner.click_to_select(area, click_row)

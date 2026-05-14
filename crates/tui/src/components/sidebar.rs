@@ -935,6 +935,58 @@ impl Sidebar {
     }
 
     /// Bindings advertised in the hint bar.
+    /// State-aware short list for the footer hint bar. Reads the
+    /// focused row's task + session state and surfaces the 3–5 keys
+    /// most useful right now — Shift-M when the PR is READY, `w`
+    /// when there's CI to fix or an issue to start, `Shift-X` when
+    /// there are sessions to kill, etc. The full alphabet lives in
+    /// `keymap()` (used by the `?` help modal).
+    pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
+        use crate::Binding;
+        let mut out: Vec<Binding> = Vec::with_capacity(6);
+        out.push(Binding { keys: "j/k", label: "navigate" });
+
+        let workspace = self.selected_workspace();
+        let has_sessions = workspace.map(|w| !w.sessions.is_empty()).unwrap_or(false);
+        let is_ready = self.merge_target_for_cursor().is_some();
+        let has_work = self.work_target_for_cursor().is_some();
+        let primary = workspace.and_then(|w| w.primary_task());
+
+        // Primary state-specific action first — what the user most
+        // likely wants to do on THIS row.
+        if is_ready {
+            out.push(Binding { keys: "Shift-M", label: "merge" });
+        } else if has_work {
+            let label = match primary {
+                Some(t) if matches!(t.ci, pilot_core::CiStatus::Failure) => "fix CI",
+                Some(t) if t.url.contains("/issues/") => "implement",
+                _ => "work on this",
+            };
+            out.push(Binding { keys: "w", label });
+        }
+
+        // Reply / read are useful whenever there's a PR or issue.
+        if primary.is_some() {
+            out.push(Binding { keys: "r", label: "reply" });
+        }
+
+        // Session lifecycle — show whichever side is actionable.
+        if has_sessions {
+            out.push(Binding { keys: "c", label: "claude" });
+            out.push(Binding { keys: "Shift-X", label: "kill" });
+        } else if workspace.is_some() {
+            out.push(Binding { keys: "c", label: "claude" });
+            out.push(Binding { keys: "s", label: "shell" });
+        }
+
+        // Empty inbox / no-row case — point at the create flow.
+        if workspace.is_none() {
+            out.push(Binding { keys: "n", label: "new workspace" });
+        }
+
+        out
+    }
+
     pub fn keymap(&self) -> &'static [crate::Binding] {
         use crate::Binding;
         // Pane-local bindings only — Tab / q-q / ? / Shift-arrows /
