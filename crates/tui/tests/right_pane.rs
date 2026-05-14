@@ -104,6 +104,116 @@ fn render_to_string(rp: &mut RightPane, width: u16, height: u16, focused: bool) 
 
 // ── Selection ─────────────────────────────────────────────────────────
 
+// ── `w` (work-on-this) dispatch regression tests ─────────────────
+//
+// The right pane's `w` used to auto-pick the cursor-row activity
+// when nothing was selected, which surprised users on a CI-failing
+// PR: pressing `w` would fire an "address these comments" prompt
+// against a random activity row instead of the fix-CI prompt the
+// sidebar `w` produces. These tests pin the new dispatch:
+//   - selected comments → address them
+//   - no selection → fall through to fix-CI / implement-issue / etc.
+
+fn pr_with_ci_fail() -> Task {
+    let mut t = make_task("o/r#42");
+    t.ci = CiStatus::Failure;
+    t.url = "https://github.com/o/r/pull/42".into();
+    t
+}
+
+#[test]
+fn w_with_ci_failing_and_no_selection_spawns_fix_ci_not_address_comments() {
+    use pilot_ipc::Command;
+    let mut rp = RightPane::new(PaneId::new(1));
+    let mut ws = Workspace::from_task(pr_with_ci_fail(), Utc::now());
+    ws.activity
+        .push(activity("alice", "lgtm", ActivityKind::Comment));
+    ws.activity
+        .push(activity("bob", "looks good", ActivityKind::Comment));
+    rp.set_workspace(Some(ws));
+    let mut cmds: Vec<Command> = Vec::new();
+    rp.handle_key(
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+        &mut cmds,
+    );
+    let prompt = match cmds.first() {
+        Some(Command::Spawn { initial_prompt, .. }) => initial_prompt
+            .clone()
+            .expect("Spawn must carry an initial_prompt"),
+        other => panic!("expected a Spawn command, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("CI is failing"),
+        "w on a CI-failing PR (no selection) must dispatch the fix-CI prompt, \
+         got:\n{prompt}",
+    );
+    assert!(
+        !prompt.contains("Address the following review comments"),
+        "must NOT silently address random comments when nothing is selected, \
+         got:\n{prompt}",
+    );
+}
+
+#[test]
+fn w_with_selected_comments_addresses_them() {
+    // Sanity: when comments ARE selected, the address-comments
+    // path still fires. This is the original `f` flow we preserved.
+    use pilot_ipc::Command;
+    let mut rp = RightPane::new(PaneId::new(1));
+    let mut ws = Workspace::from_task(pr_with_ci_fail(), Utc::now());
+    ws.activity
+        .push(activity("alice", "nit on line 4", ActivityKind::Comment));
+    ws.activity
+        .push(activity("bob", "needs more tests", ActivityKind::Comment));
+    rp.set_workspace(Some(ws));
+    // Toggle a selection on the first comment via `v`.
+    rp.handle_key(
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+        &mut Vec::new(),
+    );
+    let mut cmds: Vec<Command> = Vec::new();
+    rp.handle_key(
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+        &mut cmds,
+    );
+    let prompt = match cmds.first() {
+        Some(Command::Spawn { initial_prompt, .. }) => initial_prompt
+            .clone()
+            .expect("Spawn must carry an initial_prompt"),
+        other => panic!("expected a Spawn command, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("Address the following review comments"),
+        "selected comments → address-comments prompt; got:\n{prompt}",
+    );
+}
+
+#[test]
+fn w_with_no_selection_and_passing_ci_open_pr_is_noop() {
+    // Sanity: no actionable work + no selection = nothing fires.
+    // (Don't pre-emptively spawn an agent just because the user
+    // pressed `w`; that's how the original bug crept in.)
+    use pilot_ipc::Command;
+    let mut rp = RightPane::new(PaneId::new(1));
+    let mut t = make_task("o/r#1");
+    t.ci = CiStatus::Success;
+    t.url = "https://github.com/o/r/pull/1".into();
+    let mut ws = Workspace::from_task(t, Utc::now());
+    ws.activity
+        .push(activity("alice", "lgtm", ActivityKind::Comment));
+    rp.set_workspace(Some(ws));
+    let mut cmds: Vec<Command> = Vec::new();
+    rp.handle_key(
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+        &mut cmds,
+    );
+    assert!(
+        cmds.is_empty(),
+        "w on a healthy open PR with no comments selected must NOT spawn anything, \
+         got {cmds:?}",
+    );
+}
+
 #[test]
 fn set_workspace_stores_it() {
     let mut rp = RightPane::new(PaneId::new(1));

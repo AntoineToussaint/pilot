@@ -315,24 +315,7 @@ impl Sidebar {
     /// It supersedes the narrower `f` (kept for muscle memory and the
     /// CI-fail case it originally covered).
     pub fn work_target_for_cursor(&self) -> Option<(SessionKey, String)> {
-        // CI-failure path: defer to fix_target_for_cursor so the
-        // prompt + matching predicate live in one place.
-        if let Some(target) = self.fix_target_for_cursor() {
-            return Some(target);
-        }
-
-        // Issue path: cursor is on a workspace whose primary task is
-        // an issue (no PR linked yet). We use `gh_issues.first()` and
-        // require `pr` to be None — once a PR shows up, the workspace
-        // collapses (via `closingIssuesReferences`) and the user
-        // should be working from the PR side instead.
-        let workspace = self.selected_workspace()?;
-        if workspace.pr.is_some() {
-            return None;
-        }
-        let issue = workspace.gh_issues.first()?;
-        let session_key = SessionKey::from(&workspace.key);
-        Some((session_key, build_implement_issue_prompt(issue)))
+        build_work_prompt(self.selected_workspace()?)
     }
 
     /// Return the workspace key the `Shift-M` merge shortcut would
@@ -366,40 +349,7 @@ impl Sidebar {
     /// otherwise — used both by the `f` keybinding match guard and
     /// by the hint bar so the key only advertises when it'll fire.
     pub fn fix_target_for_cursor(&self) -> Option<(SessionKey, String)> {
-        let workspace = self.selected_workspace()?;
-        let pr = workspace.pr.as_ref()?;
-        if pr.ci != pilot_core::CiStatus::Failure {
-            return None;
-        }
-        let session_key = SessionKey::from(&workspace.key);
-
-        let pr_number = pr
-            .id
-            .key
-            .rsplit_once('#')
-            .map(|(_, n)| n)
-            .unwrap_or(&pr.id.key);
-        let repo = pr.repo.as_deref().unwrap_or("unknown");
-        let branch = pr.branch.as_deref().unwrap_or("unknown");
-        let failing_checks: Vec<&str> = pr
-            .checks
-            .iter()
-            .filter(|c| c.status == pilot_core::CiStatus::Failure)
-            .map(|c| c.name.as_str())
-            .collect();
-        let checks_block = if failing_checks.is_empty() {
-            "Run `gh pr checks` to enumerate the failing checks.".to_string()
-        } else {
-            format!("Failing checks: {}.", failing_checks.join(", "))
-        };
-        let prompt = format!(
-            "CI is failing on PR #{pr_number} in {repo} (branch `{branch}`). \
-             {checks_block} \
-             Investigate via `gh pr checks {pr_number}` and `gh run view --log-failed` for each failing run, \
-             reproduce the failure locally where possible, fix it, run the relevant local checks until they pass, \
-             then commit and `git push`. Reply when CI is green again."
-        );
-        Some((session_key, prompt))
+        build_fix_ci_prompt(self.selected_workspace()?)
     }
 
     /// Read-only view of the rendered rows. Tests + the layout helper
@@ -1852,6 +1802,66 @@ fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
         return Some("[I]");
     }
     None
+}
+
+/// Polymorphic "work on this" prompt builder. Same priority chain
+/// the sidebar's `w` key uses: fix CI if it's red, otherwise
+/// implement-issue, otherwise no work to spawn. Lives at module
+/// level so the right pane's `w` (which used to blindly address
+/// activity rows) can fall back to the same logic when no
+/// comments are selected.
+pub fn build_work_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> {
+    if let Some(target) = build_fix_ci_prompt(workspace) {
+        return Some(target);
+    }
+    // Issue path: workspace's primary task is an issue (no PR
+    // linked yet). Once a PR shows up, the merge collapse moves
+    // the work to the PR side.
+    if workspace.pr.is_some() {
+        return None;
+    }
+    let issue = workspace.gh_issues.first()?;
+    let session_key = SessionKey::from(&workspace.key);
+    Some((session_key, build_implement_issue_prompt(issue)))
+}
+
+/// Pure helper: produce a (session_key, fix-CI-prompt) pair if the
+/// workspace's PR is currently failing CI; otherwise None. Used by
+/// both the sidebar's `w` keymap predicate and `build_work_prompt`.
+pub fn build_fix_ci_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> {
+    let pr = workspace.pr.as_ref()?;
+    if pr.ci != pilot_core::CiStatus::Failure {
+        return None;
+    }
+    let session_key = SessionKey::from(&workspace.key);
+
+    let pr_number = pr
+        .id
+        .key
+        .rsplit_once('#')
+        .map(|(_, n)| n)
+        .unwrap_or(&pr.id.key);
+    let repo = pr.repo.as_deref().unwrap_or("unknown");
+    let branch = pr.branch.as_deref().unwrap_or("unknown");
+    let failing_checks: Vec<&str> = pr
+        .checks
+        .iter()
+        .filter(|c| c.status == pilot_core::CiStatus::Failure)
+        .map(|c| c.name.as_str())
+        .collect();
+    let checks_block = if failing_checks.is_empty() {
+        "Run `gh pr checks` to enumerate the failing checks.".to_string()
+    } else {
+        format!("Failing checks: {}.", failing_checks.join(", "))
+    };
+    let prompt = format!(
+        "CI is failing on PR #{pr_number} in {repo} (branch `{branch}`). \
+         {checks_block} \
+         Investigate via `gh pr checks {pr_number}` and `gh run view --log-failed` for each failing run, \
+         reproduce the failure locally where possible, fix it, run the relevant local checks until they pass, \
+         then commit and `git push`. Reply when CI is green again."
+    );
+    Some((session_key, prompt))
 }
 
 /// Build the agent prompt for `w` ("work on this") when the focused

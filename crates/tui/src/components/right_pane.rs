@@ -719,29 +719,50 @@ impl RightPane {
         // is alphabet the user learns once. Full keymap behind `?`.
         let mut out: Vec<Binding> = Vec::with_capacity(6);
 
-        let has_workspace = self.workspace.is_some();
-        let has_activity = self
-            .workspace
-            .as_ref()
-            .map(|w| !w.activity.is_empty())
-            .unwrap_or(false);
+        let workspace = self.workspace.as_ref();
+        let has_workspace = workspace.is_some();
+        let has_activity = workspace.map(|w| !w.activity.is_empty()).unwrap_or(false);
         let has_selection = !self.selected_activities.is_empty();
-        let has_body = self
-            .workspace
-            .as_ref()
+        let has_body = workspace
             .and_then(|w| w.primary_task())
             .and_then(|t| t.body.as_deref())
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
+        // `w` label is derived from the same priority chain the
+        // handler dispatches on, so the footer never lies about what
+        // pressing it will do. Selected comments win > workspace-
+        // level work (fix CI / implement issue) > nothing.
+        let work_label: Option<&'static str> = if has_selection {
+            Some("address comments")
+        } else if let Some(ws) = workspace {
+            match crate::components::sidebar::build_work_prompt(ws) {
+                Some(_) => {
+                    let primary = ws.primary_task();
+                    if primary
+                        .map(|t| matches!(t.ci, pilot_core::CiStatus::Failure))
+                        .unwrap_or(false)
+                    {
+                        Some("fix CI")
+                    } else if primary.map(|t| t.url.contains("/issues/")).unwrap_or(false) {
+                        Some("implement")
+                    } else {
+                        Some("work on this")
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
 
         if has_workspace {
             out.push(Binding { keys: "r", label: "reply" });
         }
-        if has_selection {
-            out.push(Binding { keys: "w", label: "address comments" });
-        } else if has_activity {
-            out.push(Binding { keys: "v", label: "select" });
-            out.push(Binding { keys: "w", label: "address this" });
+        if let Some(label) = work_label {
+            out.push(Binding { keys: "w", label });
+        }
+        if has_activity && !has_selection {
+            out.push(Binding { keys: "v", label: "select comments" });
         }
         if has_body {
             out.push(Binding { keys: "b", label: "description" });
@@ -890,23 +911,37 @@ impl RightPane {
                 self.toggle_task_body();
                 PaneOutcome::Consumed
             }
-            // `w` (work-on-this) consumes the selected comments (or
-            // the cursor row when none selected) and spawns the
-            // default agent with an "address these comments" prompt.
-            // Renamed from `f` so we have one mnemonic everywhere:
-            // sidebar `w` for issues / CI failures, right-pane `w`
-            // for comments.
+            // `w` (work-on-this). State-aware: same mnemonic as the
+            // sidebar's `w`, dispatched by what's actually selected.
+            //   - Comments selected with `v` → address those comments.
+            //   - Nothing selected → fall back to the workspace-level
+            //     work prompt (fix CI / implement issue / etc.) via
+            //     the shared `build_work_prompt`. Pre-fix, this branch
+            //     auto-picked the cursor-row as "the comment to
+            //     address", which surprised users: pressing `w` on a
+            //     CI-failing PR fired an address-comments prompt with
+            //     a random activity row, not a fix-CI prompt.
             (KeyCode::Char('w'), KeyModifiers::NONE) => {
-                let indices: Vec<usize> = if self.selected_activities.is_empty() {
-                    if workspace.activity.is_empty() {
+                if self.selected_activities.is_empty() {
+                    let Some((session_key, prompt)) =
+                        crate::components::sidebar::build_work_prompt(workspace)
+                    else {
                         return PaneOutcome::Consumed;
-                    }
-                    vec![self.comment_cursor]
-                } else {
-                    let mut v: Vec<usize> = self.selected_activities.iter().copied().collect();
-                    v.sort();
-                    v
-                };
+                    };
+                    cmds.push(Command::Spawn {
+                        session_key,
+                        session_id: None,
+                        kind: pilot_ipc::TerminalKind::Agent(
+                            self.default_agent.clone(),
+                        ),
+                        cwd: None,
+                        initial_prompt: Some(prompt),
+                    });
+                    return PaneOutcome::Consumed;
+                }
+                let mut indices: Vec<usize> =
+                    self.selected_activities.iter().copied().collect();
+                indices.sort();
                 let prompt = build_address_comments_prompt(workspace, &indices);
                 let session_key = pilot_core::SessionKey::from(&workspace.key);
                 cmds.push(Command::Spawn {
