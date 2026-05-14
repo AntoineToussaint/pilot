@@ -93,6 +93,52 @@ impl Registry {
     }
 }
 
+/// Shared pattern primitives for agent state detection.
+///
+/// Every agent's `detect_state` walks a small set of well-known
+/// markers in the recent PTY output to classify "is the agent
+/// asking the user something?" The vocabulary repeats:
+///
+/// - **Bare yes/no markers** (`[y/n]`, `(y/n)`, …) — used by Codex,
+///   Cursor, and most YAML-configured CLIs. Single substring match
+///   is enough confidence: these don't show up in chat output.
+///
+/// - **Paired patterns** — at least one *choice marker* AND at
+///   least one *question phrase*. Used by Claude: "Do you want to"
+///   alone is too weak (chat output could include it), so we pair
+///   it with `1. Yes` / `(y/n)` / `[y/n]` to raise confidence.
+///
+/// - **Footer markers** — UI footers some agents render ONLY while
+///   waiting on input (Claude's `Esc to cancel · Tab to amend`).
+///   The most reliable signal: when present, the agent is asking.
+///
+/// Adding a new built-in agent should be a config-style declaration
+/// — declare the agent's pattern shape using these helpers — rather
+/// than writing yet another bespoke matcher with its own
+/// substring-soup logic.
+pub mod detect {
+    /// Standard bare yes/no prompt markers. Used by every CLI that
+    /// doesn't have a custom approval UI (Codex, Cursor, most
+    /// GenericCli configs). Order doesn't matter — substring search.
+    pub const YN_PROMPT_PATTERNS: &[&str] =
+        &["[y/n]", "(y/n)", "[Y/n]", "[y/N]"];
+
+    /// Substring "any-of" match. Plain text in; bytes should be
+    /// passed through `strip_ansi_lossy` first so escape sequences
+    /// don't split the markers.
+    pub fn contains_any(text: &str, patterns: &[&str]) -> bool {
+        patterns.iter().any(|p| text.contains(p))
+    }
+
+    /// Two-stage check: at least one `choice` marker AND at least
+    /// one `question` phrase. Pairing raises confidence — neither
+    /// alone is enough to distinguish "agent is asking" from "the
+    /// agent's chat output mentions the same phrase."
+    pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool {
+        contains_any(text, choices) && contains_any(text, questions)
+    }
+}
+
 pub mod builtins {
     use super::*;
 
@@ -140,32 +186,36 @@ pub mod builtins {
 
         /// Claude Code's interactive prompt UI is recognisable by a
         /// stable footer line (`Esc to cancel · Tab to amend · …`)
-        /// plus a small set of question phrasings. Matching the
-        /// footer is highest-confidence — Claude only renders it
-        /// when it's waiting on the user. The phrase fallbacks catch
-        /// cases where the footer is scrolled off the recent buffer
-        /// but the question is still visible.
+        /// plus paired question phrasings. Both signals run through
+        /// the shared `super::detect` helpers so adding a new
+        /// pattern is a one-line declarative change, not another
+        /// hand-rolled substring soup.
+        ///
+        /// Returning `Some(Active)` on the default path (rather than
+        /// `None`) lets the daemon notice the Asking → Active
+        /// transition when the user hits a choice; without it the
+        /// cached state would stay Asking forever.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = strip_ansi_lossy(recent_output);
-            // Highest-precision: the chooser footer.
-            if s.contains("Esc to cancel") && s.contains("Tab to amend") {
+            // Footer marker — highest-confidence. Claude renders
+            // this only while a chooser is up.
+            if super::detect::contains_paired(
+                &s,
+                &["Esc to cancel"],
+                &["Tab to amend"],
+            ) {
                 return Some(AgentState::Asking);
             }
-            // Common question phrasings. "Do you want to" alone is
-            // weak (chat output could include the phrase) so we pair
-            // with a numbered choice marker.
-            let has_choice = s.contains("1. Yes") || s.contains("(y/n)") || s.contains("[y/n]");
-            if has_choice
-                && (s.contains("Do you want to")
-                    || s.contains("Allow Claude")
-                    || s.contains("Approve"))
-            {
+            // Numbered/y-n choice paired with a question phrase.
+            // Pairing keeps chat output that happens to include
+            // "Do you want to" from triggering a false Asking.
+            if super::detect::contains_paired(
+                &s,
+                &["1. Yes", "(y/n)", "[y/n]"],
+                &["Do you want to", "Allow Claude", "Approve"],
+            ) {
                 return Some(AgentState::Asking);
             }
-            // Default: assume Active. Returning Some(Active) lets the
-            // daemon notice the transition Asking → Active when the
-            // user hits 1/2; without it the cached state would stay
-            // Asking forever.
             Some(AgentState::Active)
         }
     }
@@ -184,11 +234,15 @@ pub mod builtins {
             vec!["codex".into()]
         }
 
-        /// Codex CLI uses `[y/n]` style prompts for tool approvals.
-        /// Same generic pattern + a few Codex-specific phrasings.
+        /// Codex CLI uses the standard `[y/n]` family plus a custom
+        /// `approve?` phrasing. Declarative — both groups flow
+        /// through the shared `super::detect` helpers so a new
+        /// Codex prompt phrasing just appends to the slice.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = strip_ansi_lossy(recent_output);
-            if s.contains("[y/n]") || s.contains("(y/n)") || s.contains("approve?") {
+            if super::detect::contains_any(&s, super::detect::YN_PROMPT_PATTERNS)
+                || super::detect::contains_any(&s, &["approve?"])
+            {
                 return Some(AgentState::Asking);
             }
             Some(AgentState::Active)
@@ -209,9 +263,12 @@ pub mod builtins {
             vec!["cursor-agent".into()]
         }
 
+        /// Cursor uses the bare yes/no prompt family — no custom
+        /// UI markers. Shares the standard `YN_PROMPT_PATTERNS`
+        /// slice with Codex / GenericCli.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = strip_ansi_lossy(recent_output);
-            if s.contains("[y/n]") || s.contains("(y/n)") {
+            if super::detect::contains_any(&s, super::detect::YN_PROMPT_PATTERNS) {
                 return Some(AgentState::Asking);
             }
             Some(AgentState::Active)
@@ -295,8 +352,12 @@ pub mod builtins {
             if self.asking_patterns.is_empty() {
                 return None;
             }
+            // YAML-supplied patterns flow through the shared
+            // `contains_any` helper so the GenericCli matcher
+            // behaves identically to the built-ins.
             let text = String::from_utf8_lossy(recent_output);
-            if self.asking_patterns.iter().any(|p| text.contains(p)) {
+            let refs: Vec<&str> = self.asking_patterns.iter().map(String::as_str).collect();
+            if super::detect::contains_any(&text, &refs) {
                 Some(AgentState::Asking)
             } else {
                 None

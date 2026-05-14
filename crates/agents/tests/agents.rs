@@ -239,3 +239,90 @@ fn raw_wrapper_returns_inner_unchanged() {
     assert!(w.list_sessions().is_empty(), "raw has no session registry");
     assert!(w.kill("anything").is_ok(), "raw kill is always Ok");
 }
+
+// ── Shared detect helpers ─────────────────────────────────────────────
+//
+// Cover the primitives every agent's `detect_state` now sits on
+// top of. The per-agent tests above (`codex_detects_yn_prompt`,
+// `claude_detects_chooser_footer`, etc.) cover composition; these
+// pin the building blocks.
+
+#[test]
+fn contains_any_matches_first_pattern() {
+    use pilot_agents::agent::detect;
+    assert!(detect::contains_any("approve? y/n", &["approve?", "(y/n)"]));
+    assert!(detect::contains_any(
+        "running tests... [y/n]",
+        detect::YN_PROMPT_PATTERNS,
+    ));
+}
+
+#[test]
+fn contains_any_returns_false_when_no_match() {
+    use pilot_agents::agent::detect;
+    assert!(!detect::contains_any(
+        "regular output, no prompts here",
+        detect::YN_PROMPT_PATTERNS,
+    ));
+}
+
+#[test]
+fn contains_any_empty_pattern_set_is_false() {
+    use pilot_agents::agent::detect;
+    // Edge case: an empty pattern set never matches, even on
+    // matching-looking text. The GenericCli `detect_state` guards
+    // its empty path explicitly, but the primitive should also be
+    // safe.
+    assert!(!detect::contains_any("[y/n]", &[]));
+}
+
+#[test]
+fn contains_paired_requires_both_a_choice_and_a_question() {
+    use pilot_agents::agent::detect;
+    // Claude's pairing contract: a numbered choice ALONE doesn't
+    // trigger (could be chat output listing options), nor does a
+    // question phrase alone. Both must appear together.
+    let buf = "1. Yes\n  2. No\nDo you want to proceed?";
+    assert!(detect::contains_paired(
+        buf,
+        &["1. Yes"],
+        &["Do you want to"],
+    ));
+}
+
+#[test]
+fn contains_paired_with_only_choice_is_false() {
+    use pilot_agents::agent::detect;
+    let buf = "Listing options: 1. Yes 2. No";
+    assert!(!detect::contains_paired(
+        buf,
+        &["1. Yes"],
+        &["Do you want to", "Approve"],
+    ));
+}
+
+#[test]
+fn contains_paired_with_only_question_is_false() {
+    use pilot_agents::agent::detect;
+    // Prevents a false-positive on chat output that mentions the
+    // question phrase without an actual prompt UI.
+    let buf = "The assistant said: 'Do you want to know more?'";
+    assert!(!detect::contains_paired(
+        buf,
+        &["1. Yes", "(y/n)"],
+        &["Do you want to"],
+    ));
+}
+
+#[test]
+fn yn_pattern_constant_matches_every_published_variant() {
+    use pilot_agents::agent::detect;
+    // The four canonical forms agents emit today. Catches an
+    // accidental drop from the constant.
+    for marker in ["[y/n]", "(y/n)", "[Y/n]", "[y/N]"] {
+        assert!(
+            detect::contains_any(&format!("Confirm? {marker}"), detect::YN_PROMPT_PATTERNS),
+            "YN_PROMPT_PATTERNS must include {marker}",
+        );
+    }
+}
