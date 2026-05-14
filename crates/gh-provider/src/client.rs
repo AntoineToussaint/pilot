@@ -206,6 +206,26 @@ impl GhClient {
             .try_acquire()
     }
 
+    /// Gate-or-fail: spend one rate-budget token and convert the
+    /// `AcquireError` into a `GhError::Graphql` carrying the
+    /// human-readable reason. Every code path that fires an HTTP
+    /// request to GitHub (GraphQL search, GraphQL mutation, REST
+    /// scope/repo listing, REST issue comment) goes through this
+    /// helper so the budget is the single chokepoint — no more
+    /// "I forgot to gate this one site" footguns.
+    ///
+    /// `op` is a short label for the log warning ("watch-repo query",
+    /// "merge mutation"). It doesn't go in the error payload — the
+    /// underlying `AcquireError` Display already describes the
+    /// situation.
+    fn acquire_or_block(&self, op: &str) -> Result<(), GhError> {
+        if let Err(reason) = self.try_acquire() {
+            tracing::warn!("{op} blocked by rate budget: {reason}");
+            return Err(GhError::Graphql(reason.to_string()));
+        }
+        Ok(())
+    }
+
     /// Record GitHub's reported rate-limit. Wired into every
     /// successful GraphQL response that includes the `rateLimit`
     /// field.
@@ -258,7 +278,11 @@ impl GhClient {
             });
         }
 
-        // Orgs the user belongs to.
+        // Orgs the user belongs to. REST endpoint; counts against the
+        // same budget. Setup-wizard call so cost-per-poll impact is
+        // zero, but gating keeps the invariant ("every GitHub HTTP
+        // request goes through the budget") clean.
+        self.acquire_or_block("list org memberships")?;
         let orgs: Vec<octocrab::models::orgs::Organization> = self
             .inner
             .current()
@@ -301,7 +325,10 @@ impl GhClient {
         // owner-affiliated repos including private). Other orgs use
         // `/orgs/{org}/repos`, which respects org membership.
         let mut scopes = Vec::new();
+        // Each page is a separate REST request against the same
+        // hourly quota — gate every page, not just the first.
         if owner == self.user {
+            self.acquire_or_block("list own repos page 1")?;
             let mut page = self
                 .inner
                 .current()
@@ -324,6 +351,7 @@ impl GhClient {
                         kind: ScopeKind::Repo,
                     });
                 }
+                self.acquire_or_block("list own repos next page")?;
                 page = match self
                     .inner
                     .get_page::<octocrab::models::Repository>(&page.next)
@@ -335,6 +363,7 @@ impl GhClient {
                 };
             }
         } else {
+            self.acquire_or_block("list org repos page 1")?;
             let mut page = self
                 .inner
                 .orgs(owner)
@@ -356,6 +385,7 @@ impl GhClient {
                         kind: ScopeKind::Repo,
                     });
                 }
+                self.acquire_or_block("list org repos next page")?;
                 page = match self
                     .inner
                     .get_page::<octocrab::models::Repository>(&page.next)
@@ -418,10 +448,7 @@ impl GhClient {
             // self-imposed budget is exhausted OR the previous
             // response told us GitHub is low. Surfaces as a
             // retryable error to the polling layer.
-            if let Err(reason) = self.try_acquire() {
-                tracing::warn!("GraphQL search blocked by rate budget: {reason}");
-                return Err(GhError::Graphql(reason.to_string()));
-            }
+            self.acquire_or_block("PR search")?;
 
             let body = graphql::query_body_after(&search_query, cursor.as_deref());
             tracing::debug!(
@@ -525,8 +552,24 @@ impl GhClient {
         }
 
         // Fetch watched repos (all open PRs, not just involves:user).
+        // Each repo is its own GraphQL search, so each one must be
+        // gated independently AND must record GitHub's reported
+        // rate-limit. Pre-fix this loop was the biggest ungated
+        // request path: 10 watched repos = 10 ungated GraphQL calls
+        // per poll cycle.
         let mut watch_failures: usize = 0;
         for repo in &self.watch_repos {
+            // If the budget is exhausted mid-loop, stop trying — we
+            // already have the main-search results to return; better
+            // to ship those than fail the whole poll. Treat as a
+            // failure for the "all watched failed" classifier below.
+            if let Err(reason) = self.try_acquire() {
+                tracing::warn!(
+                    "watch-repo query for {repo} blocked by rate budget: {reason}"
+                );
+                watch_failures += 1;
+                continue;
+            }
             let watch_query = format!("is:open is:pr repo:{repo} archived:false");
             let watch_body = graphql::query_body(&watch_query);
             tracing::debug!("Watch query for {repo}: {watch_query}");
@@ -537,7 +580,16 @@ impl GhClient {
                 .await
             {
                 Ok(resp) => {
-                    if let Some(data) = resp.data {
+                    if let Some(data) = &resp.data {
+                        // Observe rate-limit from this response. The
+                        // unified search above already did this for
+                        // its own response; the watch loop wasn't.
+                        // Result: a long watch loop on a low budget
+                        // would keep firing without updating our
+                        // remote-awareness.
+                        if let Some(rl) = &data.rate_limit {
+                            self.observe_rate_limit(rl);
+                        }
                         let existing_keys: std::collections::HashSet<String> =
                             tasks.iter().map(|t| t.id.key.clone()).collect();
                         for pr in &data.search.nodes {
@@ -596,10 +648,7 @@ impl GhClient {
         let mut page = 0usize;
         loop {
             // Same rate-budget guard as PR fetch — see fetch_all_prs.
-            if let Err(reason) = self.try_acquire() {
-                tracing::warn!("Issues GraphQL blocked by rate budget: {reason}");
-                return Err(GhError::Graphql(reason.to_string()));
-            }
+            self.acquire_or_block("issues search")?;
             let body = graphql::issues_query_body(&search_query, cursor.as_deref());
             let response: graphql::GqlIssueResponse = self
                 .inner
@@ -767,6 +816,10 @@ impl GhClient {
         let (owner, name) = repo
             .split_once('/')
             .ok_or_else(|| GhError::Graphql(format!("repo '{repo}' not owner/name")))?;
+        // REST endpoint, but it counts against the same hourly budget
+        // as GraphQL — gate it. No rate-limit headers are exposed by
+        // octocrab on this call, so we don't `observe` after.
+        self.acquire_or_block("post issue comment")?;
         self.inner
             .issues(owner, name)
             .create_comment(issue_or_pr_number, body)
@@ -778,12 +831,22 @@ impl GhClient {
     /// Merge the base branch into this PR's head — same as the "Update
     /// branch" button on github.com. Requires the PR's GraphQL node ID.
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("updatePullRequestBranch mutation")?;
         let body = graphql::update_branch_body(pull_request_node_id);
         let response: graphql::GqlResponse = self
             .inner
             .post("/graphql", Some(&body))
             .await
             .map_err(GhError::Api)?;
+        // Observe rate-limit if the mutation response includes it
+        // (currently it doesn't — the mutation body doesn't select
+        // `rateLimit` — but if a future query body change pulls it
+        // in, we use it for free).
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -801,12 +864,18 @@ impl GhClient {
     /// the merge method; GitHub will use whatever the repo's
     /// settings allow / require.
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
         let response: graphql::GqlResponse = self
             .inner
             .post("/graphql", Some(&body))
             .await
             .map_err(GhError::Api)?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
