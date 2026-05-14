@@ -506,6 +506,11 @@ fn shift_z_archives_a_year_out() {
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
     let before = Utc::now();
+    // Two presses now — first arms, second fires. The 1-year
+    // snooze is irreversible enough to deserve a confirmation,
+    // same as Shift-X / Shift-M.
+    s.handle_key(shift_char('Z'), &mut cmds);
+    assert!(cmds.is_empty(), "first Shift-Z arms, doesn't fire");
     s.handle_key(shift_char('Z'), &mut cmds);
     assert_eq!(cmds.len(), 1);
     match &cmds[0] {
@@ -1054,6 +1059,49 @@ fn s_on_workspace_emits_shell_spawn() {
         ),
         other => panic!("expected Spawn, got {other:?}"),
     }
+}
+
+#[test]
+fn shift_z_requires_two_presses_to_emit_long_snooze() {
+    // 1-year snooze is effectively "hide forever" — a single
+    // fat-fingered Shift-Z used to mute the row with no obvious
+    // undo. Two-press latch mirrors Shift-X / Shift-M.
+    let mut s = sidebar_with_pr(|_| {});
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(shift_char('Z'), &mut cmds);
+    assert!(
+        cmds.is_empty(),
+        "first Shift-Z must arm the latch, not fire",
+    );
+    s.handle_key(shift_char('Z'), &mut cmds);
+    assert_eq!(cmds.len(), 1);
+    match &cmds[0] {
+        Command::Snooze { until, .. } => {
+            // ~365 days into the future is a long snooze.
+            let delta = (*until - chrono::Utc::now()).num_days();
+            assert!(
+                (360..=370).contains(&delta),
+                "Shift-Z must snooze ~1 year, got {delta} days",
+            );
+        }
+        other => panic!("expected Snooze, got {other:?}"),
+    }
+}
+
+#[test]
+fn unrelated_key_disarms_shift_z_latch() {
+    // Any key other than Shift-Z disarms the long-snooze prompt
+    // (same pattern as Shift-X / Shift-M).
+    let mut s = sidebar_with_pr(|_| {});
+    let mut cmds: Vec<Command> = Vec::new();
+    s.handle_key(shift_char('Z'), &mut cmds);
+    s.handle_key(key_code(KeyCode::Char('s')), &mut cmds); // disarms
+    cmds.clear();
+    s.handle_key(shift_char('Z'), &mut cmds);
+    assert!(
+        cmds.is_empty(),
+        "after disarming, single Shift-Z must NOT fire snooze",
+    );
 }
 
 #[test]

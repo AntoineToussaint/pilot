@@ -134,6 +134,11 @@ pub struct Sidebar {
     /// other key disarms — same two-press pattern as `Shift-X`,
     /// since a merge is irreversible.
     merge_pending: Option<SessionKey>,
+    /// If set, `Shift-Z` has been pressed once on this row. A
+    /// second `Shift-Z` confirms and snoozes for ~1 year. Without
+    /// the latch, a single fat-fingered keypress muted the
+    /// workspace for 365 days with no undo affordance.
+    long_snooze_pending: Option<SessionKey>,
     /// If set, `Shift-X` has been pressed once on this row. A
     /// second press executes the kill. Any other key clears.
     kill_pending: Option<SessionKey>,
@@ -186,6 +191,7 @@ impl Sidebar {
             mailbox: Mailbox::Inbox,
             kill_pending: None,
             merge_pending: None,
+            long_snooze_pending: None,
             agent_shortcuts,
             running_terminals: HashMap::new(),
             attention: pilot_config::AttentionConfig::default(),
@@ -1002,6 +1008,15 @@ impl Sidebar {
         if self.merge_pending.is_some() && !is_shift_m {
             self.merge_pending = None;
         }
+        // Same latch for Shift-Z (1-year snooze) — one accidental
+        // press used to mute a workspace for a year with no undo
+        // affordance. The first press arms `long_snooze_pending`,
+        // shows a `[snooze 1y?]` indicator; the second confirms.
+        let is_shift_z =
+            key.code == KeyCode::Char('Z') && key.modifiers.contains(KeyModifiers::SHIFT);
+        if self.long_snooze_pending.is_some() && !is_shift_z {
+            self.long_snooze_pending = None;
+        }
 
         match (key.code, key.modifiers) {
             // ── Navigation ────────────────────────────────────────────
@@ -1138,12 +1153,21 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
             (KeyCode::Char('Z'), m) if m.contains(KeyModifiers::SHIFT) => {
-                if let Some(session_key) = self.selected_session_key().cloned() {
+                // Two-press confirm — 1-year snooze is effectively
+                // "hide forever" and there's no obvious undo from
+                // the inbox view. First press arms; second fires.
+                let Some(session_key) = self.selected_session_key().cloned() else {
+                    return PaneOutcome::Consumed;
+                };
+                if self.long_snooze_pending.as_ref() == Some(&session_key) {
+                    self.long_snooze_pending = None;
                     let now = chrono::Utc::now();
                     cmds.push(Command::Snooze {
                         session_key,
                         until: now + chrono::Duration::days(365),
                     });
+                } else {
+                    self.long_snooze_pending = Some(session_key);
                 }
                 PaneOutcome::Consumed
             }
@@ -1479,6 +1503,8 @@ impl Sidebar {
                         " [kill?]"
                     } else if self.merge_pending.as_ref() == Some(key) {
                         " [merge?]"
+                    } else if self.long_snooze_pending.as_ref() == Some(key) {
+                        " [snooze 1y?]"
                     } else {
                         ""
                     };
