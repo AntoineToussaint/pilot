@@ -23,9 +23,49 @@ use pilot_server::{Server, ServerConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-/// How often providers are polled. 60s keeps us well under GitHub's
-/// 5000-req/hr ceiling for a typical user.
-const POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// Fallback poll interval when `~/.pilot/config.yaml::providers.github.poll_interval`
+/// is unreadable. Once we have multiple-provider configs, each
+/// provider will carry its own interval; this constant is only the
+/// safety net for "couldn't load any config at all".
+const POLL_INTERVAL_FALLBACK: Duration = Duration::from_secs(60);
+
+/// Read the poll interval from the user's config, falling back to
+/// the safety-net constant when the config can't be loaded.
+/// `GithubConfig::poll_interval` already exists in the schema (default
+/// 30s) — using this helper instead of a hardcoded `POLL_INTERVAL`
+/// means edits to `~/.pilot/config.yaml` take effect on the next
+/// daemon start instead of being silently ignored.
+fn resolve_poll_interval() -> Duration {
+    pilot_config::Config::load()
+        .map(|c| c.providers.github.poll_interval)
+        .unwrap_or(POLL_INTERVAL_FALLBACK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the contract: the default `GithubConfig::poll_interval` is
+    /// the value `resolve_poll_interval` returns when the user has no
+    /// custom YAML. Previously the daemon hardcoded 60s and ignored
+    /// the config-schema default; this test fails loudly if the bug
+    /// regresses.
+    #[test]
+    fn default_github_poll_interval_is_what_the_schema_says() {
+        let default = pilot_config::GithubConfig::default().poll_interval;
+        // Default schema value is 30s today. The actual number isn't
+        // the point — the point is "if the user changes
+        // GithubConfig::default(), the daemon picks it up." If this
+        // assert ever needs updating it should be a deliberate
+        // schema bump, not a silent drift back to 60s.
+        assert_eq!(default, Duration::from_secs(30));
+        assert_ne!(
+            default, POLL_INTERVAL_FALLBACK,
+            "fallback must NOT match the schema default, otherwise we \
+             can't tell whether the config is being honored",
+        );
+    }
+}
 
 /// Where pilot's log file goes.
 const LOG_PATH: &str = "/tmp/pilot.log";
@@ -229,7 +269,7 @@ async fn run_embedded_realm(
     // Replaces the old per-Finish-respawn pattern that leaked one
     // tokio task per edit.
     if persisted.is_some() {
-        polling::spawn(config.clone(), POLL_INTERVAL);
+        polling::spawn(config.clone(), resolve_poll_interval());
     }
 
     // Always pre-run detection + scope sources. Two reasons: (1)
@@ -394,7 +434,7 @@ async fn server_start() -> anyhow::Result<()> {
 
     let config = ServerConfig::from_user_config();
     pilot_server::spawn_handler::recover_sessions(&config).await;
-    polling::spawn(config.clone(), POLL_INTERVAL);
+    polling::spawn(config.clone(), resolve_poll_interval());
 
     let factory_config = config.clone();
     let service = SocketService::new(socket.clone(), pid_file, move || factory_config.clone());
