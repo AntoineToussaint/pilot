@@ -467,6 +467,12 @@ pub struct DisplayConfig {
     pub hide_approved_by_me: bool,
     /// Treat assignees as reviewers (some teams use assignees for review tracking).
     pub assignee_is_reviewer: bool,
+    /// Surface merged + closed PRs in the main Inbox alongside open
+    /// work. Default `false` keeps them in the Inactive mailbox so
+    /// the inbox stays focused on actionable items. Toggle on when
+    /// you want to track "everything I touched recently" without
+    /// switching mailboxes.
+    pub show_inactive_in_inbox: bool,
 }
 
 impl Default for DisplayConfig {
@@ -477,6 +483,7 @@ impl Default for DisplayConfig {
             activity_days: 7,
             hide_approved_by_me: true,
             assignee_is_reviewer: false,
+            show_inactive_in_inbox: false,
         }
     }
 }

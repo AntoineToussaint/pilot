@@ -154,6 +154,11 @@ pub struct Sidebar {
     /// Agent the `f` (fix) shortcut spawns. Defaults to `claude`; the
     /// AppRoot can override from YAML (`setup.default_agent`).
     default_agent: String,
+    /// Surface merged + closed tasks in the Inbox view. Off by default
+    /// — the Inbox stays focused on actionable work and the Inactive
+    /// mailbox owns the history. Wired from
+    /// `~/.pilot/config.yaml::display.show_inactive_in_inbox`.
+    show_inactive_in_inbox: bool,
 }
 
 impl Sidebar {
@@ -180,7 +185,20 @@ impl Sidebar {
             attention: pilot_config::AttentionConfig::default(),
             subscribed_repos: BTreeSet::new(),
             default_agent: "claude".to_string(),
+            show_inactive_in_inbox: false,
         }
+    }
+
+    /// Toggle whether merged + closed PRs surface in the Inbox view.
+    /// Wired from `DisplayConfig::show_inactive_in_inbox`; idempotent
+    /// — calling with the current value is a no-op so a YAML hot-
+    /// reload (future) won't churn the cursor.
+    pub fn set_show_inactive_in_inbox(&mut self, on: bool) {
+        if self.show_inactive_in_inbox == on {
+            return;
+        }
+        self.show_inactive_in_inbox = on;
+        self.recompute_visible();
     }
 
     /// Override the agent the `f` (fix) shortcut spawns. Defaults to
@@ -226,6 +244,7 @@ impl Sidebar {
         collapsed_repos: BTreeSet<String>,
         agent_shortcuts: HashMap<char, String>,
         default_agent: Option<String>,
+        display: &pilot_config::DisplayConfig,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
@@ -235,6 +254,7 @@ impl Sidebar {
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
+        self.set_show_inactive_in_inbox(display.show_inactive_in_inbox);
     }
 
     /// Override the default c→claude / C→codex mapping. Keys are
@@ -689,8 +709,16 @@ impl Sidebar {
                 Mailbox::Inbox => {
                     // Actionable: not snoozed AND primary task is
                     // alive (open/draft/in-progress/in-review).
+                    // When `show_inactive_in_inbox` is on the
+                    // alive-only gate is dropped — Merged/Closed
+                    // rows surface here too, useful for "what did I
+                    // touch this week" workflows that don't want to
+                    // hop between mailboxes.
                     if w.is_snoozed(now) {
                         return false;
+                    }
+                    if self.show_inactive_in_inbox {
+                        return true;
                     }
                     match w.primary_task() {
                         Some(t) => !matches!(
@@ -1749,14 +1777,6 @@ fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig)
 
 fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
     let theme = crate::theme::current();
-    // Merged/closed tasks have nothing actionable — skip the pill so
-    // historical rows in the Inactive mailbox stay quiet.
-    if matches!(
-        task.state,
-        pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
-    ) {
-        return None;
-    }
     // Black-on-color reads cleaner than white-on-color for the same
     // pill styles V1 used. Indexed palette colors render as the
     // terminal's "bright" red/yellow on most setups — punchy without
@@ -1777,6 +1797,30 @@ fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
         .bg(Color::Indexed(40)) // bright green, terminal-bright
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
+    // Inactive states win over CI: once a PR is merged or closed
+    // its CI history isn't actionable. Showing CLOSED beats showing
+    // a stale CI FAIL the user can do nothing about.
+    match task.state {
+        pilot_core::TaskState::Merged => {
+            return Some(StatusPill {
+                label: " MERGED   ",
+                style: Style::default()
+                    .bg(theme.hover)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            });
+        }
+        pilot_core::TaskState::Closed => {
+            return Some(StatusPill {
+                label: " CLOSED   ",
+                style: Style::default()
+                    .bg(theme.error)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            });
+        }
+        _ => {}
+    }
     if task.has_conflicts {
         return Some(StatusPill {
             label: " CONFLICT ",
@@ -1796,6 +1840,22 @@ fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
                 style: pill_amber,
             });
         }
+        _ => {}
+    }
+    // Draft sits between CI failure (acutely actionable) and CI
+    // running / success (background state). A draft PR with green
+    // CI still wants the DRAFT badge so the user remembers it isn't
+    // ready for review.
+    if matches!(task.state, pilot_core::TaskState::Draft) {
+        return Some(StatusPill {
+            label: " DRAFT    ",
+            style: Style::default()
+                .bg(theme.chrome)
+                .fg(theme.text_strong)
+                .add_modifier(Modifier::BOLD),
+        });
+    }
+    match task.ci {
         pilot_core::CiStatus::Pending | pilot_core::CiStatus::Running => {
             return Some(StatusPill {
                 label: " CI RUN   ",
@@ -1985,14 +2045,14 @@ mod status_pill_tests {
     /// column lines up across rows. Regression-guard the width.
     #[test]
     fn every_pill_label_is_ten_cells_wide() {
-        let cases: &[CiStatus] = &[
+        let ci_cases: &[CiStatus] = &[
             CiStatus::Failure,
             CiStatus::Mixed,
             CiStatus::Running,
             CiStatus::Pending,
             CiStatus::Success,
         ];
-        for ci in cases {
+        for ci in ci_cases {
             let mut t = base_task();
             t.ci = *ci;
             let pill = status_pill(&t).expect("CI status should produce a pill");
@@ -2002,6 +2062,19 @@ mod status_pill_tests {
                 "label {:?} for {:?} is not 10 cells wide",
                 pill.label,
                 ci,
+            );
+        }
+        let state_cases: &[TaskState] = &[TaskState::Draft, TaskState::Merged, TaskState::Closed];
+        for state in state_cases {
+            let mut t = base_task();
+            t.state = *state;
+            let pill = status_pill(&t).expect("state should produce a pill");
+            assert_eq!(
+                pill.label.chars().count(),
+                10,
+                "label {:?} for {:?} is not 10 cells wide",
+                pill.label,
+                state,
             );
         }
     }
@@ -2051,19 +2124,42 @@ mod status_pill_tests {
     }
 
     #[test]
-    fn merged_or_closed_renders_no_pill() {
-        // Inactive mailbox rows stay quiet — even if the CI status
-        // would otherwise produce a pill.
-        for state in [TaskState::Merged, TaskState::Closed] {
-            let mut t = base_task();
-            t.state = state;
-            t.ci = CiStatus::Success;
-            assert!(
-                status_pill(&t).is_none(),
-                "{:?} must not produce a pill",
-                state,
-            );
-        }
+    fn merged_renders_merged_pill_overriding_ci() {
+        // A closed PR's CI history is frozen; the user can't act on
+        // it. Show the inactive-state badge instead of a stale
+        // CI FAIL.
+        let mut t = base_task();
+        t.state = TaskState::Merged;
+        t.ci = CiStatus::Failure;
+        assert_eq!(status_pill(&t).unwrap().label, " MERGED   ");
+    }
+
+    #[test]
+    fn closed_renders_closed_pill_overriding_ci() {
+        let mut t = base_task();
+        t.state = TaskState::Closed;
+        t.ci = CiStatus::Failure;
+        assert_eq!(status_pill(&t).unwrap().label, " CLOSED   ");
+    }
+
+    #[test]
+    fn draft_renders_draft_pill_when_ci_is_quiet() {
+        // CI green or running, state Draft → DRAFT wins so the user
+        // remembers the PR isn't ready for review.
+        let mut t = base_task();
+        t.state = TaskState::Draft;
+        t.ci = CiStatus::Success;
+        assert_eq!(status_pill(&t).unwrap().label, " DRAFT    ");
+    }
+
+    #[test]
+    fn ci_failure_beats_draft() {
+        // A draft with red CI still needs the user's attention more
+        // urgently than the draft state itself — CI FAIL wins.
+        let mut t = base_task();
+        t.state = TaskState::Draft;
+        t.ci = CiStatus::Failure;
+        assert_eq!(status_pill(&t).unwrap().label, " CI FAIL  ");
     }
 
     #[test]

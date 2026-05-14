@@ -119,9 +119,15 @@ impl Sidebar {
         collapsed_repos: std::collections::BTreeSet<String>,
         agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
+        display: &pilot_config::DisplayConfig,
     ) {
-        self.inner
-            .apply_config(attention, collapsed_repos, agent_shortcuts, default_agent);
+        self.inner.apply_config(
+            attention,
+            collapsed_repos,
+            agent_shortcuts,
+            default_agent,
+            display,
+        );
     }
 
     /// Replace the set of subscribed-repo names that should show up

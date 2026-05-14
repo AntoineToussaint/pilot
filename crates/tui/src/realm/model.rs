@@ -417,14 +417,20 @@ impl<T: TerminalAdapter> Model<T> {
         collapsed_repos: std::collections::BTreeSet<String>,
         agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
+        display: &pilot_config::DisplayConfig,
     ) {
         // Both panes consume the configured agent: sidebar `f` for
         // CI-fail, right pane `f` for selected comments.
         if let Some(agent) = default_agent.clone().filter(|s| !s.is_empty()) {
             self.right.set_default_agent(agent);
         }
-        self.sidebar
-            .apply_inner_config(attention, collapsed_repos, agent_shortcuts, default_agent);
+        self.sidebar.apply_inner_config(
+            attention,
+            collapsed_repos,
+            agent_shortcuts,
+            default_agent,
+            display,
+        );
     }
 
     /// Push the GitHub-style scope ids (e.g. `github:owner/repo`) the

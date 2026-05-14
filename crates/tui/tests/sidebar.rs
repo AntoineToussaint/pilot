@@ -996,6 +996,88 @@ fn work_target_skips_passing_pr_with_no_action() {
 }
 
 #[test]
+fn merged_closed_hidden_from_inbox_by_default() {
+    // Default: Inbox is actionable-only. Merged + Closed go to the
+    // Inactive mailbox, not Inbox.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let mut merged = make_task("o/r", "o/r#1", now);
+    merged.state = pilot_core::TaskState::Merged;
+    let mut closed = make_task("o/r", "o/r#2", now);
+    closed.state = pilot_core::TaskState::Closed;
+    let open = make_task("o/r", "o/r#3", now);
+
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(merged, now),
+            Workspace::from_task(closed, now),
+            Workspace::from_task(open, now),
+        ],
+        terminals: vec![],
+    });
+
+    let visible_keys: Vec<String> = s
+        .visible_rows()
+        .iter()
+        .filter_map(|r| match r {
+            VisibleRow::Workspace(k) => Some(k.as_str().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        visible_keys.len(),
+        1,
+        "only the open PR should be in the default Inbox: got {visible_keys:?}",
+    );
+}
+
+#[test]
+fn show_inactive_in_inbox_surfaces_merged_and_closed() {
+    // Toggle on → merged + closed appear in the Inbox alongside open
+    // work. Verifies both the config plumbing and the filter switch.
+    use std::collections::{BTreeSet, HashMap};
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    let display = pilot_config::DisplayConfig {
+        show_inactive_in_inbox: true,
+        ..pilot_config::DisplayConfig::default()
+    };
+    s.apply_config(
+        pilot_config::AttentionConfig::default(),
+        BTreeSet::new(),
+        HashMap::new(),
+        None,
+        &display,
+    );
+
+    let now = Utc::now();
+    let mut merged = make_task("o/r", "o/r#1", now);
+    merged.state = pilot_core::TaskState::Merged;
+    let mut closed = make_task("o/r", "o/r#2", now);
+    closed.state = pilot_core::TaskState::Closed;
+    let open = make_task("o/r", "o/r#3", now);
+
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(merged, now),
+            Workspace::from_task(closed, now),
+            Workspace::from_task(open, now),
+        ],
+        terminals: vec![],
+    });
+
+    let visible_count = s
+        .visible_rows()
+        .iter()
+        .filter(|r| matches!(r, VisibleRow::Workspace(_)))
+        .count();
+    assert_eq!(
+        visible_count, 3,
+        "show_inactive_in_inbox=true must surface all three rows in Inbox",
+    );
+}
+
+#[test]
 fn work_key_emits_spawn_command_on_issue() {
     // End-to-end: pressing `w` on an issue row emits a Spawn(Agent)
     // command with the implement-issue prompt baked in.
