@@ -125,7 +125,10 @@ impl Terminals {
     /// Scroll the active terminal's viewport by `delta` rows. Negative
     /// = into scrollback; positive = back toward the live content.
     /// Driven from the orchestrator's mouse-wheel handler.
-    pub fn scroll_active(&mut self, delta: isize) -> bool {
+    pub fn scroll_active(
+        &mut self,
+        delta: isize,
+    ) -> crate::components::terminal_stack::ScrollOutcome {
         self.inner.scroll_active(delta)
     }
 

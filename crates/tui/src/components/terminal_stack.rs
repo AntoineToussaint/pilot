@@ -53,6 +53,25 @@ const DEFAULT_ROWS: u16 = 32;
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// Outcome of a scroll attempt on the focused terminal. Used by the
+/// orchestrator's mouse-wheel handler to surface why a scroll might
+/// have looked like nothing happened — without this, "no scrollback
+/// content yet" was indistinguishable from a broken Delta path.
+#[derive(Debug, Clone, Copy)]
+pub enum ScrollOutcome {
+    /// No focused terminal (Tabs mode with no active tab, or an
+    /// empty session).
+    NoTerminal,
+    /// `total <= len`: the terminal hasn't produced enough output to
+    /// fill the active area + spill into scrollback yet. `alternate`
+    /// flags the special case where the inner program is on the
+    /// alternate screen (claude/vim/less) — by design those have no
+    /// scrollback, so it's the *program's* responsibility to paginate.
+    NoScrollback { alternate: bool },
+    /// Scroll succeeded. Carries the post-state for the footer notice.
+    Moved { offset: u64, total: u64, len: u64 },
+}
+
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
@@ -606,28 +625,20 @@ impl TerminalStack {
         }
     }
 
-    /// Scroll the focused terminal by `delta` rows. Returns `true`
-    /// iff the scroll actually fired (focused terminal exists +
-    /// delta non-zero). The bool lets the mouse-handler surface a
-    /// "scroll ignored, no terminal here" notice instead of the
-    /// event silently disappearing.
-    ///
-    /// Emits a `tracing::info!` with the pre/post scrollbar state +
-    /// active screen mode — the user reported scroll events arriving
-    /// + `scroll_viewport` returning successfully but no visible
-    /// change. The log lets us see whether (a) the viewport offset
-    /// changes at all (libghostty problem), (b) the active screen
-    /// is ALTERNATE (no scrollback by design), or (c) the offset
-    /// changes but rendering still shows the live tail.
-    pub fn scroll_active(&mut self, delta: isize) -> bool {
+    /// Scroll the focused terminal by `delta` rows. Returns a
+    /// `ScrollOutcome` describing what actually happened so the
+    /// caller can surface a clear notice — pilot's scroll bug
+    /// turned out to be "total == len, no scrollback to scroll
+    /// into" silently looking identical to "delta is broken."
+    pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
         if delta == 0 {
-            return false;
+            return ScrollOutcome::NoTerminal;
         }
         let Some(id) = self.focused_terminal_id() else {
-            return false;
+            return ScrollOutcome::NoTerminal;
         };
         let Some(slot) = self.terminals.get_mut(&id) else {
-            return false;
+            return ScrollOutcome::NoTerminal;
         };
         let screen = slot.vt.terminal.active_screen().ok();
         let before = slot.vt.terminal.scrollbar().ok();
@@ -645,7 +656,16 @@ impl TerminalStack {
             after_offset = after.as_ref().map(|s| s.offset),
             "scroll_active: viewport state",
         );
-        true
+        let alternate = matches!(screen, Some(vt::screen::Screen::Alternate));
+        match after {
+            Some(s) if s.total <= s.len => ScrollOutcome::NoScrollback { alternate },
+            Some(s) => ScrollOutcome::Moved {
+                offset: s.offset,
+                total: s.total,
+                len: s.len,
+            },
+            None => ScrollOutcome::NoTerminal,
+        }
     }
 
     pub fn cycle_tab_forward(&mut self) {

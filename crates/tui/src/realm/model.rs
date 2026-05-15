@@ -1918,35 +1918,36 @@ impl<T: TerminalAdapter> Model<T> {
                 if !in_terminal {
                     return;
                 }
-                const STEP: isize = 3;
+                // 5 rows per notch — smooth but not sluggish.
+                const STEP: isize = 5;
                 let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
                     -STEP
                 } else {
                     STEP
                 };
-                let fired = self.terminals.scroll_active(delta);
+                use crate::components::terminal_stack::ScrollOutcome;
+                let outcome = self.terminals.scroll_active(delta);
                 tracing::debug!(
                     delta = delta,
-                    fired = fired,
+                    outcome = ?outcome,
                     "terminal_stack.scroll_active",
                 );
-                if !fired {
-                    self.status.notice = Some(Notice::new(
-                        format!(
-                            "scroll {dir} ignored: no focused terminal (Tabs mode = no active tab, or empty)",
-                        ),
-                        NoticeSeverity::Info,
-                    ));
-                } else if let Some(info) = self.terminals.scrollbar_summary() {
-                    // Surface viewport state in the footer so the
-                    // user can see WHY scroll might look like a
-                    // no-op (e.g. `screen=ALTERNATE total=0` means
-                    // alt-screen has no scrollback by design).
-                    self.status.notice = Some(Notice::new(
-                        format!("scroll {dir}: {info}"),
-                        NoticeSeverity::Info,
-                    ));
-                }
+                let notice = match outcome {
+                    ScrollOutcome::NoTerminal => format!(
+                        "scroll {dir} ignored: no focused terminal",
+                    ),
+                    ScrollOutcome::NoScrollback { alternate: true } => format!(
+                        "scroll {dir}: alternate screen has no scrollback (use the program's own scrolling)",
+                    ),
+                    ScrollOutcome::NoScrollback { alternate: false } => format!(
+                        "scroll {dir}: no scrollback yet — produce more output first",
+                    ),
+                    ScrollOutcome::Moved { offset, total, len } => format!(
+                        "scroll {dir}: offset={offset} / {} (window {len})",
+                        total.saturating_sub(len),
+                    ),
+                };
+                self.status.notice = Some(Notice::new(notice, NoticeSeverity::Info));
             }
             _ => {}
         }
