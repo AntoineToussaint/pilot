@@ -1826,12 +1826,20 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     // Clicking inside the sidebar should also move the
                     // cursor to whatever row was clicked (workspace
-                    // selection). Right + Terminals don't have row-
-                    // level selection today.
+                    // selection).
                     if focus == PaneFocus::Sidebar
                         && self.sidebar.click_to_select(sidebar_rect, m.row)
                     {
                         self.sync_panes();
+                        self.redraw = true;
+                    }
+                    // Right (Activity) pane clicks: header rows toggle
+                    // their respective sections, card clicks move the
+                    // cursor + toggle expand on that card. Hit-test
+                    // data was populated during the last render.
+                    if focus == PaneFocus::Right
+                        && self.right.handle_mouse_click(m.column, m.row)
+                    {
                         self.redraw = true;
                     }
                 }

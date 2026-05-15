@@ -99,6 +99,29 @@ pub struct RightPane {
     /// Resolved auto-mark-read timer, sourced from
     /// `ui.auto_mark_delay` (default 1 s).
     auto_mark_delay: std::time::Duration,
+    /// Hit-test rectangles cached during render so a click in the
+    /// pane can be mapped back to (activity_index | section_header)
+    /// without a re-layout. Refreshed on every render.
+    click_hits: ClickHits,
+}
+
+/// Click-target geometry captured during render. Three regions are
+/// tracked: the Description section's toggle row, the Activity
+/// section's toggle row, and each visible activity card. The
+/// orchestrator's mouse handler reads these and dispatches; no
+/// re-layout / re-measure happens in the click path.
+#[derive(Debug, Default)]
+struct ClickHits {
+    /// Row containing the `▶ Description` / `▼ Description` header,
+    /// or `None` when the section isn't being rendered (no body).
+    body_header_row: Option<u16>,
+    /// Row containing the `▸ Activity` / `▾ Activity` header.
+    activity_header_row: Option<u16>,
+    /// One `(activity_index, row_range)` entry per visible card.
+    /// `row_range` is inclusive on both ends — header through last
+    /// body line of the card. Empty when the section is collapsed
+    /// or there's no activity.
+    activity_cards: Vec<(usize, std::ops::RangeInclusive<u16>)>,
 }
 
 // `MARK_READ_DELAY` retired — value lives on `self.auto_mark_delay`
@@ -147,6 +170,7 @@ impl RightPane {
             task_body_collapsed: true,
             task_body_max_rows: pilot_config::UiDefaults::default().task_body_max_rows,
             auto_mark_delay: pilot_config::UiDefaults::default().auto_mark_delay,
+            click_hits: ClickHits::default(),
         }
     }
 
@@ -330,6 +354,46 @@ impl RightPane {
         self.auto_collapse_for_workspace();
     }
 
+    /// Map a mouse click to a pane action. Returns `true` when the
+    /// click hit a known target and the caller should redraw. The
+    /// orchestrator wires this from its mouse handler so:
+    ///
+    /// - clicking the `▶/▼ Description` row toggles the body
+    /// - clicking the `▸/▾ Activity` row toggles the activity section
+    /// - clicking an activity card moves the cursor onto it AND
+    ///   toggles its expand state (the natural "open this one" gesture)
+    ///
+    /// All targets are populated during render via `click_hits`; this
+    /// function does pure lookup, no re-layout.
+    pub fn handle_mouse_click(&mut self, _col: u16, row: u16) -> bool {
+        if Some(row) == self.click_hits.body_header_row {
+            self.task_body_collapsed = !self.task_body_collapsed;
+            return true;
+        }
+        if Some(row) == self.click_hits.activity_header_row {
+            self.activity_collapsed = !self.activity_collapsed;
+            self.activity_collapse_user_set = true;
+            return true;
+        }
+        if let Some((idx, _)) = self
+            .click_hits
+            .activity_cards
+            .iter()
+            .find(|(_, range)| range.contains(&row))
+        {
+            let target = *idx;
+            self.comment_cursor = target;
+            if self.expanded_activities.contains(&target) {
+                self.expanded_activities.remove(&target);
+            } else {
+                self.expanded_activities.insert(target);
+            }
+            self.rearm_mark_timer(true);
+            return true;
+        }
+        false
+    }
+
     pub fn selected_workspace(&self) -> Option<&Workspace> {
         self.workspace.as_ref()
     }
@@ -455,6 +519,16 @@ impl RightPane {
     fn render_activity(&mut self, area: Rect, frame: &mut Frame, focused: bool) -> u16 {
         let theme = crate::theme::current();
         let title_color = if focused { theme.accent } else { theme.chrome };
+        self.click_hits.activity_header_row = if area.height > 0 {
+            Some(area.y)
+        } else {
+            None
+        };
+        // Cards list stays empty while collapsed; the click handler
+        // checks the header row independently.
+        if self.activity_collapsed {
+            self.click_hits.activity_cards.clear();
+        }
 
         let total = self
             .workspace
@@ -559,6 +633,10 @@ impl RightPane {
         let body_width = inner.width.saturating_sub(BODY_INDENT);
         let mut cards: Vec<Line<'static>> = Vec::new();
         let mut rendered_activities: usize = 0;
+        // Track the y-row each card occupies so a mouse click can map
+        // back to its index. Each iteration records the row range
+        // BEFORE pushing the next batch of lines.
+        self.click_hits.activity_cards.clear();
         for (i, activity) in workspace
             .activity
             .iter()
@@ -569,6 +647,7 @@ impl RightPane {
                 break;
             }
             rendered_activities += 1;
+            let card_start = cards.len() as u16;
 
             let is_cursor = i == self.comment_cursor;
             let is_unread = workspace.is_activity_unread(i);
@@ -679,6 +758,17 @@ impl RightPane {
                 spans.push(Span::raw(" ".repeat((BODY_INDENT - 2) as usize)));
                 spans.extend(line.spans);
                 cards.push(Line::from(spans));
+            }
+            // Record the row span this card occupies (header through
+            // last body line, inclusive). Visible-area coordinates so
+            // the orchestrator's mouse handler can match directly.
+            let card_end = cards.len().saturating_sub(1) as u16;
+            let abs_start = inner.y.saturating_add(card_start);
+            let abs_end = inner.y.saturating_add(card_end);
+            if abs_end < inner.y.saturating_add(inner.height) {
+                self.click_hits
+                    .activity_cards
+                    .push((i, abs_start..=abs_end));
             }
         }
 
@@ -1125,11 +1215,23 @@ impl RightPane {
     /// layout solver gave us (so the activity feed always wins when
     /// the pane is short). Issues benefit most (the body IS the
     /// work brief); PR descriptions get the same treatment.
-    fn render_task_body(&self, area: Rect, frame: &mut Frame) {
+    fn render_task_body(&mut self, area: Rect, frame: &mut Frame) {
         let theme = crate::theme::current();
-        let Some(body) = self.task_body_str() else {
-            return;
+        let body: String = match self.task_body_str() {
+            Some(s) => s.to_string(),
+            None => {
+                self.click_hits.body_header_row = None;
+                return;
+            }
         };
+        // First row of the section is the toggle header — clicks
+        // here flip task_body_collapsed.
+        self.click_hits.body_header_row = if area.height > 0 {
+            Some(area.y)
+        } else {
+            None
+        };
+        let body = body.as_str();
         let glyph = if self.task_body_collapsed { "▶" } else { "▼" };
         let header = Line::from(vec![
             Span::styled(
@@ -1257,6 +1359,54 @@ mod should_arm_mark_timer_tests {
         // crash or spuriously arm.
         let w = ws_with_activity(2, 0);
         assert!(!should_arm_mark_timer(true, Some(&w), 100));
+    }
+}
+
+#[cfg(test)]
+mod click_dispatch_tests {
+    use super::{RightPane, PaneId};
+
+    /// Smoke test: with no rendered hits cached, a click is a no-op.
+    /// This is the safety net for "user clicks before first render"
+    /// or "click while workspace is None."
+    #[test]
+    fn click_with_no_hits_is_noop() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        assert!(!pane.handle_mouse_click(0, 0));
+    }
+
+    #[test]
+    fn body_header_row_click_toggles_collapse() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.click_hits.body_header_row = Some(5);
+        let before = pane.task_body_collapsed;
+        assert!(pane.handle_mouse_click(0, 5));
+        assert_ne!(pane.task_body_collapsed, before);
+    }
+
+    #[test]
+    fn activity_header_row_click_toggles_section() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.click_hits.activity_header_row = Some(10);
+        let before = pane.activity_collapsed;
+        assert!(pane.handle_mouse_click(0, 10));
+        assert_ne!(pane.activity_collapsed, before);
+        // Marks the user override so the auto-collapse-on-empty
+        // rule doesn't fight the user back the other way.
+        assert!(pane.activity_collapse_user_set);
+    }
+
+    #[test]
+    fn card_click_moves_cursor_and_toggles_expand() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        // Card index 3 occupies rows 12..=14.
+        pane.click_hits.activity_cards.push((3, 12..=14));
+        assert!(pane.handle_mouse_click(0, 13));
+        assert_eq!(pane.comment_cursor, 3);
+        assert!(pane.expanded_activities.contains(&3));
+        // Second click on the same card collapses it.
+        assert!(pane.handle_mouse_click(0, 13));
+        assert!(!pane.expanded_activities.contains(&3));
     }
 }
 

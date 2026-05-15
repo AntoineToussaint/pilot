@@ -112,6 +112,13 @@ impl Right {
     pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
         self.inner.detachable()
     }
+
+    /// Forward a mouse click to the inner pane. Returns `true` when
+    /// the click landed on a known target (section header or activity
+    /// card) and the caller should redraw.
+    pub fn handle_mouse_click(&mut self, col: u16, row: u16) -> bool {
+        self.inner.handle_mouse_click(col, row)
+    }
 }
 
 impl Component for Right {
