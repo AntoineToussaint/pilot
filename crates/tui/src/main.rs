@@ -27,14 +27,19 @@ use std::time::Duration;
 /// is unreadable. Once we have multiple-provider configs, each
 /// provider will carry its own interval; this constant is only the
 /// safety net for "couldn't load any config at all".
-const POLL_INTERVAL_FALLBACK: Duration = Duration::from_secs(60);
+///
+/// Deliberately DIFFERENT from `GithubConfig::default().poll_interval`
+/// so a quick look at the log line "polling every Ns" tells you
+/// whether the user's YAML was loaded or we fell through to this.
+const POLL_INTERVAL_FALLBACK: Duration = Duration::from_secs(90);
 
 /// Read the poll interval from the user's config, falling back to
 /// the safety-net constant when the config can't be loaded.
-/// `GithubConfig::poll_interval` already exists in the schema (default
-/// 30s) — using this helper instead of a hardcoded `POLL_INTERVAL`
-/// means edits to `~/.pilot/config.yaml` take effect on the next
-/// daemon start instead of being silently ignored.
+/// `GithubConfig::poll_interval` already exists in the schema
+/// (default 60s) — using this helper instead of a hardcoded
+/// `POLL_INTERVAL` means edits to `~/.pilot/config.yaml` take
+/// effect on the next daemon start instead of being silently
+/// ignored.
 fn resolve_poll_interval() -> Duration {
     pilot_config::Config::load()
         .map(|c| c.providers.github.poll_interval)
@@ -53,12 +58,13 @@ mod tests {
     #[test]
     fn default_github_poll_interval_is_what_the_schema_says() {
         let default = pilot_config::GithubConfig::default().poll_interval;
-        // Default schema value is 30s today. The actual number isn't
-        // the point — the point is "if the user changes
-        // GithubConfig::default(), the daemon picks it up." If this
-        // assert ever needs updating it should be a deliberate
-        // schema bump, not a silent drift back to 60s.
-        assert_eq!(default, Duration::from_secs(30));
+        // Default schema value is 60s — picked to fit a 200-PR
+        // inbox inside GitHub's 5000-points/hour PAT budget after
+        // the GraphQL connection-size trim (see SEARCH_QUERY in
+        // gh-provider). If this assert ever needs updating it
+        // should be a deliberate schema bump tied to a query-cost
+        // change, not a silent drift.
+        assert_eq!(default, Duration::from_secs(60));
         assert_ne!(
             default, POLL_INTERVAL_FALLBACK,
             "fallback must NOT match the schema default, otherwise we \

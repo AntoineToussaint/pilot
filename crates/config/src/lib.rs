@@ -686,7 +686,13 @@ pub struct GithubConfig {
 impl Default for GithubConfig {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(30),
+            // 60s = 60 polls/hour. With the trimmed GraphQL query
+            // (~125 sub-objects/PR, see `SEARCH_QUERY` doc-comment),
+            // this fits comfortably inside GitHub's 5000-points/hour
+            // PAT budget even for a 200-PR inbox. The previous 30s
+            // default doubled the cost for no real-time benefit —
+            // PR/issue state doesn't change that fast.
+            poll_interval: Duration::from_secs(60),
             filters: vec![],
             detect_needs_reply: true,
         }
