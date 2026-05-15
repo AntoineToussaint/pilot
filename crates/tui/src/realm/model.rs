@@ -366,6 +366,18 @@ impl Model<CrosstermTerminalAdapter> {
             std::io::stdout(),
             crossterm::event::EnableMouseCapture,
         );
+        // Bracketed paste: the host terminal wraps Cmd-V'd text in
+        // `ESC [ 200 ~ … ESC [ 201 ~` so we can tell "user pasted a
+        // chunk" from "user typed N characters very fast." Without
+        // it, every paste hits Claude / shell as a stream of
+        // keystrokes — autocomplete fires mid-paste, the input
+        // jumps around, etc. The `Event::Paste(text)` handler
+        // below forwards the wrapped sequence to the PTY so the
+        // inner program sees it as a single paste.
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::EnableBracketedPaste,
+        );
         // Ask the host terminal to disambiguate modified Enter /
         // Tab / Backspace etc. via the kitty keyboard protocol.
         // Without this, most terminals collapse Shift-Enter into
@@ -806,6 +818,14 @@ impl<T: TerminalAdapter> Model<T> {
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::event::DisableMouseCapture,
+        );
+        // Drop the bracketed-paste enable we set in `new`. Without
+        // this the host terminal keeps wrapping pastes in
+        // `ESC[200~…ESC[201~` even after pilot exits — every
+        // subsequent shell paste shows the literal markers.
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::DisableBracketedPaste,
         );
         // Drop the kitty keyboard protocol bits we pushed in `new`.
         // Skipping this would leak the request into the user's host
@@ -1665,6 +1685,42 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Mouse routing:
+    /// Handle a bracketed-paste event from the host terminal. The
+    /// host wraps the pasted text in `ESC[200~ … ESC[201~` and
+    /// crossterm hands us the inner string. We forward the same
+    /// wrapped sequence to the focused terminal's PTY so the
+    /// inner program (Claude, shell, vim) sees a single paste
+    /// instead of a stream of keystrokes — important because
+    /// shells trigger autocomplete on individual keys, Claude
+    /// treats fast keystrokes as paste anyway (different bracket
+    /// markers), etc.
+    ///
+    /// Only fires when the terminal pane is focused. Other panes
+    /// don't have a useful paste-target today (reply textarea has
+    /// its own keyboard path through tuirealm).
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.focus != PaneFocus::Terminals {
+            return;
+        }
+        let Some(terminal_id) = self.terminals.active_terminal_id() else {
+            return;
+        };
+        // ESC[200~ <text> ESC[201~ — the standard bracketed-paste
+        // wire format. Inner programs that opted into bracketed
+        // paste mode (Claude does, most modern shells do) see this
+        // as one atomic chunk and skip their per-keystroke
+        // autocomplete / autoindent reactions.
+        let mut bytes = Vec::with_capacity(text.len() + 12);
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        self.send_cmd(IpcCommand::Write {
+            terminal_id,
+            bytes,
+        });
+        self.redraw = true;
+    }
+
     /// - Down on a splitter line → start drag (resize panes on
     ///   subsequent Drag events until Up).
     /// - Down anywhere else → focus the pane the click landed in.
@@ -2598,6 +2654,22 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 Ok(crossterm::event::Event::Mouse(m)) => {
                     if model.modal_stack.is_empty() {
                         model.handle_mouse(m);
+                    }
+                }
+                Ok(crossterm::event::Event::Paste(text)) => {
+                    // Bracketed paste arrived. Two destinations
+                    // depending on where focus is — both go through
+                    // `handle_paste` which inspects pane state.
+                    if model.modal_stack.is_empty() {
+                        model.handle_paste(&text);
+                    } else {
+                        // Modal owns input — forward as raw text via
+                        // the modal event channel. The textarea
+                        // modal will see this as a multi-char paste
+                        // and insert at cursor.
+                        let _ = model
+                            .modal_event_tx
+                            .send(RealmEvent::Paste(text));
                     }
                 }
                 _ => {}
