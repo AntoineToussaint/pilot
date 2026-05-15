@@ -1935,6 +1935,15 @@ impl<T: TerminalAdapter> Model<T> {
                         ),
                         NoticeSeverity::Info,
                     ));
+                } else if let Some(info) = self.terminals.scrollbar_summary() {
+                    // Surface viewport state in the footer so the
+                    // user can see WHY scroll might look like a
+                    // no-op (e.g. `screen=ALTERNATE total=0` means
+                    // alt-screen has no scrollback by design).
+                    self.status.notice = Some(Notice::new(
+                        format!("scroll {dir}: {info}"),
+                        NoticeSeverity::Info,
+                    ));
                 }
             }
             _ => {}

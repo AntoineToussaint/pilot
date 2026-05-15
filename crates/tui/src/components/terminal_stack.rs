@@ -111,6 +111,80 @@ pub enum PendingSplit {
     Horizontal,
 }
 
+/// Pure scanner: return the byte ranges of all OSC 52 clipboard-set
+/// sequences inside `bytes`. Used by `forward_osc52` to know what
+/// to write to stdout. Pure so the matching logic is unit-testable
+/// without redirecting stdout.
+///
+/// OSC 52 format: `ESC ] 52 ; <selection> ; <base64-data> ST` where
+/// `ST` is either BEL (0x07) or `ESC \` (0x1b 0x5c). The `<selection>`
+/// char picks the clipboard target (`c` = clipboard, `p` = primary,
+/// `s` = selection, etc.); we don't care which one, the host decides.
+///
+/// Returned ranges are non-overlapping and in input order. An
+/// unterminated OSC 52 (sequence starts but no terminator before
+/// end-of-bytes) is dropped — the inner program is expected to
+/// terminate within a single write. Same chunk; we don't span.
+pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 5 <= bytes.len() {
+        if bytes[i] == 0x1b
+            && bytes[i + 1] == b']'
+            && bytes[i + 2] == b'5'
+            && bytes[i + 3] == b'2'
+            && bytes[i + 4] == b';'
+        {
+            let start = i;
+            let mut j = i + 5;
+            let end = loop {
+                if j >= bytes.len() {
+                    // Unterminated — drop this match, stop scanning.
+                    return out;
+                }
+                if bytes[j] == 0x07 {
+                    break j + 1;
+                }
+                if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                    break j + 2;
+                }
+                j += 1;
+            };
+            out.push(start..end);
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Forward any OSC 52 clipboard-set escape sequences in `bytes` to
+/// the host terminal's stdout, so the inner program's "copy this"
+/// requests reach the user's system clipboard.
+///
+/// We pass-through the WHOLE sequence verbatim (including the
+/// terminators) so modern host terminals (Ghostty, iTerm2, Kitty,
+/// Wezterm, tmux's allow-passthrough) honor it. Anything else in
+/// `bytes` we leave alone — libghostty-vt handles rendering as
+/// usual. Multiple OSC 52 sequences in one chunk are all forwarded.
+///
+/// Best-effort: stdout write failures are ignored. Writing to the
+/// host while ratatui is mid-frame is safe in practice — terminals
+/// pop OSC out of the stream and don't paint it.
+fn forward_osc52(bytes: &[u8]) {
+    let ranges = osc52_ranges(bytes);
+    if ranges.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    for range in ranges {
+        let _ = out.write_all(&bytes[range]);
+    }
+    let _ = out.flush();
+}
+
 /// Read-only walk of a `TileTree` along a path. Returns None if the
 /// path tries to descend through a leaf.
 fn subtree_at_path<'a>(
@@ -468,6 +542,21 @@ impl TerminalStack {
     /// mouse-wheel handler so trackpad gestures move the viewport
     /// instead of just being eaten. Uses `focused_terminal_id` so
     /// both Tabs and Splits modes route to the right tile.
+    /// Human-readable summary of the focused terminal's scrollbar
+    /// state — `screen=PRIMARY total=120 offset=10 len=32`. Used
+    /// by the orchestrator's scroll diagnostic to surface in the
+    /// footer notice why a scroll might look like a no-op.
+    pub fn scrollbar_summary(&self) -> Option<String> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        let screen = slot.vt.terminal.active_screen().ok();
+        let bar = slot.vt.terminal.scrollbar().ok()?;
+        Some(format!(
+            "screen={:?} total={} offset={} len={}",
+            screen, bar.total, bar.offset, bar.len,
+        ))
+    }
+
     /// Did the user click on a terminal-tab label? Returns the tab
     /// index when `(col, row)` lands inside one of the click
     /// targets cached during render. Called by the orchestrator's
@@ -497,6 +586,14 @@ impl TerminalStack {
     /// delta non-zero). The bool lets the mouse-handler surface a
     /// "scroll ignored, no terminal here" notice instead of the
     /// event silently disappearing.
+    ///
+    /// Emits a `tracing::info!` with the pre/post scrollbar state +
+    /// active screen mode — the user reported scroll events arriving
+    /// + `scroll_viewport` returning successfully but no visible
+    /// change. The log lets us see whether (a) the viewport offset
+    /// changes at all (libghostty problem), (b) the active screen
+    /// is ALTERNATE (no scrollback by design), or (c) the offset
+    /// changes but rendering still shows the live tail.
     pub fn scroll_active(&mut self, delta: isize) -> bool {
         if delta == 0 {
             return false;
@@ -507,9 +604,22 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return false;
         };
+        let screen = slot.vt.terminal.active_screen().ok();
+        let before = slot.vt.terminal.scrollbar().ok();
         slot.vt
             .terminal
             .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta));
+        let after = slot.vt.terminal.scrollbar().ok();
+        tracing::info!(
+            terminal_id = ?id,
+            delta = delta,
+            screen = ?screen,
+            before_total = before.as_ref().map(|s| s.total),
+            before_offset = before.as_ref().map(|s| s.offset),
+            after_total = after.as_ref().map(|s| s.total),
+            after_offset = after.as_ref().map(|s| s.offset),
+            "scroll_active: viewport state",
+        );
         true
     }
 
@@ -548,6 +658,15 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
+        // OSC 52 passthrough — if the inner program (Claude,
+        // tmux, vim) wrote `ESC ] 52 ; c ; <base64> BEL` to ask
+        // the terminal to put text on the clipboard, forward the
+        // sequence to the HOST terminal's stdout. Modern hosts
+        // (Ghostty / iTerm2 / Kitty / Wezterm) honor it and the
+        // user's system clipboard gets updated. Without this,
+        // libghostty-vt consumes the sequence internally for its
+        // own clipboard (which pilot doesn't surface).
+        forward_osc52(bytes);
         slot.vt.feed(bytes);
         slot.recent.extend_from_slice(bytes);
         if slot.recent.len() > RECENT_OUTPUT_CAP {
@@ -1475,5 +1594,77 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         End => Some(b"\x1b[F".to_vec()),
         Delete => Some(b"\x1b[3~".to_vec()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod osc52_tests {
+    use super::osc52_ranges;
+
+    #[test]
+    fn empty_input_returns_no_ranges() {
+        assert!(osc52_ranges(b"").is_empty());
+    }
+
+    #[test]
+    fn no_osc_sequence_returns_no_ranges() {
+        assert!(osc52_ranges(b"plain output, no clipboard requests").is_empty());
+    }
+
+    #[test]
+    fn finds_bel_terminated_sequence() {
+        // Standard `ESC ] 52 ; c ; aGVsbG8= BEL` — copy "hello" to
+        // clipboard. The whole sequence must be in the returned range.
+        let bytes = b"prefix\x1b]52;c;aGVsbG8=\x07suffix";
+        let ranges = osc52_ranges(bytes);
+        assert_eq!(ranges.len(), 1);
+        let r = &ranges[0];
+        assert_eq!(&bytes[r.clone()], b"\x1b]52;c;aGVsbG8=\x07");
+    }
+
+    #[test]
+    fn finds_string_terminator_sequence() {
+        // ST form: `ESC \` instead of BEL.
+        let bytes = b"\x1b]52;c;aGVsbG8=\x1b\\";
+        let ranges = osc52_ranges(bytes);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(&bytes[ranges[0].clone()], bytes);
+    }
+
+    #[test]
+    fn finds_multiple_sequences_in_one_chunk() {
+        // Two back-to-back copies — both ranges must come back,
+        // in order, non-overlapping.
+        let bytes = b"\x1b]52;c;Zm9v\x07middle\x1b]52;p;YmFy\x07tail";
+        let ranges = osc52_ranges(bytes);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&bytes[ranges[0].clone()], b"\x1b]52;c;Zm9v\x07");
+        assert_eq!(&bytes[ranges[1].clone()], b"\x1b]52;p;YmFy\x07");
+    }
+
+    #[test]
+    fn unterminated_sequence_is_dropped() {
+        // Sequence starts but no BEL/ST in the chunk. Drop rather
+        // than write a half-sequence to the host that could leave
+        // it in OSC-parsing mode.
+        let bytes = b"\x1b]52;c;aGVsbG8=";
+        assert!(osc52_ranges(bytes).is_empty());
+    }
+
+    #[test]
+    fn ignores_non_52_osc_sequences() {
+        // `OSC 11` (set background color) must NOT match — we only
+        // forward clipboard requests, not arbitrary OSC traffic.
+        let bytes = b"\x1b]11;#000000\x07";
+        assert!(osc52_ranges(bytes).is_empty());
+    }
+
+    #[test]
+    fn ignores_osc_521_or_other_prefixes_starting_with_52() {
+        // `OSC 521` (hypothetical 3-digit numeric) must not match
+        // because we require the `;` to follow `52`. Guards
+        // against treating `521;…` as `52;1;…`.
+        let bytes = b"\x1b]521;data\x07";
+        assert!(osc52_ranges(bytes).is_empty());
     }
 }

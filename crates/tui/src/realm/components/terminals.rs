@@ -129,6 +129,13 @@ impl Terminals {
         self.inner.scroll_active(delta)
     }
 
+    /// Human-readable scrollbar diagnostic for the focused
+    /// terminal. Used by the orchestrator's scroll-event handler
+    /// to surface viewport state in the footer.
+    pub fn scrollbar_summary(&self) -> Option<String> {
+        self.inner.scrollbar_summary()
+    }
+
     /// Click-to-switch tabs. Returns the tab index when the click
     /// landed on a tab label; the caller invokes `set_active_tab`
     /// to actually flip.
