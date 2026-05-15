@@ -5,6 +5,33 @@ use pilot_core::*;
 use serde::Deserialize;
 
 /// The single GraphQL query that fetches all PR data.
+///
+/// ## Connection sizes (`first: N`) are the rate-limit budget
+///
+/// GitHub's GraphQL cost is dominated by `nodes × Σ first` across
+/// every connection. The earlier query was generous to the point
+/// of self-DOSing on busy inboxes:
+///
+///   reviewThreads(50) × comments(10) = 500 review-thread items / PR
+///   comments(30) + reviews(20) + checks(30)              = 80 / PR
+///   labels(10) + assignees(10) + reviewRequests(10) + closes(10) = 40 / PR
+///                                                          ───────
+///   = ~620 sub-objects per PR × 100 PRs per page = 62k / page
+///
+/// Trimmed numbers below land at roughly 1/5 the cost while still
+/// covering the realistic case (a PR with 20 review threads of 5
+/// comments each is already past the "you should resolve some of
+/// these" point, and the activity feed truncates anyway). The tail
+/// is recoverable: opening a PR can lazy-fetch the rest in a
+/// follow-up `pull-requests/N` query (TODO — separate task).
+///
+/// Two-sided trade-off:
+///   - Too low → users with many comments/reviews lose history in
+///     the activity feed until lazy-fetch lands.
+///   - Too high → query cost blows the rate budget again.
+///
+/// Current numbers are deliberately conservative; bump them if a
+/// real workflow shows missing content, and add a regression test.
 const SEARCH_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
@@ -36,7 +63,7 @@ query($query: String!, $first: Int!, $after: String) {
             commit {
               statusCheckRollup {
                 state
-                contexts(first: 30) {
+                contexts(first: 20) {
                   nodes {
                     __typename
                     ... on CheckRun {
@@ -66,7 +93,7 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
-        comments(first: 30) {
+        comments(first: 15) {
           nodes {
             id
             author { login }
@@ -74,7 +101,7 @@ query($query: String!, $first: Int!, $after: String) {
             createdAt
           }
         }
-        reviews(first: 20) {
+        reviews(first: 10) {
           nodes {
             author { login }
             body
@@ -90,7 +117,7 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
-        reviewThreads(first: 50) {
+        reviewThreads(first: 20) {
           nodes {
             id
             isResolved
@@ -98,7 +125,7 @@ query($query: String!, $first: Int!, $after: String) {
             path
             line
             originalLine
-            comments(first: 10) {
+            comments(first: 5) {
               nodes {
                 id
                 author { login }
@@ -937,6 +964,10 @@ fn extract_repo_from_url(url: &str) -> String {
 // are strictly a subset of PR fields (no branches, no CI, no reviewers)
 // so the query is simpler.
 
+/// Same connection-size trim as the PR query — see the long
+/// comment on `SEARCH_QUERY` for the rate-budget rationale. Issues
+/// are simpler (no reviews / review threads), so the only knob to
+/// turn is `comments`.
 const ISSUES_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
@@ -954,7 +985,7 @@ query($query: String!, $first: Int!, $after: String) {
         author { login }
         labels(first: 10) { nodes { name } }
         assignees(first: 10) { nodes { login } }
-        comments(first: 30) {
+        comments(first: 15) {
           nodes {
             id
             author { login }
@@ -1533,5 +1564,57 @@ mod tests {
         });
         let task = pr_to_task(&pr, "alice");
         assert_eq!(task.closes_issues.len(), 1);
+    }
+
+    // ── Query-shape regression guards ─────────────────────────────
+    //
+    // Connection sizes (`first: N`) drive GitHub's GraphQL cost.
+    // Bumping them silently — say, "let's grab more comments" — is
+    // how the rate limit gets blown again. These tests pin the
+    // current numbers so any change has to be intentional + tested.
+    //
+    // If you legitimately need more, raise the number AND the
+    // assertion together, AND verify a high-PR-count poll cycle
+    // doesn't immediately re-trip RemoteLow.
+
+    #[test]
+    fn pr_query_connection_sizes_are_pinned_low() {
+        // `reviewThreads × comments` is the dominant cost. The
+        // pre-fix combination of 50 × 10 = 500 items per PR was
+        // what blew the budget on busy inboxes.
+        assert!(
+            SEARCH_QUERY.contains("reviewThreads(first: 20)"),
+            "reviewThreads cap drifted",
+        );
+        assert!(
+            SEARCH_QUERY.contains("comments(first: 5)"),
+            "reviewThreads inner comments cap drifted",
+        );
+        assert!(
+            SEARCH_QUERY.contains("comments(first: 15)"),
+            "top-level comments cap drifted",
+        );
+        assert!(
+            SEARCH_QUERY.contains("reviews(first: 10)"),
+            "reviews cap drifted",
+        );
+        assert!(
+            SEARCH_QUERY.contains("contexts(first: 20)"),
+            "check contexts cap drifted",
+        );
+        // Hard guard: the previous bloated numbers must NOT come
+        // back accidentally.
+        assert!(!SEARCH_QUERY.contains("reviewThreads(first: 50)"));
+        assert!(!SEARCH_QUERY.contains("comments(first: 30)"));
+        assert!(!SEARCH_QUERY.contains("reviews(first: 20)"));
+    }
+
+    #[test]
+    fn issues_query_connection_sizes_are_pinned_low() {
+        assert!(
+            ISSUES_QUERY.contains("comments(first: 15)"),
+            "issue comments cap drifted",
+        );
+        assert!(!ISSUES_QUERY.contains("comments(first: 30)"));
     }
 }
