@@ -125,10 +125,19 @@ pub fn tmux_socket_name() -> String {
 mod tests {
     use super::*;
 
+    /// Global lock serializing tests that mutate env vars. Without
+    /// this, cargo-test's default parallel execution lets two tests
+    /// step on each other (PILOT_HOME set by one read by another)
+    /// since env state is process-wide. Every test in this module
+    /// must hold the lock for its entire body. Poisoning is fine —
+    /// the test already failed, no recovery needed.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// `EnvGuard` saves + restores an env var across a test so two
     /// tests in the same process don't see each other's setup.
-    /// `std::env::set_var` is global state — without scoping,
-    /// parallel tests in the same module would race.
+    /// `std::env::set_var` is global state — without scoping AND
+    /// the `ENV_LOCK` above, parallel tests in the same module
+    /// would race.
     struct EnvGuard {
         key: &'static str,
         prev: Option<String>,
@@ -137,9 +146,10 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let prev = std::env::var(key).ok();
-            // Safety: tests in this module aren't running other
-            // threads that read PILOT_HOME concurrently — the
-            // `paths` module's functions are short, pure reads.
+            // Safety: callers hold ENV_LOCK for the test's full
+            // body, so no other test thread reads/writes env vars
+            // concurrently. The `paths` functions themselves are
+            // short pure reads.
             unsafe {
                 std::env::set_var(key, value);
             }
@@ -167,12 +177,14 @@ mod tests {
 
     #[test]
     fn home_honors_pilot_home_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::set("PILOT_HOME", "/tmp/pilot-test-xyz");
         assert_eq!(home(), PathBuf::from("/tmp/pilot-test-xyz"));
     }
 
     #[test]
     fn home_empty_pilot_home_falls_back_to_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Empty string must NOT be treated as "use /": a fish-shell
         // user with `set -gx PILOT_HOME` and no value would silently
         // get pilot writing to the filesystem root. The check above
@@ -184,6 +196,7 @@ mod tests {
 
     #[test]
     fn home_uses_home_env_when_pilot_home_unset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::unset("PILOT_HOME");
         let _g2 = EnvGuard::set("HOME", "/tmp/test-home");
         assert_eq!(home(), PathBuf::from("/tmp/test-home/.pilot"));
@@ -191,6 +204,7 @@ mod tests {
 
     #[test]
     fn state_db_lives_under_state_root() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::set("PILOT_HOME", "/tmp/pilot-x");
         assert_eq!(state_db(), PathBuf::from("/tmp/pilot-x/v2/state.db"));
         assert_eq!(worktrees_root(), PathBuf::from("/tmp/pilot-x/v2/worktrees"));
@@ -198,6 +212,7 @@ mod tests {
 
     #[test]
     fn config_lives_at_profile_root_not_state_root() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Schema versioning isn't supposed to invalidate the user's
         // config. Living at `<home>/config.yaml` instead of
         // `<home>/v2/config.yaml` means a v2→v3 schema bump leaves
@@ -208,6 +223,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_honors_legacy_env_var() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // PILOT_RUNTIME_DIR existed before PILOT_HOME — keep it
         // working so users who already set it don't have to migrate.
         let _g1 = EnvGuard::set("PILOT_HOME", "/tmp/pilot-x");
@@ -217,6 +233,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_falls_back_to_pilot_home_when_legacy_unset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("PILOT_HOME", "/tmp/pilot-x");
         let _g2 = EnvGuard::unset("PILOT_RUNTIME_DIR");
         assert_eq!(runtime_dir(), PathBuf::from("/tmp/pilot-x/run"));
@@ -224,6 +241,7 @@ mod tests {
 
     #[test]
     fn tmux_socket_strips_leading_dot_on_default_profile() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Backward compat: pre-PILOT_HOME, sessions were stored
         // under `tmux -L pilot`. Default profile must still resolve
         // to "pilot" so an in-flight session survives the upgrade.
@@ -233,12 +251,14 @@ mod tests {
 
     #[test]
     fn tmux_socket_disambiguates_dev_profile() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("PILOT_HOME", "/Users/test/.pilot-dev");
         assert_eq!(tmux_socket_name(), "pilot-dev");
     }
 
     #[test]
     fn tmux_socket_handles_non_dotted_profile() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Users sometimes point PILOT_HOME at a non-dotfile path
         // (e.g. for testing). No leading dot to strip; pass the name
         // through.
@@ -248,6 +268,7 @@ mod tests {
 
     #[test]
     fn tmux_socket_falls_back_when_path_has_no_name() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // PILOT_HOME=/ is degenerate but mustn't crash. Fallback
         // to "pilot" so callers don't have to handle None.
         let _g1 = EnvGuard::set("PILOT_HOME", "/");

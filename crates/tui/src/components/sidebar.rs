@@ -927,23 +927,19 @@ impl Sidebar {
         let workspace = self.selected_workspace();
         let has_sessions = workspace.map(|w| !w.sessions.is_empty()).unwrap_or(false);
         let is_ready = self.merge_target_for_cursor().is_some();
-        let has_work = self.work_target_for_cursor().is_some();
         let primary = workspace.and_then(|w| w.primary_task());
 
         // Primary state-specific action first — what the user most
-        // likely wants to do on THIS row. Labels match the resolver
-        // priority in `intent::resolve_work` so the hint matches
-        // what the keypress actually fires.
+        // likely wants to do on THIS row. The `w` label comes
+        // straight from the same `classify_work` the keypress
+        // dispatcher uses, so the hint can't drift from what `w`
+        // actually fires.
         if is_ready {
             out.push(Binding { keys: "Shift-M", label: "merge" });
-        } else if has_work {
-            let label = match primary {
-                Some(t) if t.has_conflicts => "fix conflict",
-                Some(t) if matches!(t.ci, pilot_core::CiStatus::Failure) => "fix CI",
-                Some(t) if t.url.contains("/issues/") => "implement",
-                _ => "work on this",
-            };
-            out.push(Binding { keys: "w", label });
+        } else if let Some(priority) =
+            crate::intent::classify_work(workspace, &[])
+        {
+            out.push(Binding { keys: "w", label: priority.label() });
         }
 
         // Reply / read are useful whenever there's a PR or issue.

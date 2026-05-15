@@ -103,19 +103,73 @@ pub enum Intent {
     NoOp,
 }
 
+/// Which branch of the `w` priority chain fires for the given
+/// (workspace, selected comments) state. Single classifier so the
+/// resolver AND the hint-bar label come from the same source — no
+/// hardcoded duplicate strings to drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkPriority {
+    /// User selected comments on an activity row. Agent gets an
+    /// "address these comments" prompt.
+    AddressComments,
+    /// PR has merge conflicts with its base. Agent gets a
+    /// "rebase + resolve" prompt. Beats CI fail because CI can't
+    /// run cleanly on an unmergable branch.
+    FixConflict,
+    /// PR's CI is failing. Agent gets a "fix CI" prompt.
+    FixCi,
+    /// Issue-only workspace (no PR yet). Agent gets an "implement
+    /// this issue" prompt.
+    ImplementIssue,
+}
+
+impl WorkPriority {
+    /// Short verb for the contextual hint bar. Matches the kind
+    /// of work the agent will actually be asked to do, so the
+    /// user can predict what `w` will fire before pressing.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::AddressComments => "address comments",
+            Self::FixConflict => "fix conflict",
+            Self::FixCi => "fix CI",
+            Self::ImplementIssue => "implement",
+        }
+    }
+}
+
+/// Classify what `w` would do on this (workspace, selected-comments)
+/// state. `None` means `w` is NoOp — the hint bar should hide it.
+/// Used by both `resolve_work` (to build the Intent) and the
+/// sidebar's contextual-footer label resolver.
+pub fn classify_work(
+    workspace: Option<&Workspace>,
+    selected_comments: &[usize],
+) -> Option<WorkPriority> {
+    let ws = workspace?;
+    if !selected_comments.is_empty() {
+        return Some(WorkPriority::AddressComments);
+    }
+    if let Some(pr) = ws.pr.as_ref() {
+        if pr.has_conflicts {
+            return Some(WorkPriority::FixConflict);
+        }
+        if pr.ci == pilot_core::CiStatus::Failure {
+            return Some(WorkPriority::FixCi);
+        }
+        // PR present but healthy → no work-key target.
+        return None;
+    }
+    if ws.gh_issues.first().is_some() {
+        return Some(WorkPriority::ImplementIssue);
+    }
+    None
+}
+
 /// Resolve `w` ("work on this") for a workspace + selected-comment
-/// indices. Single source of truth for the priority chain that
-/// used to live in `Sidebar::work_target_for_cursor` AND the right
-/// pane's `w` handler — now both sites call here.
-///
-/// Priority (first match wins):
-/// 1. Comments selected → address-comments agent spawn.
-/// 2. PR with merge conflict → resolve-conflict agent spawn.
-///    Conflicts beat CI fail because CI can't even run on a
-///    branch that won't merge cleanly — fix that first.
-/// 3. PR with CI failing → fix-CI agent spawn.
-/// 4. Issue-only workspace → implement-issue agent spawn.
-/// 5. Anything else → `NoOp`.
+/// indices. The priority chain lives in `classify_work`; this
+/// function turns that classification into a full `Intent` with
+/// the right prompt baked in. Both this and the contextual-footer
+/// label render off the SAME classifier so they can't drift.
 pub fn resolve_work(
     workspace: Option<&Workspace>,
     selected_comments: &[usize],
@@ -124,42 +178,40 @@ pub fn resolve_work(
     let Some(ws) = workspace else {
         return Intent::NoOp;
     };
-    if !selected_comments.is_empty() {
-        let prompt = build_address_comments_prompt(ws, selected_comments);
-        return Intent::SpawnAgent {
-            workspace_key: SessionKey::from(&ws.key),
-            agent_id: agent_id.to_string(),
-            prompt: Some(prompt),
-        };
+    let Some(priority) = classify_work(Some(ws), selected_comments) else {
+        return Intent::NoOp;
+    };
+    let session_key = SessionKey::from(&ws.key);
+    let prompt = match priority {
+        WorkPriority::AddressComments => {
+            build_address_comments_prompt(ws, selected_comments)
+        }
+        WorkPriority::FixConflict => {
+            // classify_work already confirmed `pr.has_conflicts`,
+            // so the inner Option always unwraps. `expect` over
+            // `unwrap` so a future refactor that breaks the
+            // invariant fails loud instead of silently.
+            crate::components::sidebar::build_fix_conflict_prompt(ws)
+                .expect("FixConflict classification implies build_fix_conflict_prompt returns Some")
+                .1
+        }
+        WorkPriority::FixCi => {
+            crate::components::sidebar::build_fix_ci_prompt(ws)
+                .expect("FixCi classification implies build_fix_ci_prompt returns Some")
+                .1
+        }
+        WorkPriority::ImplementIssue => {
+            let issue = ws.gh_issues.first().expect(
+                "ImplementIssue classification implies at least one gh_issue",
+            );
+            build_implement_issue_prompt(issue)
+        }
+    };
+    Intent::SpawnAgent {
+        workspace_key: session_key,
+        agent_id: agent_id.to_string(),
+        prompt: Some(prompt),
     }
-    if let Some((session_key, prompt)) =
-        crate::components::sidebar::build_fix_conflict_prompt(ws)
-    {
-        return Intent::SpawnAgent {
-            workspace_key: session_key,
-            agent_id: agent_id.to_string(),
-            prompt: Some(prompt),
-        };
-    }
-    if let Some((session_key, prompt)) = crate::components::sidebar::build_fix_ci_prompt(ws) {
-        return Intent::SpawnAgent {
-            workspace_key: session_key,
-            agent_id: agent_id.to_string(),
-            prompt: Some(prompt),
-        };
-    }
-    // Issue-only path: no PR slot but a gh_issue is present.
-    if ws.pr.is_none()
-        && let Some(issue) = ws.gh_issues.first()
-    {
-        let prompt = build_implement_issue_prompt(issue);
-        return Intent::SpawnAgent {
-            workspace_key: SessionKey::from(&ws.key),
-            agent_id: agent_id.to_string(),
-            prompt: Some(prompt),
-        };
-    }
-    Intent::NoOp
 }
 
 /// Resolve `r` (reply). No state-dependent variation — either we
@@ -526,6 +578,84 @@ mod tests {
                 );
             }
             other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+    }
+
+    // ── classify_work / resolve_work consistency ──────────────────
+    //
+    // Both the resolver (builds Intent) and the hint-bar label
+    // resolver consult `classify_work`. Pin that they ALWAYS agree:
+    // any state that classify_work classifies must produce a
+    // SpawnAgent from resolve_work, and any state classified as
+    // None must produce NoOp.
+
+    #[test]
+    fn classify_and_resolve_agree_on_every_canonical_state() {
+        let cases: Vec<(&str, Option<WorkPriority>, Workspace, &[usize])> = {
+            let healthy_pr = pr("o/r#1", CiStatus::Success, ReviewStatus::Pending);
+            let ci_fail = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
+            let mut conflict_pr = pr("o/r#7", CiStatus::None, ReviewStatus::None);
+            conflict_pr.pr.as_mut().unwrap().has_conflicts = true;
+            let mut conflict_plus_ci = pr("o/r#8", CiStatus::Failure, ReviewStatus::None);
+            conflict_plus_ci.pr.as_mut().unwrap().has_conflicts = true;
+            let issue = issue("o/r#42");
+            let mut commented = pr("o/r#9", CiStatus::Success, ReviewStatus::Pending);
+            commented.activity.push(pilot_core::Activity {
+                author: "alice".into(),
+                body: "comment".into(),
+                created_at: Utc::now(),
+                kind: pilot_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+            vec![
+                ("healthy PR", None, healthy_pr, &[][..]),
+                ("ci-fail PR", Some(WorkPriority::FixCi), ci_fail, &[][..]),
+                ("conflict PR", Some(WorkPriority::FixConflict), conflict_pr, &[][..]),
+                ("conflict beats ci", Some(WorkPriority::FixConflict), conflict_plus_ci, &[][..]),
+                ("issue", Some(WorkPriority::ImplementIssue), issue, &[][..]),
+                ("comments selected", Some(WorkPriority::AddressComments), commented, &[0][..]),
+                ("empty workspace", None, empty(), &[][..]),
+            ]
+        };
+
+        for (name, expected, ws, comments) in cases {
+            let classified = classify_work(Some(&ws), comments);
+            assert_eq!(
+                classified, expected,
+                "classify_work mismatch for `{name}`: got {classified:?}, expected {expected:?}",
+            );
+            let intent = resolve_work(Some(&ws), comments, "claude");
+            match (classified, &intent) {
+                (Some(_), Intent::SpawnAgent { .. }) => {}
+                (None, Intent::NoOp) => {}
+                _ => panic!(
+                    "resolve_work / classify_work disagree for `{name}`: \
+                     classify={classified:?}, intent={intent:?}",
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn work_priority_labels_are_short_and_present_tense() {
+        // Hint-bar real estate is tight — labels must stay short.
+        // Pin so a future label change has to update the test too.
+        for p in [
+            WorkPriority::AddressComments,
+            WorkPriority::FixConflict,
+            WorkPriority::FixCi,
+            WorkPriority::ImplementIssue,
+        ] {
+            let label = p.label();
+            assert!(!label.is_empty(), "{p:?} label is empty");
+            assert!(
+                label.len() <= 18,
+                "{p:?} label `{label}` is too long for the hint bar",
+            );
         }
     }
 
