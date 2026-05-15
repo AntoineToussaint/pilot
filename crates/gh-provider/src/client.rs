@@ -38,6 +38,29 @@ pub enum GhError {
 /// inner status / message / errors entirely. We unwrap to the
 /// underlying `GitHubError` (or other variants) so the message
 /// actually reaches logs + the error modal.
+/// Is this octocrab error worth retrying? Used by
+/// `post_graphql_with_retry` to decide between sleep-and-retry and
+/// fail-fast. The cutoff matches `From<GhError> for ProviderError`'s
+/// retryable classification — anything that maps to `Retryable`
+/// there is fair game here too.
+fn is_transient(e: &octocrab::Error) -> bool {
+    match e {
+        octocrab::Error::Hyper { .. }
+        | octocrab::Error::Service { .. }
+        | octocrab::Error::Http { .. }
+        | octocrab::Error::Json { .. }
+        | octocrab::Error::Serde { .. } => true,
+        octocrab::Error::GitHub { source, .. } => {
+            // 502/503/504 — server-side hiccup. NOT 429: rate
+            // limit is for the budget layer, not retry-loops.
+            // NOT 5xx in general: e.g. a 500 with a deterministic
+            // error message won't change on retry.
+            matches!(source.status_code.as_u16(), 502 | 503 | 504)
+        }
+        _ => false,
+    }
+}
+
 fn detail_of(err: &GhError) -> String {
     match err {
         GhError::Graphql(s) => s.clone(),
@@ -236,6 +259,65 @@ impl GhClient {
             .lock()
             .expect("budget mutex poisoned")
             .try_acquire()
+    }
+
+    /// POST to `/graphql` with bounded exponential backoff on
+    /// transient errors. The body is borrowed (octocrab takes
+    /// `Option<&B>`), so the SAME body bytes go out on every
+    /// attempt — no risk of the body-clone bug that made us
+    /// disable octocrab's built-in retry. The caller has already
+    /// spent a rate-budget token via `acquire_or_block`; we do
+    /// NOT re-acquire per retry (a single 502-then-retry-success
+    /// is one logical call from GitHub's perspective).
+    ///
+    /// Retry policy:
+    /// - Transport variants (Hyper, Service, Http, Json, Serde,
+    ///   Io) → retry. Always transient.
+    /// - 502 / 503 / 504 → retry. GitHub serves these under load.
+    /// - Anything else (4xx including auth and 429, 5xx other
+    ///   than the three above, deserialization mismatches in
+    ///   typed `T`) → return immediately. Retrying wouldn't change
+    ///   the answer.
+    ///
+    /// Backoff sequence: 200ms → 800ms. Two retries after the
+    /// initial attempt = 3 attempts total. Tight enough that a
+    /// 60s poll cycle still has headroom; long enough that the
+    /// usual <1s blip resolves itself.
+    async fn post_graphql_with_retry<T>(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<T, octocrab::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        const DELAYS_MS: &[u64] = &[200, 800];
+        let mut last_err: Option<octocrab::Error> = None;
+        for attempt in 0..=DELAYS_MS.len() {
+            match self.inner.post::<_, T>("/graphql", Some(body)).await {
+                Ok(v) => {
+                    if attempt > 0 {
+                        tracing::info!("graphql request succeeded on retry {attempt}");
+                    }
+                    return Ok(v);
+                }
+                Err(e) => {
+                    if !is_transient(&e) {
+                        return Err(e);
+                    }
+                    if attempt < DELAYS_MS.len() {
+                        let delay_ms = DELAYS_MS[attempt];
+                        tracing::warn!(
+                            "graphql transient error (attempt {}/{}), retrying in {delay_ms}ms: {e}",
+                            attempt + 1,
+                            DELAYS_MS.len() + 1,
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.expect("loop runs at least once"))
     }
 
     /// Gate-or-fail: spend one rate-budget token and convert the
@@ -506,20 +588,17 @@ impl GhClient {
             );
 
             let raw: serde_json::Value =
-                self.inner
-                    .post("/graphql", Some(&body))
-                    .await
-                    .map_err(|e| {
-                        // octocrab's Display on Error::GitHub drops
-                        // status + message — print Debug too so
-                        // /tmp/pilot.log has actionable context.
-                        tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
-                        tracing::error!(
-                            "GraphQL request body was: {}",
-                            serde_json::to_string_pretty(&body).unwrap_or_default()
-                        );
-                        GhError::Api(e)
-                    })?;
+                self.post_graphql_with_retry(&body).await.map_err(|e| {
+                    // octocrab's Display on Error::GitHub drops
+                    // status + message — print Debug too so
+                    // /tmp/pilot.log has actionable context.
+                    tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
+                    tracing::error!(
+                        "GraphQL request body was: {}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
+                    GhError::Api(e)
+                })?;
 
             let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
                 Ok(r) => r,
@@ -624,8 +703,7 @@ impl GhClient {
             tracing::debug!("Watch query for {repo}: {watch_query}");
 
             match self
-                .inner
-                .post::<_, graphql::GqlResponse>("/graphql", Some(&watch_body))
+                .post_graphql_with_retry::<graphql::GqlResponse>(&watch_body)
                 .await
             {
                 Ok(resp) => {
@@ -699,11 +777,8 @@ impl GhClient {
             // Same rate-budget guard as PR fetch — see fetch_all_prs.
             self.acquire_or_block("issues search")?;
             let body = graphql::issues_query_body(&search_query, cursor.as_deref());
-            let response: graphql::GqlIssueResponse = self
-                .inner
-                .post("/graphql", Some(&body))
-                .await
-                .map_err(|e| {
+            let response: graphql::GqlIssueResponse =
+                self.post_graphql_with_retry(&body).await.map_err(|e| {
                     tracing::error!("Issues HTTP error (page {page}): {e}\n{e:?}");
                     GhError::Api(e)
                 })?;
@@ -882,11 +957,8 @@ impl GhClient {
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("updatePullRequestBranch mutation")?;
         let body = graphql::update_branch_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self
-            .inner
-            .post("/graphql", Some(&body))
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse =
+            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
         // Observe rate-limit if the mutation response includes it
         // (currently it doesn't — the mutation body doesn't select
         // `rateLimit` — but if a future query body change pulls it
@@ -915,11 +987,8 @@ impl GhClient {
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self
-            .inner
-            .post("/graphql", Some(&body))
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse =
+            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
