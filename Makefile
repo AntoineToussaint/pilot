@@ -30,7 +30,14 @@ ZIG_VERSION := 0.15.2
 ZIG_DIR := vendor/zig/$(HOST_ARCH)-$(HOST_OS)-$(ZIG_VERSION)
 PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
-.PHONY: all setup build release run run-fresh run-test run-connect test lint clean distclean install help
+.PHONY: all setup build release run run-fresh run-test run-connect dev dev-fresh test lint clean distclean install help
+
+# Side-by-side dev profile root. Picked up by `pilot_core::paths`
+# everywhere — independent state.db, worktrees, daemon socket, tmux
+# socket, config. Override at the command line if needed:
+#
+#   make dev PILOT_DEV_HOME=$HOME/.pilot-experimental
+PILOT_DEV_HOME ?= $(HOME)/.pilot-dev
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -64,6 +71,13 @@ run-test: ## Run pilot with --test (tempdir + seeded session, no GitHub).
 
 run-connect: ## Connect to a running daemon socket. Usage: make run-connect SOCKET=/path
 	@$(MAKE) run ARGS="--connect $(SOCKET)"
+
+dev: ## Run the dev build against $(PILOT_DEV_HOME) — independent state from `make run`.
+	@echo "▶ dev profile: PILOT_HOME=$(PILOT_DEV_HOME)"
+	@PATH="$(PINNED_PATH)" PILOT_HOME="$(PILOT_DEV_HOME)" cargo run -p pilot-tui -- $(ARGS)
+
+dev-fresh: ## Same as `dev` but wipes the dev state.db first.
+	@$(MAKE) dev ARGS="--fresh"
 
 test: ## Run all tests (cargo-nextest enforces a 10s per-test deadline).
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace
