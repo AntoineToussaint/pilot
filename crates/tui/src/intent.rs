@@ -108,11 +108,14 @@ pub enum Intent {
 /// used to live in `Sidebar::work_target_for_cursor` AND the right
 /// pane's `w` handler — now both sites call here.
 ///
-/// Priority:
-/// 1. Comments selected → `AddressComments` agent spawn.
-/// 2. PR with CI failing → `FixCi` agent spawn.
-/// 3. Issue-only workspace → `ImplementIssue` agent spawn.
-/// 4. Anything else → `NoOp`.
+/// Priority (first match wins):
+/// 1. Comments selected → address-comments agent spawn.
+/// 2. PR with merge conflict → resolve-conflict agent spawn.
+///    Conflicts beat CI fail because CI can't even run on a
+///    branch that won't merge cleanly — fix that first.
+/// 3. PR with CI failing → fix-CI agent spawn.
+/// 4. Issue-only workspace → implement-issue agent spawn.
+/// 5. Anything else → `NoOp`.
 pub fn resolve_work(
     workspace: Option<&Workspace>,
     selected_comments: &[usize],
@@ -125,6 +128,15 @@ pub fn resolve_work(
         let prompt = build_address_comments_prompt(ws, selected_comments);
         return Intent::SpawnAgent {
             workspace_key: SessionKey::from(&ws.key),
+            agent_id: agent_id.to_string(),
+            prompt: Some(prompt),
+        };
+    }
+    if let Some((session_key, prompt)) =
+        crate::components::sidebar::build_fix_conflict_prompt(ws)
+    {
+        return Intent::SpawnAgent {
+            workspace_key: session_key,
             agent_id: agent_id.to_string(),
             prompt: Some(prompt),
         };
@@ -467,6 +479,80 @@ mod tests {
                 assert!(
                     prompt.contains("CI is failing"),
                     "{prompt}",
+                );
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn work_on_conflict_pr_returns_resolve_conflict_agent() {
+        // Merge conflict surfaces as `has_conflicts=true`. `w` must
+        // fire — without this, the user sits on a CONFLICT-pill row
+        // and the hint bar shows nothing under `w`.
+        let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
+        ws.pr.as_mut().unwrap().has_conflicts = true;
+        let intent = resolve_work(Some(&ws), &[], "claude");
+        match intent {
+            Intent::SpawnAgent { prompt, .. } => {
+                let prompt = prompt.expect("conflict-fix carries a prompt");
+                assert!(
+                    prompt.contains("merge conflicts"),
+                    "conflict prompt must mention conflicts; got:\n{prompt}",
+                );
+                assert!(
+                    prompt.contains("Rebase"),
+                    "conflict prompt must direct a rebase; got:\n{prompt}",
+                );
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_beats_ci_fail_when_both_apply() {
+        // A conflicted branch can't run CI cleanly — fix the
+        // conflict first. Pin the priority so a future refactor
+        // doesn't accidentally swap the order.
+        let mut ws = pr("o/r#7", CiStatus::Failure, ReviewStatus::None);
+        ws.pr.as_mut().unwrap().has_conflicts = true;
+        let intent = resolve_work(Some(&ws), &[], "claude");
+        match intent {
+            Intent::SpawnAgent { prompt, .. } => {
+                let prompt = prompt.expect("carries prompt");
+                assert!(
+                    prompt.contains("merge conflicts"),
+                    "conflict must win over CI fail when both apply; got:\n{prompt}",
+                );
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selected_comments_beat_conflict() {
+        // The comments path is most-explicit user intent: they
+        // selected what to address. Conflict / CI fall behind.
+        let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
+        ws.pr.as_mut().unwrap().has_conflicts = true;
+        ws.activity.push(pilot_core::Activity {
+            author: "alice".into(),
+            body: "fix the lint please".into(),
+            created_at: Utc::now(),
+            kind: pilot_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        let intent = resolve_work(Some(&ws), &[0], "claude");
+        match intent {
+            Intent::SpawnAgent { prompt, .. } => {
+                let prompt = prompt.expect("carries prompt");
+                assert!(
+                    prompt.contains("Address the following review comments"),
+                    "selected comments must beat conflict; got:\n{prompt}",
                 );
             }
             other => panic!("expected SpawnAgent, got {other:?}"),

@@ -1989,6 +1989,11 @@ fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
 /// activity rows) can fall back to the same logic when no
 /// comments are selected.
 pub fn build_work_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> {
+    // Priority matches `intent::resolve_work`: conflict beats CI
+    // fail (CI can't run on an unmergable branch), then issue.
+    if let Some(target) = build_fix_conflict_prompt(workspace) {
+        return Some(target);
+    }
     if let Some(target) = build_fix_ci_prompt(workspace) {
         return Some(target);
     }
@@ -2001,6 +2006,36 @@ pub fn build_work_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> 
     let issue = workspace.gh_issues.first()?;
     let session_key = SessionKey::from(&workspace.key);
     Some((session_key, build_implement_issue_prompt(issue)))
+}
+
+/// Pure helper: produce a (session_key, resolve-conflict-prompt)
+/// pair if the workspace's PR has merge conflicts with its base;
+/// otherwise None. Same shape as [`build_fix_ci_prompt`] so the
+/// resolver chain in `intent::resolve_work` can compose them
+/// uniformly.
+pub fn build_fix_conflict_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> {
+    let pr = workspace.pr.as_ref()?;
+    if !pr.has_conflicts {
+        return None;
+    }
+    let session_key = SessionKey::from(&workspace.key);
+    let pr_number = pr
+        .id
+        .key
+        .rsplit_once('#')
+        .map(|(_, n)| n)
+        .unwrap_or(&pr.id.key);
+    let repo = pr.repo.as_deref().unwrap_or("unknown");
+    let branch = pr.branch.as_deref().unwrap_or("unknown");
+    let base = pr.base_branch.as_deref().unwrap_or("main");
+    let prompt = format!(
+        "PR #{pr_number} in {repo} (branch `{branch}`) has merge conflicts with `{base}`. \
+         Rebase the branch onto `{base}`, resolve every conflict in-place (read the original \
+         intent of both sides before picking — don't blindly favor `--theirs`/`--ours`), \
+         run the project's local checks until they pass, then force-push with lease. \
+         Reply when the PR is mergeable again."
+    );
+    Some((session_key, prompt))
 }
 
 /// Pure helper: produce a (session_key, fix-CI-prompt) pair if the
