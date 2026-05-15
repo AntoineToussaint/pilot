@@ -9,6 +9,6 @@ expression: rendered
  ────────────────────────────────────
 
    ▾  owner/repo  3
-   ▸ [I] #1 A task: o…            1mo
-     [I] #2 A task: o…            1mo
-     [I] #3 A task: o…            1mo
+   ▸ [I] #1 A                      1m
+     [I] #2 A                      1m
+     [I] #3 A                      1m

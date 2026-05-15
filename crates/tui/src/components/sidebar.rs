@@ -1814,7 +1814,6 @@ impl Sidebar {
                     } else {
                         Some(" ●99+".to_string())
                     };
-                    let unread_len = unread_text.as_deref().map(visual_width).unwrap_or(0);
                     let status = task.and_then(status_pill);
                     let time_text = task.map(|t| relative_time(t.updated_at, now));
                     let fixed_cols_len = if task.is_some() {
@@ -1822,7 +1821,15 @@ impl Sidebar {
                     } else {
                         0
                     };
-                    let trailer_len = unread_len + badges_len + fixed_cols_len;
+                    // Reserve fixed unread + badge columns even when empty
+                    // so the status / time columns to the right stay
+                    // anchored across rows. Without this, a row with no
+                    // unread + no badge pulls the status pill left while
+                    // its neighbors stay right — that's the alignment
+                    // jitter the user flagged.
+                    let _ = badges_len;
+                    let trailer_len =
+                        UNREAD_COL_W + BADGE_COL_W + fixed_cols_len;
 
                     let title_budget = row_budget
                         .saturating_sub(used)
@@ -1843,47 +1850,56 @@ impl Sidebar {
                             spans.push(Span::styled(" ".repeat(pad), row_style));
                             used = used.saturating_add(pad);
                         }
-                        // Unread pill first — leftmost trailer
-                        // element. Bright `●N` so the eye picks it
-                        // up at the right edge of the row while the
-                        // status pill stays in its fixed column.
-                        if let Some(text) = unread_text.as_deref() {
-                            let style = if is_cursor {
-                                row_style
-                            } else {
-                                Style::default()
-                                    .fg(theme.hover)
-                                    .add_modifier(Modifier::BOLD)
-                            };
-                            spans.push(Span::styled(text.to_string(), style));
-                            used = used.saturating_add(visual_width(text));
-                        }
-                        // Runner badges second (between unread pill
-                        // + fixed cols) so the fixed cols always sit
-                        // at the same x.
-                        if !badges.is_empty() {
-                            spans.push(Span::styled(" ", row_style));
-                            used = used.saturating_add(1);
-                            for (idx, (letter, n)) in badges.iter().enumerate() {
-                                if idx > 0 {
-                                    spans.push(Span::styled(" ", row_style));
-                                    used = used.saturating_add(1);
-                                }
-                                // Single instance → ` C `. Multiple
-                                // (rare — only when 2+ shells are
-                                // running in one workspace) → ` C×2 `.
-                                // The `×` separator makes the count
-                                // unambiguous; "S2" got read as
-                                // "session ID 2" by users.
-                                let label = if *n > 1 {
-                                    format!(" {letter}×{n} ")
+                        // Unread column — fixed UNREAD_COL_W cells,
+                        // right-aligned, blank when no unread. Keeps
+                        // the badge / status / time columns to its
+                        // right anchored across rows.
+                        {
+                            let text = unread_text.as_deref().unwrap_or("");
+                            let text_w = visual_width(text);
+                            let pad = UNREAD_COL_W.saturating_sub(text_w);
+                            if pad > 0 {
+                                spans.push(Span::styled(" ".repeat(pad), row_style));
+                                used = used.saturating_add(pad);
+                            }
+                            if !text.is_empty() {
+                                let style = if is_cursor {
+                                    row_style
                                 } else {
-                                    format!(" {letter} ")
+                                    Style::default()
+                                        .fg(theme.hover)
+                                        .add_modifier(Modifier::BOLD)
                                 };
-                                let w = visual_width(&label);
-                                spans
-                                    .push(Span::styled(label, badge_pill_style(theme, *letter)));
-                                used = used.saturating_add(w);
+                                spans.push(Span::styled(text.to_string(), style));
+                                used = used.saturating_add(text_w.min(UNREAD_COL_W));
+                            }
+                        }
+                        // Badge column — fixed BADGE_COL_W cells. We
+                        // show the first badge (Claude or shell) only;
+                        // multi-badge workspaces are rare and a
+                        // crowded row reads worse than a single
+                        // representative letter.
+                        {
+                            let first = badges.first();
+                            let label = match first {
+                                Some((letter, n)) if *n > 1 => {
+                                    format!(" {letter}×{n} ")
+                                }
+                                Some((letter, _)) => format!(" {letter} "),
+                                None => String::new(),
+                            };
+                            let label_w = visual_width(&label);
+                            let pad = BADGE_COL_W.saturating_sub(label_w);
+                            if pad > 0 {
+                                spans.push(Span::styled(" ".repeat(pad), row_style));
+                                used = used.saturating_add(pad);
+                            }
+                            if let Some((letter, _)) = first {
+                                spans.push(Span::styled(
+                                    label,
+                                    badge_pill_style(theme, *letter),
+                                ));
+                                used = used.saturating_add(label_w.min(BADGE_COL_W));
                             }
                         }
                         if fixed_cols_len > 0 {
@@ -1980,6 +1996,15 @@ const STATUS_COL_W: usize = 10;
 /// Visible width of the time column. `now`/`Xm`/`Xh`/`Xd`/`Xmo` all
 /// fit in 4 cells (max is `12mo`).
 const TIME_COL_W: usize = 4;
+/// Visible width of the unread-pill column. ` ●99+` is the worst
+/// case (5 cells). Rows without unread render 5 row-styled spaces
+/// so the badge / status / time columns to its right don't shift.
+const UNREAD_COL_W: usize = 5;
+/// Visible width of the agent-badge column. ` C ` (3 cells) is the
+/// common case; ` C×2 ` (5) appears only when 2+ shells share a
+/// workspace, which is rare enough to truncate-fit. Rows without a
+/// badge render this many row-styled spaces.
+const BADGE_COL_W: usize = 4;
 
 /// Right-side status pill showing the most actionable problem on the
 /// PR. One pill at a time, ordered by severity: merge conflict beats
