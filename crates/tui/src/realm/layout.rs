@@ -169,18 +169,50 @@ pub(crate) fn clamp_pct(raw: i16) -> u16 {
     raw.clamp(SPLIT_MIN as i16, SPLIT_MAX as i16) as u16
 }
 
+/// Hard cap on the sidebar's column count. Past this, no matter
+/// what `sidebar_pct` says, extra horizontal space goes to the
+/// right pane. The sidebar's longest natural row (`[PR] #1234 A ●
+/// long title here    C CONFLICT  1d`) is around 90 cols; 100
+/// gives a small margin without leaving the sidebar dominating an
+/// ultra-wide monitor.
+///
+/// User can manually nudge the percentage up via `Shift-Right` —
+/// but the absolute cap stays in force. To override, future work:
+/// expose `ui.sidebar_max_cols` in `config.yaml`.
+pub(crate) const SIDEBAR_MAX_COLS: u16 = 100;
+
+/// Minimum sidebar width even on a narrow terminal — below this
+/// the row content is unreadable. Picked to fit the
+/// `[PR] #NNN A …` prefix plus a meaningful slice of the title.
+pub(crate) const SIDEBAR_MIN_COLS: u16 = 30;
+
 /// Compute the three pane rects (sidebar / right-top / right-bottom).
 /// `sidebar_pct` is the sidebar's share of the total width;
 /// `right_top_pct` is the activity row's share of the right column's
 /// height. Both should already be clamped to `[SPLIT_MIN, SPLIT_MAX]`.
+///
+/// The sidebar width gets a final `[SIDEBAR_MIN_COLS, SIDEBAR_MAX_COLS]`
+/// clamp so it never collapses below readable on narrow terminals
+/// nor dominates an ultra-wide monitor (where 40% of 400 cols =
+/// 160 cols sidebar, four times what the longest row needs).
 pub(crate) fn pane_areas(
     area: Rect,
     sidebar_pct: u16,
     right_top_pct: u16,
 ) -> (Rect, Rect, Rect) {
+    // Resolve the percentage → absolute cols, then clamp. Doing the
+    // clamp here (rather than mutating `sidebar_pct`) preserves the
+    // user's persisted preference: if they nudge to 60% on a wide
+    // monitor it stays 60%, but the rendered sidebar still caps at
+    // SIDEBAR_MAX_COLS. Resize the terminal smaller and the
+    // sidebar shrinks back toward their 60%.
+    let preferred = (area.width as u32 * sidebar_pct as u32 / 100) as u16;
+    let sidebar_cols = preferred
+        .clamp(SIDEBAR_MIN_COLS, SIDEBAR_MAX_COLS)
+        .min(area.width);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(sidebar_pct), Constraint::Min(0)])
+        .constraints([Constraint::Length(sidebar_cols), Constraint::Min(0)])
         .split(area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
