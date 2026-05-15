@@ -184,7 +184,12 @@ fn cursor_follows_workspace_key_across_resort() {
 fn merged_workspace_hidden() {
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
-    let mut merged = make_workspace("owner/repo", "o/r#1", now);
+    // updated_at well outside the 30-minute grace window — the
+    // "freshly merged stays in Inbox briefly" path doesn't apply
+    // here, so the merged workspace must be filtered out as
+    // expected.
+    let merged_at = now - Duration::hours(2);
+    let mut merged = make_workspace("owner/repo", "o/r#1", merged_at);
     if let Some(t) = merged.pr.as_mut() {
         t.state = TaskState::Merged;
     }
@@ -309,11 +314,15 @@ fn inactive_mailbox_shows_merged_and_closed_workspaces() {
     // disappeared from the inbox after a merge.
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
-    let mut merged = make_workspace("owner/repo", "merged#1", now);
+    // Past the 30-min grace window — these are "permanently
+    // inactivated" workspaces. The freshly-merged grace path is
+    // covered separately.
+    let stale = now - Duration::hours(2);
+    let mut merged = make_workspace("owner/repo", "merged#1", stale);
     if let Some(t) = merged.pr.as_mut() {
         t.state = TaskState::Merged;
     }
-    let mut closed = make_workspace("owner/repo", "closed#1", now);
+    let mut closed = make_workspace("owner/repo", "closed#1", stale);
     if let Some(t) = closed.pr.as_mut() {
         t.state = TaskState::Closed;
     }
@@ -1314,12 +1323,15 @@ fn work_target_skips_passing_pr_with_no_action() {
 #[test]
 fn merged_closed_hidden_from_inbox_by_default() {
     // Default: Inbox is actionable-only. Merged + Closed go to the
-    // Inactive mailbox, not Inbox.
+    // Inactive mailbox, not Inbox. updated_at past the grace
+    // window (30 min) so the freshly-merged-stays-in-inbox path
+    // doesn't apply; we're testing the steady-state behavior.
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
-    let mut merged = make_task("o/r", "o/r#1", now);
+    let stale = now - Duration::hours(2);
+    let mut merged = make_task("o/r", "o/r#1", stale);
     merged.state = pilot_core::TaskState::Merged;
-    let mut closed = make_task("o/r", "o/r#2", now);
+    let mut closed = make_task("o/r", "o/r#2", stale);
     closed.state = pilot_core::TaskState::Closed;
     let open = make_task("o/r", "o/r#3", now);
 

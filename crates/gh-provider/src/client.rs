@@ -738,8 +738,89 @@ impl GhClient {
             }
         }
 
+        // Recently-merged sweep. The main inbox search is `is:open`,
+        // so a PR that merges between polls drops out entirely —
+        // pilot's local copy keeps showing the last-known state
+        // (typically QUEUED or AUTO) forever, until rescope finally
+        // removes the row. The user never sees MERGED.
+        //
+        // Fix: one extra search per poll for PRs merged in the last
+        // 24h, scoped by the SAME role qualifiers as the inbox
+        // search. The merged PRs land via the same upsert path; the
+        // mailbox-membership predicate routes them to Inactive
+        // (state=Merged → not in Inbox) so they don't pollute the
+        // active view. User sees them briefly with the MERGED pill
+        // before they fall into history.
+        //
+        // Cost: ONE extra GraphQL search per poll. 24h window keeps
+        // the result set small (most repos merge a few PRs per day).
+        // No pagination: if a repo merges >100 PRs in 24h, the tail
+        // is silently dropped — accept that, the user can still see
+        // them via GitHub directly.
+        let yesterday = (chrono::Utc::now() - chrono::Duration::hours(24))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut merged_quals = vec![
+            "is:pr".to_string(),
+            "is:merged".to_string(),
+            "archived:false".to_string(),
+            format!("merged:>={yesterday}"),
+        ];
+        if self.pr_filters.is_empty() {
+            merged_quals.push(format!("involves:{}", self.user));
+        } else {
+            merged_quals.extend(self.pr_filters.iter().cloned());
+        }
+        let merged_query = graphql::build_query(&merged_quals);
+        tracing::debug!("Recently-merged sweep: {merged_query}");
+        if let Err(reason) = self.try_acquire() {
+            tracing::warn!(
+                "recently-merged sweep blocked by rate budget: {reason}"
+            );
+        } else {
+            let body = graphql::query_body(&merged_query);
+            match self
+                .post_graphql_with_retry::<graphql::GqlResponse>(&body)
+                .await
+            {
+                Ok(resp) => {
+                    if let Some(data) = &resp.data {
+                        if let Some(rl) = &data.rate_limit {
+                            self.observe_rate_limit(rl);
+                        }
+                        let existing_keys: std::collections::HashSet<String> =
+                            tasks.iter().map(|t| t.id.key.clone()).collect();
+                        let mut added = 0usize;
+                        for pr in &data.search.nodes {
+                            let task = graphql::pr_to_task(pr, &self.user);
+                            if !existing_keys.contains(&task.id.key) {
+                                tasks.push(task);
+                                added += 1;
+                            }
+                        }
+                        if added > 0 {
+                            tracing::info!(
+                                "recently-merged sweep: {added} PRs back-filled \
+                                 with final MERGED state",
+                            );
+                        }
+                    }
+                    if let Some(errors) = resp.errors {
+                        let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
+                        tracing::warn!(
+                            "recently-merged sweep errors: {}",
+                            detailed.join("; "),
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("recently-merged sweep failed: {e}");
+                }
+            }
+        }
+
         tracing::info!(
-            "GraphQL returned {} PRs (incl. {} watched repos)",
+            "GraphQL returned {} PRs (incl. {} watched repos + merged-sweep)",
             tasks.len(),
             self.watch_repos.len()
         );

@@ -2125,6 +2125,18 @@ fn build_implement_issue_prompt(issue: &pilot_core::Task) -> String {
 /// - **Inactive**: not snoozed AND primary task is `Merged` /
 ///   `Closed`.
 /// - **Snoozed**: workspace is snoozed.
+/// How long a freshly-merged/closed PR stays visible in the Inbox
+/// before falling into the Inactive mailbox. The point: when a PR
+/// merges between polls, the gh-provider's recently-merged sweep
+/// catches it and updates `state=Merged`. Without this grace
+/// window the row would IMMEDIATELY disappear from the Inbox view
+/// the user was looking at — they'd never see the MERGED pill.
+///
+/// 30 minutes is enough to give pilot a poll cycle (or two) to
+/// surface the state transition while the user is still around,
+/// without permanently cluttering Inbox with completed work.
+pub const INACTIVE_GRACE: chrono::Duration = chrono::Duration::minutes(30);
+
 pub fn mailbox_membership(
     workspace: &Workspace,
     mailbox: Mailbox,
@@ -2132,6 +2144,20 @@ pub fn mailbox_membership(
     show_inactive_in_inbox: bool,
 ) -> bool {
     let snoozed = workspace.is_snoozed(now);
+    // "Recently inactivated" = task is Merged/Closed AND its
+    // `updated_at` (which GitHub touches at merge/close time) is
+    // within the grace window. Such workspaces appear in BOTH
+    // Inbox (so the user sees the MERGED/CLOSED transition) and
+    // Inactive (so they're already in their permanent home).
+    let recently_inactivated = workspace
+        .primary_task()
+        .map(|t| {
+            matches!(
+                t.state,
+                pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
+            ) && (now - t.updated_at) < INACTIVE_GRACE
+        })
+        .unwrap_or(false);
     match mailbox {
         Mailbox::Snoozed => snoozed,
         Mailbox::Inbox => {
@@ -2142,10 +2168,13 @@ pub fn mailbox_membership(
                 return true;
             }
             match workspace.primary_task() {
-                Some(t) => !matches!(
-                    t.state,
-                    pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
-                ),
+                Some(t) => {
+                    let is_terminal = matches!(
+                        t.state,
+                        pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
+                    );
+                    !is_terminal || recently_inactivated
+                }
                 None => true,
             }
         }
@@ -2956,11 +2985,26 @@ mod mailbox_membership_tests {
     use pilot_core::{TaskState, Workspace, WorkspaceKey};
 
     fn ws(state: Option<TaskState>) -> Workspace {
+        ws_with_updated_at(state, Utc::now() - Duration::hours(2))
+    }
+
+    /// Build a workspace with an explicit `updated_at` so the
+    /// grace-window tests can pin both ends (within grace = shown
+    /// in Inbox; outside grace = not shown).
+    ///
+    /// Default `ws()` uses `now - 2h` so it's OUTSIDE the 30-min
+    /// grace — most tests don't want the grace path to fire and
+    /// would otherwise need to re-specify updated_at every time.
+    fn ws_with_updated_at(
+        state: Option<TaskState>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Workspace {
         let now = Utc::now();
         let mut w = Workspace::empty(WorkspaceKey::new("k"), "main", now);
         if let Some(s) = state {
             let mut task = super::status_pill_tests::base_task();
             task.state = s;
+            task.updated_at = updated_at;
             task.url = "https://github.com/o/r/pull/1".into();
             w.attach_task(task);
         }
@@ -3002,6 +3046,50 @@ mod mailbox_membership_tests {
     fn merged_pr_is_in_inbox_when_show_inactive_in_inbox_is_on() {
         let w = ws(Some(TaskState::Merged));
         assert!(mailbox_membership(&w, Mailbox::Inbox, Utc::now(), true));
+    }
+
+    #[test]
+    fn freshly_merged_pr_stays_in_inbox_during_grace_window() {
+        // User watches a PR merge between polls. The
+        // recently-merged sweep brings it back with state=Merged.
+        // The grace window (INACTIVE_GRACE) keeps it visible in
+        // Inbox so the user sees the MERGED pill instead of the
+        // row vanishing on their next refresh.
+        let now = Utc::now();
+        let w = ws_with_updated_at(
+            Some(TaskState::Merged),
+            now - Duration::minutes(5), // well inside the 30-min grace
+        );
+        assert!(
+            mailbox_membership(&w, Mailbox::Inbox, now, false),
+            "merged within grace must stay visible in Inbox",
+        );
+        assert!(
+            mailbox_membership(&w, Mailbox::Inactive, now, false),
+            "and is also in Inactive — its permanent home",
+        );
+    }
+
+    #[test]
+    fn freshly_closed_pr_stays_in_inbox_during_grace_window() {
+        let now = Utc::now();
+        let w = ws_with_updated_at(
+            Some(TaskState::Closed),
+            now - Duration::minutes(10),
+        );
+        assert!(mailbox_membership(&w, Mailbox::Inbox, now, false));
+    }
+
+    #[test]
+    fn merged_pr_past_grace_window_falls_out_of_inbox() {
+        // 2 hours after merge: the row belongs in Inactive only.
+        let now = Utc::now();
+        let w = ws_with_updated_at(
+            Some(TaskState::Merged),
+            now - Duration::hours(2),
+        );
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, now, false));
+        assert!(mailbox_membership(&w, Mailbox::Inactive, now, false));
     }
 
     #[test]
