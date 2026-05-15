@@ -462,12 +462,16 @@ impl Server {
                                         return;
                                     }
                                 };
-                                let sources =
-                                    polling::sources_for(&setup, cfg.bus.clone()).await;
                                 // Share TickState with the long-lived
                                 // poll loop so a prompt dismissed here
                                 // stays dismissed there (and vice versa).
+                                // Lock BEFORE building sources so the
+                                // cached GhClient (held in TickState)
+                                // is reused / refreshed atomically.
                                 let mut state = cfg.poll_state.lock().await;
+                                let sources =
+                                    polling::sources_for(&setup, cfg.bus.clone(), &mut state)
+                                        .await;
                                 let outcome = if sources.is_empty() {
                                     // User just disabled every provider.
                                     // Treat as a deliberately empty

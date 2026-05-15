@@ -388,6 +388,7 @@ pub fn filter_linear_tasks(tasks: Vec<Task>, filter: &ProviderConfig) -> Vec<Tas
 pub async fn sources_for(
     setup: &pilot_core::PersistedSetup,
     bus: tokio::sync::broadcast::Sender<Event>,
+    state: &mut TickState,
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
@@ -397,28 +398,50 @@ pub async fn sources_for(
             .with(EnvProvider::new("GITHUB_TOKEN"))
             .with(CommandProvider::new("gh", &["auth", "token"]));
         match chain.resolve("github").await {
-            Ok(cred) => match GhClient::from_credential(cred).await {
-                Ok(client) => {
-                    let filter = setup.provider_config("github");
-                    let scopes = setup
-                        .selected_scopes
-                        .get("github")
-                        .cloned()
-                        .unwrap_or_default();
-                    let pr_qualifiers =
-                        build_pr_search_qualifiers(&filter, &scopes, client.username());
-                    let issue_qualifiers =
-                        build_issue_search_qualifiers(&filter, &scopes, client.username());
-                    let client = client.with_filters(pr_qualifiers, issue_qualifiers);
-                    sources.push(Box::new(GhSource {
-                        client,
-                        filter,
-                        scopes,
-                        bus: bus.clone(),
-                    }));
+            Ok(cred) => {
+                // Reuse the cached client when the credential source
+                // is unchanged. `with_filters` consumes Self and
+                // returns a new client with refreshed qualifiers —
+                // the underlying `Arc<Mutex<RateBudget>>` is cloned,
+                // so observations made by previous ticks (or by the
+                // GhSource we hand out below) remain visible to the
+                // cached copy and vice versa.
+                let cred_source = cred.source.clone();
+                let cached = state.gh_client.take().filter(|c| {
+                    c.credential_source() == cred_source.as_str()
+                });
+                let client_result: Result<GhClient, _> = match cached {
+                    Some(existing) => Ok(existing),
+                    None => GhClient::from_credential(cred).await,
+                };
+                match client_result {
+                    Ok(client) => {
+                        let filter = setup.provider_config("github");
+                        let scopes = setup
+                            .selected_scopes
+                            .get("github")
+                            .cloned()
+                            .unwrap_or_default();
+                        let pr_qualifiers =
+                            build_pr_search_qualifiers(&filter, &scopes, client.username());
+                        let issue_qualifiers =
+                            build_issue_search_qualifiers(&filter, &scopes, client.username());
+                        // `with_filters` returns a new owned client
+                        // sharing the same budget Arc — `.clone()` on
+                        // the result is cheap and keeps the cache in
+                        // sync with what GhSource holds.
+                        let client = client.with_filters(pr_qualifiers, issue_qualifiers);
+                        state.gh_client = Some(client.clone());
+                        sources.push(Box::new(GhSource {
+                            client,
+                            filter,
+                            scopes,
+                            bus: bus.clone(),
+                        }));
+                    }
+                    Err(e) => tracing::warn!("github client init failed: {e}"),
                 }
-                Err(e) => tracing::warn!("github client init failed: {e}"),
-            },
+            }
             Err(e) => tracing::info!("github credentials not available: {e}"),
         }
     }
@@ -459,7 +482,10 @@ pub async fn default_sources(
         // Empty selected_scopes = "all scopes" (legacy behavior).
         selected_scopes: Default::default(),
     };
-    sources_for(&setup, bus).await
+    // No persistent state — this helper is for ad-hoc / test paths
+    // where a fresh client per call is the right behavior.
+    let mut throwaway_state = TickState::default();
+    sources_for(&setup, bus, &mut throwaway_state).await
 }
 
 /// Run one poll tick: every source is called once and its tasks are
@@ -496,6 +522,20 @@ pub struct TickState {
     /// merge prompt. We don't re-prompt this session — the user can
     /// always merge by hand via the future adopt-sessions flow.
     pub(crate) rejected_merge: std::collections::HashSet<String>,
+    /// Persistent GhClient across ticks. WITHOUT this, every tick
+    /// rebuilds the client via `GhClient::from_credential`, which
+    /// resets the inner `RateBudget` to its full-bucket / no-remote-
+    /// observation default. Result: the "GitHub said remaining=50,
+    /// don't fire more requests" knowledge from the last tick is
+    /// thrown away, and the new tick's first request flies blind
+    /// straight into a 429. Reuse the client (and its budget Arc)
+    /// across ticks so observations carry over; only swap when the
+    /// credential SOURCE changes (env-var renamed, gh auth login
+    /// switched accounts). A token rotation under the same source
+    /// still requires a daemon restart — acceptable trade-off given
+    /// how rare that is and how invasive validating each tick would
+    /// be.
+    gh_client: Option<GhClient>,
 }
 
 pub async fn tick_with_state(
@@ -810,8 +850,13 @@ pub async fn run_one_tick(config: &ServerConfig) -> Option<u64> {
             return None;
         }
     };
-    let sources = sources_for(&setup, config.bus.clone()).await;
+    // Hold the lock across the entire tick — `sources_for` needs
+    // mutable access to the cached GhClient, then `tick_with_state`
+    // needs `&mut state` for the debounce / prompted-set bookkeeping.
+    // No other writer needs the lock briefly during a tick, so this
+    // is safe and avoids the lock-twice + state-drift risk.
     let mut state = config.poll_state.lock().await;
+    let sources = sources_for(&setup, config.bus.clone(), &mut state).await;
     if sources.is_empty() {
         // User disabled every provider (or credentials all
         // failed to resolve). Treat as "deliberately empty
