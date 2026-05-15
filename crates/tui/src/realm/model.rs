@@ -2305,6 +2305,10 @@ impl<T: TerminalAdapter> Model<T> {
             && !self.pr_details_fetched.contains(&w.key)
         {
             self.pr_details_fetched.insert(w.key.clone());
+            tracing::info!(
+                workspace_key = %w.key.as_str(),
+                "lazy-fetch: requesting PR details",
+            );
             self.send_cmd(IpcCommand::FetchPrDetails {
                 workspace_key: w.key.clone(),
             });

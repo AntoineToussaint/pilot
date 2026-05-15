@@ -460,9 +460,18 @@ impl RightPane {
         let mut header_spans: Vec<Span> = vec![
             Span::styled(format!("{glyph} "), Style::default().fg(title_color)),
             Span::styled("Activity", theme.title(focused)),
-            Span::raw("  "),
-            Span::styled(format!("{total}"), Style::default().fg(theme.text_dim)),
         ];
+        // Count goes in next to the label only when there IS
+        // activity. `Activity 0` reads like a broken counter; bare
+        // `Activity` reads naturally as "no activity yet" — which
+        // is the truthful state for fresh PRs with no comments.
+        if total > 0 {
+            header_spans.push(Span::raw("  "));
+            header_spans.push(Span::styled(
+                format!("{total}"),
+                Style::default().fg(theme.text_dim),
+            ));
+        }
         if unread > 0 {
             header_spans.push(Span::raw("  "));
             header_spans.push(Span::styled(

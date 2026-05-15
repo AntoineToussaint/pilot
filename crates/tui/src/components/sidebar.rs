@@ -931,11 +931,14 @@ impl Sidebar {
         let primary = workspace.and_then(|w| w.primary_task());
 
         // Primary state-specific action first — what the user most
-        // likely wants to do on THIS row.
+        // likely wants to do on THIS row. Labels match the resolver
+        // priority in `intent::resolve_work` so the hint matches
+        // what the keypress actually fires.
         if is_ready {
             out.push(Binding { keys: "Shift-M", label: "merge" });
         } else if has_work {
             let label = match primary {
+                Some(t) if t.has_conflicts => "fix conflict",
                 Some(t) if matches!(t.ci, pilot_core::CiStatus::Failure) => "fix CI",
                 Some(t) if t.url.contains("/issues/") => "implement",
                 _ => "work on this",
