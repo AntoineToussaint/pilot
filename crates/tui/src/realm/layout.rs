@@ -66,13 +66,21 @@ impl LayoutCtx {
     }
 
     /// Apply persisted splits from `~/.pilot/config.yaml::ui`. `None`
-    /// leaves the default in place. A persisted value counts as a
-    /// "user choice" — it ended up in YAML because the user nudged
-    /// or hand-edited — so the cap is lifted.
+    /// leaves the default in place.
+    ///
+    /// Does NOT flip `sidebar_user_resized` — a persisted percentage
+    /// is just the percent knob, not a "user wants the cap lifted"
+    /// declaration. On a 250-cell ultrawide, 40% × 250 = 100 cells
+    /// (cap hits cleanly); without this reassertion an old persisted
+    /// 40% launched into an uncapped 100-cell sidebar that on smaller
+    /// terminals looked correct but on ultrawides bloomed to ~40%
+    /// real estate before the cap could clamp it. The cap is now
+    /// reasserted on every launch; users who want a deliberately
+    /// wider sidebar nudge it at runtime (Shift-Right or drag), which
+    /// flips the flag in-session.
     pub fn apply_persisted(&mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) {
         if let Some(s) = sidebar_pct {
             self.sidebar_pct = clamp_pct(s as i16);
-            self.sidebar_user_resized = true;
         }
         if let Some(t) = right_top_pct {
             self.right_top_pct = clamp_pct(t as i16);
@@ -287,6 +295,31 @@ mod tests {
         // None leaves the existing value alone.
         c.apply_persisted(None, None);
         assert_eq!(c.sidebar_pct, SPLIT_MAX);
+    }
+
+    #[test]
+    fn apply_persisted_does_not_lift_the_column_cap() {
+        // Regression: previously, loading any persisted sidebar_pct
+        // flipped `sidebar_user_resized = true`, which removed the
+        // SIDEBAR_MAX_COLS cap. On an ultrawide terminal that turned
+        // the default 40% into a ~250-cell sidebar dominating the
+        // screen. The cap must reassert across launches; only an
+        // explicit runtime nudge / drag lifts it.
+        let mut c = LayoutCtx::new();
+        c.apply_persisted(Some(40), None);
+        assert!(!c.sidebar_user_resized);
+        // On a 250-cell ultrawide, 40% × 250 = 100 cells, which the
+        // cap allows; the test for the actual cap kicking in lives
+        // in pane_areas — here we just verify the flag stays clean.
+        let area = Rect::new(0, 0, 250, 50);
+        let (sidebar, _, _) =
+            pane_areas(area, c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        assert!(
+            sidebar.width <= SIDEBAR_MAX_COLS,
+            "sidebar {} exceeded cap {} after apply_persisted",
+            sidebar.width,
+            SIDEBAR_MAX_COLS,
+        );
     }
 
     #[test]
