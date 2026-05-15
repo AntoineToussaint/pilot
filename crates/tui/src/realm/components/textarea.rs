@@ -315,6 +315,23 @@ impl Component for Textarea {
 
 impl AppComponent<Msg, UserEvent> for Textarea {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
+        // Bracketed paste — Cmd-V / Ctrl-V into the reply textarea.
+        // Host terminal wraps the clipboard content; crossterm
+        // surfaces it as `Event::Paste(text)`. Insert the whole
+        // string at the cursor in one shot rather than running the
+        // per-key dispatch below (avoids triggering Enter handling
+        // for newlines in the pasted text, which would split the
+        // submit / insert-newline path).
+        if let Event::Paste(text) = ev {
+            for ch in text.chars() {
+                if ch == '\n' {
+                    self.insert_newline();
+                } else if !ch.is_control() {
+                    self.insert_char(ch);
+                }
+            }
+            return None;
+        }
         let Event::Keyboard(key) = ev else {
             return None;
         };

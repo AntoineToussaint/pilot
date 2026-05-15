@@ -93,6 +93,13 @@ pub struct TerminalStack {
     /// App turns them into `Command::Resize` and ships them at the
     /// next loop tick. Drained on every `drain_pending_resizes`.
     pending_resizes: Vec<(TerminalId, u16, u16)>,
+    /// Click targets for the tab strip, populated each render. Each
+    /// entry is `(tab_idx, (start_col, end_col_exclusive), row)`.
+    /// `handle_tab_click(col, row)` scans this on mouse-down to map
+    /// a click on the `claude` / `shell` label to a tab switch.
+    /// Cleared at the start of every render so removed terminals
+    /// don't leave stale hit targets.
+    tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
 }
 
 /// Direction of a pending split. `Vertical` = `|` = side-by-side =
@@ -221,6 +228,7 @@ impl TerminalStack {
             ctrl_w_latch: crate::confirm_latch::PrefixLatch::new(),
             pending_split: None,
             pending_resizes: Vec::new(),
+            tab_strip_hits: Vec::new(),
         }
     }
 
@@ -460,6 +468,30 @@ impl TerminalStack {
     /// mouse-wheel handler so trackpad gestures move the viewport
     /// instead of just being eaten. Uses `focused_terminal_id` so
     /// both Tabs and Splits modes route to the right tile.
+    /// Did the user click on a terminal-tab label? Returns the tab
+    /// index when `(col, row)` lands inside one of the click
+    /// targets cached during render. Called by the orchestrator's
+    /// mouse-down handler; when `Some(idx)` is returned the caller
+    /// flips `active_tab_idx` so the matching terminal comes to
+    /// the front.
+    pub fn tab_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.tab_strip_hits
+            .iter()
+            .find(|(_, range, hit_row)| *hit_row == row && range.contains(&col))
+            .map(|(idx, _, _)| *idx)
+    }
+
+    /// Set the active tab by index. Called from the mouse handler
+    /// after `tab_at` resolves a click to a tab. Bounds-checked: a
+    /// click on a stale hit-target (rare race between render and
+    /// click) does nothing rather than crashing.
+    pub fn set_active_tab(&mut self, idx: usize) {
+        if idx < self.visible_terminals().len() {
+            self.active_tab_idx = idx;
+            self.set_collapsed(false);
+        }
+    }
+
     /// Scroll the focused terminal by `delta` rows. Returns `true`
     /// iff the scroll actually fired (focused terminal exists +
     /// delta non-zero). The bool lets the mouse-handler surface a
@@ -574,6 +606,7 @@ impl TerminalStack {
         use crate::Binding;
         &[
             Binding { keys: "all keys", label: "→ PTY" },
+            Binding { keys: "Shift-PgUp/Dn", label: "scroll" },
             Binding { keys: "]]", label: "exit to sidebar" },
             Binding { keys: "Ctrl-c", label: "interrupt" },
         ]
@@ -590,6 +623,50 @@ impl TerminalStack {
         if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.ctrl_w_latch.arm();
             return PaneOutcome::Consumed;
+        }
+
+        // Scrollback navigation. Mouse-wheel scroll is the primary
+        // path (handled by the orchestrator's `handle_mouse`), but
+        // a keyboard fallback matters: some host terminals don't
+        // forward wheel events under mouse-capture, and reachable-
+        // by-keyboard-only is a hard requirement for accessibility.
+        //
+        // Bindings mirror what iTerm2 / Ghostty / VS Code use:
+        //   Shift-PageUp / Shift-PageDown — scroll by `STEP` rows
+        //   Shift-Home / Shift-End       — jump to top / bottom
+        const STEP: isize = 8;
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            match key.code {
+                KeyCode::PageUp => {
+                    self.scroll_active(-STEP);
+                    return PaneOutcome::Consumed;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_active(STEP);
+                    return PaneOutcome::Consumed;
+                }
+                KeyCode::Home => {
+                    if let Some(id) = self.focused_terminal_id()
+                        && let Some(slot) = self.terminals.get_mut(&id)
+                    {
+                        slot.vt
+                            .terminal
+                            .scroll_viewport(vt::terminal::ScrollViewport::Top);
+                    }
+                    return PaneOutcome::Consumed;
+                }
+                KeyCode::End => {
+                    if let Some(id) = self.focused_terminal_id()
+                        && let Some(slot) = self.terminals.get_mut(&id)
+                    {
+                        slot.vt
+                            .terminal
+                            .scroll_viewport(vt::terminal::ScrollViewport::Bottom);
+                    }
+                    return PaneOutcome::Consumed;
+                }
+                _ => {}
+            }
         }
 
         // Escape sequence is owned by the app-level dispatcher (see
@@ -772,14 +849,22 @@ impl TerminalStack {
             area.width.saturating_sub(2),
             1.min(area.height),
         );
+        // Clear last frame's tab click targets — terminals may have
+        // come or gone, indices shifted, area resized. We'll
+        // repopulate as the tab spans go in.
+        self.tab_strip_hits.clear();
         // Title row: "Terminals" plus an icon+label per active terminal
         // (e.g. `Terminals    claude   _ shell`). Active is bold-accent;
         // inactive is dim grey. Two-tab common case looks like a tab
         // strip; single-terminal shows just one entry.
+        let title_prefix = "Terminals  ";
         let mut title_spans: Vec<Span<'static>> = vec![
             Span::styled("Terminals", theme.title(focused)),
             Span::raw("  "),
         ];
+        // Cursor in cells — used to compute the column range each
+        // tab label occupies for click-hit-testing.
+        let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
         for (i, id) in visible.iter().enumerate() {
             let (icon, label, is_asking) = self
                 .terminals
@@ -811,19 +896,29 @@ impl TerminalStack {
             };
             if i > 0 {
                 title_spans.push(Span::raw("  "));
+                cursor = cursor.saturating_add(2);
             }
-            title_spans.push(Span::styled(format!("{icon} {label}"), style));
+            let tab_text = format!("{icon} {label}");
+            let tab_w = tab_text.chars().count() as u16;
+            // Record the click range BEFORE pushing the span so
+            // `cursor` is the tab's start column. End is exclusive.
+            self.tab_strip_hits
+                .push((i, cursor..cursor.saturating_add(tab_w), title_area.y));
+            cursor = cursor.saturating_add(tab_w);
+            title_spans.push(Span::styled(tab_text, style));
             // Bold yellow "!" next to an agent waiting on the user.
             // Stays prominent regardless of which tab is active so
             // the user notices a Claude prompt even while typing in
             // a different shell.
             if is_asking {
+                let asking_text = " ! needs input";
                 title_spans.push(Span::styled(
-                    " ! needs input",
+                    asking_text,
                     Style::default()
                         .fg(theme.warn)
                         .add_modifier(Modifier::BOLD),
                 ));
+                cursor = cursor.saturating_add(asking_text.chars().count() as u16);
             }
         }
         frame.render_widget(Paragraph::new(Line::from(title_spans)), title_area);

@@ -1742,6 +1742,19 @@ impl<T: TerminalAdapter> Model<T> {
         match m.kind {
             MouseEventKind::Down(button) => {
                 self.q_armed_at = None;
+                // Tab-strip click on the terminal pane top row →
+                // switch active tab. Checked BEFORE the
+                // "forward to inner program" path because the tab
+                // strip belongs to pilot, not to Claude/shell.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && let Some(idx) = self.terminals.tab_at(m.column, m.row)
+                {
+                    self.terminals.set_active_tab(idx);
+                    self.focus = PaneFocus::Terminals;
+                    self.set_focus_attr();
+                    self.redraw = true;
+                    return;
+                }
                 // Click inside the terminal pane while the inner
                 // program tracks mouse → forward the click as an
                 // escape sequence so Claude Code et al. respond to

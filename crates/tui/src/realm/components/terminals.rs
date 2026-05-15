@@ -129,6 +129,17 @@ impl Terminals {
         self.inner.scroll_active(delta)
     }
 
+    /// Click-to-switch tabs. Returns the tab index when the click
+    /// landed on a tab label; the caller invokes `set_active_tab`
+    /// to actually flip.
+    pub fn tab_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.inner.tab_at(col, row)
+    }
+
+    pub fn set_active_tab(&mut self, idx: usize) {
+        self.inner.set_active_tab(idx);
+    }
+
     /// True when this stack has no visible terminals for the active
     /// session. Used by the orchestrator to fall back from "key into
     /// PTY" to "key into sidebar's spawn binding" so `s`/`c`/`x`/`u`
