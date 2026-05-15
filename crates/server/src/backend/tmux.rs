@@ -59,10 +59,20 @@ pub const TMUX_SOCKET: &str = "pilot";
 /// key bindings (so nothing intercepts), no status bar (so output
 /// isn't framed). Set as a string and dropped to a temp file at
 /// `TmuxBackend::new` time so we don't depend on the user's `~/.tmux.conf`.
+///
+/// `mouse on` + `history-limit 10000` make the wheel scroll inside a
+/// shell pane work: tmux owns the alt-screen here (that's why
+/// libghostty reports alternate), so a Delta scroll on libghostty's
+/// own grid is a no-op. With mouse on, tmux receives the wheel via
+/// our encoded SGR sequence and enters copy-mode automatically; for
+/// inner programs that themselves request mouse tracking
+/// (claude / vim / less) tmux forwards the event through to them
+/// untouched, so they keep handling scroll natively.
 const TMUX_TRANSPARENT_CONF: &str = "\
 set -g prefix None
 set -g status off
-set -g mouse off
+set -g mouse on
+set -g history-limit 10000
 set -g default-terminal \"xterm-256color\"
 set -g escape-time 0
 unbind-key -a

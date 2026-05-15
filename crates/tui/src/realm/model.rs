@@ -1890,30 +1890,50 @@ impl<T: TerminalAdapter> Model<T> {
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
+                // Pilot sessions are wrapped in `tmux attach`, and the
+                // tmux client always runs on the alternate screen —
+                // libghostty's own Delta scroll is a guaranteed no-op
+                // there. With `mouse on` in the tmux config, encoding
+                // the wheel as SGR mouse and writing it to the PTY
+                // lets tmux drive its own scrollback (or forward the
+                // event to an inner program that's tracking mouse,
+                // like claude/vim/less). That's why scroll "used to
+                // work" — encode + forward is the only way to scroll
+                // anything pilot wraps.
+                if self.terminals.focused_terminal_tracks_mouse() {
+                    let cell_col =
+                        m.column.saturating_sub(right_bottom_rect.x) as u32;
+                    let cell_row =
+                        m.row.saturating_sub(right_bottom_rect.y) as u32;
+                    // SGR wheel mapping: button 4 = up, button 5 = down.
+                    let button = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                        libghostty_vt::mouse::Button::Four
+                    } else {
+                        libghostty_vt::mouse::Button::Five
+                    };
+                    if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
+                        libghostty_vt::mouse::Action::Press,
+                        Some(button),
+                        cell_col,
+                        cell_row,
+                    ) {
+                        self.send_cmd(IpcCommand::Write {
+                            terminal_id,
+                            bytes,
+                        });
+                        self.redraw = true;
+                        return;
+                    }
+                }
+                // Fallback: terminal isn't tracking mouse — drive
+                // libghostty's own viewport (raw PTY backend path).
                 const STEP: isize = 5;
                 let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
                     -STEP
                 } else {
                     STEP
                 };
-                use crate::components::terminal_stack::ScrollOutcome;
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
-                let outcome = self.terminals.scroll_active(delta);
-                tracing::debug!(
-                    delta = delta,
-                    outcome = ?outcome,
-                    "terminal_stack.scroll_active",
-                );
-                // Success is silent — the moved viewport IS the
-                // feedback. Only surface a notice when the scroll
-                // can't move because the underlying program owns
-                // its own scrollback (claude/vim/less on alt-screen).
-                if let ScrollOutcome::NoScrollback { alternate: true } = outcome {
-                    self.status.notice = Some(Notice::new(
-                        "scroll: this view manages its own scrollback — use the program's keys",
-                        NoticeSeverity::Hint,
-                    ));
-                }
+                let _ = self.terminals.scroll_active(delta);
                 self.redraw = true;
             }
             _ => {}
