@@ -1813,17 +1813,38 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                // Trackpad / wheel always scrolls libghostty's
-                // scrollback — same behaviour the user gets from
-                // every other terminal emulator (iTerm2, Ghostty,
-                // Alacritty). Forwarding wheel-events to the inner
-                // program sounds clever but in practice Claude Code,
-                // vim, less, etc. don't actually scroll their own
-                // history on wheel — they just eat the event and
-                // the user sees nothing happen. Buffer scroll always
-                // works; if a future inner program really wants the
-                // wheel, we can add an explicit opt-in.
-                if !rect_contains(right_bottom_rect, m.column, m.row) {
+                // Diagnostic notice: surfaces in the footer the
+                // moment a scroll event arrives, so the user can
+                // see whether pilot detected the trackpad gesture
+                // at all (sometimes the host terminal eats them).
+                // Includes the cursor position and whether it hit
+                // the terminal-pane rect — that's the single most
+                // common reason a scroll silently no-ops.
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                let dir = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                    "↑"
+                } else {
+                    "↓"
+                };
+                let in_terminal = rect_contains(right_bottom_rect, m.column, m.row);
+                self.status.notice = Some(Notice::new(
+                    format!(
+                        "scroll {dir} at ({},{}) — terminal pane: {}",
+                        m.column,
+                        m.row,
+                        if in_terminal { "yes" } else { "NO" },
+                    ),
+                    NoticeSeverity::Info,
+                ));
+                tracing::debug!(
+                    col = m.column,
+                    row = m.row,
+                    in_terminal = in_terminal,
+                    direction = dir,
+                    "mouse scroll event received",
+                );
+                self.redraw = true;
+                if !in_terminal {
                     return;
                 }
                 const STEP: isize = 3;
@@ -1832,8 +1853,20 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     STEP
                 };
-                self.terminals.scroll_active(delta);
-                self.redraw = true;
+                let fired = self.terminals.scroll_active(delta);
+                tracing::debug!(
+                    delta = delta,
+                    fired = fired,
+                    "terminal_stack.scroll_active",
+                );
+                if !fired {
+                    self.status.notice = Some(Notice::new(
+                        format!(
+                            "scroll {dir} ignored: no focused terminal (Tabs mode = no active tab, or empty)",
+                        ),
+                        NoticeSeverity::Info,
+                    ));
+                }
             }
             _ => {}
         }

@@ -125,8 +125,8 @@ impl Terminals {
     /// Scroll the active terminal's viewport by `delta` rows. Negative
     /// = into scrollback; positive = back toward the live content.
     /// Driven from the orchestrator's mouse-wheel handler.
-    pub fn scroll_active(&mut self, delta: isize) {
-        self.inner.scroll_active(delta);
+    pub fn scroll_active(&mut self, delta: isize) -> bool {
+        self.inner.scroll_active(delta)
     }
 
     /// True when this stack has no visible terminals for the active

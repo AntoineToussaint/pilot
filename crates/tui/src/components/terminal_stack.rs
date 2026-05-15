@@ -460,19 +460,25 @@ impl TerminalStack {
     /// mouse-wheel handler so trackpad gestures move the viewport
     /// instead of just being eaten. Uses `focused_terminal_id` so
     /// both Tabs and Splits modes route to the right tile.
-    pub fn scroll_active(&mut self, delta: isize) {
+    /// Scroll the focused terminal by `delta` rows. Returns `true`
+    /// iff the scroll actually fired (focused terminal exists +
+    /// delta non-zero). The bool lets the mouse-handler surface a
+    /// "scroll ignored, no terminal here" notice instead of the
+    /// event silently disappearing.
+    pub fn scroll_active(&mut self, delta: isize) -> bool {
         if delta == 0 {
-            return;
+            return false;
         }
         let Some(id) = self.focused_terminal_id() else {
-            return;
+            return false;
         };
         let Some(slot) = self.terminals.get_mut(&id) else {
-            return;
+            return false;
         };
         slot.vt
             .terminal
             .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta));
+        true
     }
 
     pub fn cycle_tab_forward(&mut self) {
