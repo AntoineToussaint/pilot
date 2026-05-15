@@ -281,15 +281,27 @@ pub async fn handle_spawn(
                 return;
             }
         };
-        // Per-terminal rolling buffer for state detection — bounded
-        // so a long agent run doesn't grow it forever. 4 KiB is
-        // enough to span every prompt the agents produce today.
-        // Folded inline (no per-chunk `tokio::spawn`) because heavy
-        // output would otherwise burn thousands of tiny tasks per
-        // second contending on the same mutex; doing the work in
-        // the pump task itself is one allocation cheaper per chunk.
-        const STATE_BUF_CAP: usize = 4 * 1024;
+        // Per-terminal rolling buffer for state detection. Bumped
+        // from 4 KiB to 32 KiB after a real bug: Claude's status-
+        // bar updates (token counter / elapsed-time ticker) emit
+        // tiny chunks that — with a small buffer — pushed the
+        // "Esc to cancel · Tab to amend" footer out of scope.
+        // detect_state then returned Active on the next chunk, the
+        // pill flickered off, and the user couldn't tell Claude
+        // still needed input. 32 KiB spans many minutes of status
+        // ticks.
+        const STATE_BUF_CAP: usize = 32 * 1024;
         let mut state_buf: Vec<u8> = Vec::with_capacity(STATE_BUF_CAP);
+        // Hysteresis: timestamp of the last Asking detection.
+        // When detect_state returns Active and the previous state
+        // was Asking, we ONLY transition to Active if it's been
+        // long enough since we last saw Asking patterns — gives
+        // the buffer time to capture genuine new output (user
+        // typed a response, Claude is now streaming back), rather
+        // than treating a ticker chunk that scrolled the prompt
+        // out of buffer as "agent done."
+        let mut last_asking_at: Option<std::time::Instant> = None;
+        const ASKING_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
 
         async fn maybe_emit_state_change(
             agent: Option<&std::sync::Arc<dyn pilot_agents::Agent>>,
@@ -303,8 +315,10 @@ pub async fn handle_spawn(
             bus: &tokio::sync::broadcast::Sender<Event>,
             id: TerminalId,
             session_key: &SessionKey,
+            last_asking_at: &mut Option<std::time::Instant>,
+            hysteresis: std::time::Duration,
         ) {
-            const STATE_BUF_CAP: usize = 4 * 1024;
+            const STATE_BUF_CAP: usize = 32 * 1024;
             let Some(agent) = agent else {
                 return;
             };
@@ -316,12 +330,34 @@ pub async fn handle_spawn(
             let Some(new_state) = agent.detect_state(buf) else {
                 return;
             };
-            let mut map = states.lock().await;
-            if map.get(&id).copied() == Some(new_state) {
+            if new_state == pilot_ipc::AgentState::Asking {
+                *last_asking_at = Some(std::time::Instant::now());
+            }
+            let current = {
+                let map = states.lock().await;
+                map.get(&id).copied()
+            };
+            // Hysteresis. Claude's status-bar updates make the
+            // detector miss the prompt for one chunk, then catch
+            // it on the next. Without this guard the pill flickers
+            // every few seconds while Claude is genuinely still
+            // waiting.
+            if current == Some(pilot_ipc::AgentState::Asking)
+                && new_state == pilot_ipc::AgentState::Active
+                && let Some(t) = last_asking_at
+                && t.elapsed() < hysteresis
+            {
+                tracing::debug!(
+                    terminal_id = ?id,
+                    "state hysteresis: suppressing Asking → Active (only {:?} since last Asking)",
+                    t.elapsed(),
+                );
                 return;
             }
-            map.insert(id, new_state);
-            drop(map);
+            if current == Some(new_state) {
+                return;
+            }
+            states.lock().await.insert(id, new_state);
             // Loud log so when the user reports "the pill didn't
             // show", we can confirm whether the daemon-side
             // detector actually fired vs. the event got lost
@@ -348,6 +384,8 @@ pub async fn handle_spawn(
                 &bus,
                 id_for_pump,
                 &session_key_for_pump,
+                &mut last_asking_at,
+                ASKING_HYSTERESIS,
             )
             .await;
             let _ = bus.send(Event::TerminalOutput {
@@ -365,6 +403,8 @@ pub async fn handle_spawn(
                 &bus,
                 id_for_pump,
                 &session_key_for_pump,
+                &mut last_asking_at,
+                ASKING_HYSTERESIS,
             )
             .await;
             let _ = bus.send(Event::TerminalOutput {
