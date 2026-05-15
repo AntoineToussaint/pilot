@@ -685,3 +685,57 @@ fn merge_pending_dedupes_re_emits_for_same_issue() {
     m.update(pilot_tui::realm::Msg::ModalDismissed);
     assert_eq!(m.top_modal(), None, "queue must not requeue duplicates");
 }
+
+#[test]
+fn tick_right_drives_auto_mark_and_emits_command() {
+    // Regression: `Model::tick_right` was added because the run loop
+    // never called `right.tick()` — auto-mark-read literally never
+    // fired, so the unread badge stayed stuck on the sidebar even
+    // after the user navigated past every comment. This test pins
+    // that wiring: ticker drives the inner pane AND the daemon
+    // gets `Command::MarkActivityRead` so the read state persists.
+    use chrono::Utc;
+    use pilot_core::{Activity, ActivityKind, Workspace};
+    use pilot_ipc::Command;
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let mut ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    // One unread activity row — cursor lands on it on first paint.
+    ws.activity.push(Activity {
+        author: "alice".into(),
+        body: "needs your attention".into(),
+        created_at: Utc::now(),
+        kind: ActivityKind::Comment,
+        node_id: None,
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    });
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+    });
+    // Auto-mark-read fires after `ui.auto_mark_delay` (default 1s).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    m.tick_right();
+    // The lazy PR-details fetch also queues here; we just need to
+    // find the MarkActivityRead among the queued commands. The
+    // assertion is "this command was emitted at all" — order with
+    // other commands isn't the contract.
+    let mut commands: Vec<Command> = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
+    }
+    let marked = commands.iter().find_map(|c| match c {
+        Command::MarkActivityRead {
+            session_key,
+            index,
+        } => Some((session_key.clone(), *index)),
+        _ => None,
+    });
+    let (session_key, index) =
+        marked.expect("tick_right must emit Command::MarkActivityRead after the delay");
+    assert_eq!(session_key.as_str(), "github-o-r-1");
+    assert_eq!(index, 0);
+}

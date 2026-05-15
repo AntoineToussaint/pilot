@@ -663,14 +663,18 @@ fn workspace_with_unread_at(key: &str, count: usize) -> Workspace {
 }
 
 #[test]
-fn focus_arms_mark_timer_on_unread_row() {
+fn workspace_with_unread_arms_mark_timer() {
+    // Updated contract: set_workspace arms the timer when the
+    // cursor lands on an unread row, regardless of pane focus.
+    // The old contract gated arming on focus, but in practice the
+    // user navigates the sidebar (focus stays there) while reading
+    // the right pane, and gating-on-focus meant the timer never
+    // fired for them. Now arming follows the row, not the focus.
     let mut rp = RightPane::new(PaneId::new(1));
     rp.set_workspace(Some(workspace_with_unread_at("o/r#1", 3)));
-    assert!(rp.auto_mark_progress().is_none(), "no focus → no timer");
-    rp.notify_focus_changed(true);
     assert!(
         rp.auto_mark_progress().is_some(),
-        "focus on unread row arms the timer"
+        "unread row under cursor arms the timer eagerly",
     );
 }
 

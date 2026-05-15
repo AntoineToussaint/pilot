@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/snapshots.rs
+assertion_line: 109
 expression: rendered
 ---
  PILOT  1  [7d]
@@ -7,4 +8,4 @@ expression: rendered
 
  ────────────────────────────────────
 
-   ▾  owner/repo  1
+   ▾  owner/repo

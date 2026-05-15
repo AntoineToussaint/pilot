@@ -241,10 +241,24 @@ impl RightPane {
     fn fire_auto_mark(&mut self) -> Option<(pilot_core::SessionKey, usize)> {
         let workspace = self.workspace.as_mut()?;
         let i = self.comment_cursor;
-        if !workspace.is_activity_unread(i) {
+        let total = workspace.activity.len();
+        let was_unread = workspace.is_activity_unread(i);
+        if !was_unread {
+            tracing::debug!(
+                index = i,
+                total,
+                "auto-mark fire: cursor not on an unread row — skipping",
+            );
             return None;
         }
         workspace.mark_activity_read(i);
+        let unread_after = workspace.unread_count();
+        tracing::info!(
+            workspace = %workspace.key,
+            index = i,
+            unread_after,
+            "auto-mark fire: flipped row to read",
+        );
         self.last_marked_read = Some(i);
         self.mark_timer.disarm();
         Some((pilot_core::SessionKey::from(&workspace.key), i))
@@ -352,6 +366,16 @@ impl RightPane {
             self.selected_activities.clear();
         }
         self.auto_collapse_for_workspace();
+        // Arm the auto-mark timer if the new workspace has an unread
+        // row under the (fresh) cursor. Without this the badge count
+        // stuck on the sidebar even as the user navigated past every
+        // comment — the timer only re-armed on Tab focus change /
+        // explicit click, which most users never did from the
+        // sidebar. The `focused` flag passed here is ignored by
+        // `should_arm_mark_timer` (kept in the signature for opt-in
+        // future use); arming is purely "is the cursor on an unread
+        // row right now."
+        self.rearm_mark_timer(true);
     }
 
     /// Map a mouse click to a pane action. Returns `true` when the
@@ -383,6 +407,15 @@ impl RightPane {
         {
             let target = *idx;
             self.comment_cursor = target;
+            // Click is the mouse equivalent of `v` — toggle the row's
+            // membership in the multi-select set so `w`/`f` know it's
+            // in the batch. Also flip expand so the user gets visual
+            // confirmation of the click (the body opens up).
+            if self.selected_activities.contains(&target) {
+                self.selected_activities.remove(&target);
+            } else {
+                self.selected_activities.insert(target);
+            }
             if self.expanded_activities.contains(&target) {
                 self.expanded_activities.remove(&target);
             } else {

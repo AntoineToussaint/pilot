@@ -2378,6 +2378,27 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Drive the right-pane auto-mark-read timer. Called once per
+    /// iteration. When the timer fires on an unread row under the
+    /// cursor, the inner pane mutates its workspace state AND we
+    /// ship `Command::MarkActivityRead` so the daemon persists.
+    /// Without this hook the auto-mark never fires — the timer
+    /// counted forever and unread badges never dropped.
+    pub fn tick_right(&mut self) {
+        if let Some((session_key, index)) = self.right.tick() {
+            tracing::info!(
+                %session_key,
+                index,
+                "auto-mark-read fired → Command::MarkActivityRead",
+            );
+            self.send_cmd(IpcCommand::MarkActivityRead {
+                session_key,
+                index,
+            });
+            self.redraw = true;
+        }
+    }
+
     /// Drive the polling spinner + termination check from the run
     /// loop. Cheap; called every iteration. Returns Some(msg) when
     /// the polling modal wants to be torn down.
@@ -2572,6 +2593,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             model.update(msg);
         }
         model.tick_notice();
+        model.tick_right();
 
         // 3. Process tuirealm-side messages (timer ticks for Loading,
         // injected modal keys). Non-blocking — listener thread already

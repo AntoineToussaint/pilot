@@ -948,17 +948,20 @@ impl Sidebar {
         // right pane to match the action's actual context.
         let _ = primary;
 
-        // Session lifecycle — show whichever side is actionable.
-        if has_sessions {
-            out.push(Binding { keys: "c", label: "claude" });
-            out.push(Binding { keys: "Shift-X", label: "kill" });
-        } else if workspace.is_some() {
+        // Session lifecycle. Whenever a workspace is selected we
+        // advertise the spawn shortcuts AND `e` editor — those are
+        // always relevant regardless of whether a session is already
+        // running (the user might want a second shell, an editor on
+        // the same worktree, etc.). `Shift-X` kill only makes sense
+        // when there's something to kill.
+        if workspace.is_some() {
             out.push(Binding { keys: "c", label: "claude" });
             out.push(Binding { keys: "s", label: "shell" });
-        }
-
-        // Empty inbox / no-row case — point at the create flow.
-        if workspace.is_none() {
+            out.push(Binding { keys: "e", label: "editor" });
+            if has_sessions {
+                out.push(Binding { keys: "Shift-X", label: "kill" });
+            }
+        } else {
             out.push(Binding { keys: "n", label: "new workspace" });
         }
 
@@ -1588,10 +1591,12 @@ impl Sidebar {
                         ),
                     ];
                     if let Some(s) = self.repo_summaries.get(name) {
-                        spans.push(Span::styled(
-                            format!("  {}", s.active),
-                            row_bg.unwrap_or_default().fg(theme.text_dim),
-                        ));
+                        // Active count is redundant — the workspace
+                        // rows are visible directly under the header,
+                        // so the user can count them. The attention
+                        // pill is the only summary that adds info
+                        // (and only when non-zero). Two raw numbers
+                        // side-by-side looked like a broken counter.
                         if s.attention > 0 {
                             spans.push(Span::styled(
                                 format!("  ● {}", s.attention),
