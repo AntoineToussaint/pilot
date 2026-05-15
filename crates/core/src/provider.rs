@@ -25,8 +25,17 @@ use crate::Task;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
-    /// Transient — try again on the next poll cycle.
-    Retryable { source: String, detail: String },
+    /// Transient — try again. `retry_after_secs` is a HINT from the
+    /// provider about when to retry; the polling driver should honor
+    /// it (e.g., when GitHub reports rate-limit hit, the reset window
+    /// is several minutes — retrying on the normal poll cadence just
+    /// burns the same error repeatedly). `None` means "no hint, use
+    /// the configured poll interval."
+    Retryable {
+        source: String,
+        detail: String,
+        retry_after_secs: Option<u64>,
+    },
     /// Credentials wrong / expired. Don't retry without user action.
     Auth { source: String, detail: String },
     /// Permanent failure. Surface, don't retry.
@@ -38,6 +47,22 @@ impl ProviderError {
         Self::Retryable {
             source: source.into(),
             detail: detail.into(),
+            retry_after_secs: None,
+        }
+    }
+
+    /// Same as `retryable` but with a hint about WHEN to retry. Used
+    /// by providers that know the exact reset deadline (GitHub's
+    /// `rateLimit.resetAt`, GitHub's `Retry-After` header, etc.).
+    pub fn retryable_after(
+        source: impl Into<String>,
+        detail: impl Into<String>,
+        secs: u64,
+    ) -> Self {
+        Self::Retryable {
+            source: source.into(),
+            detail: detail.into(),
+            retry_after_secs: Some(secs),
         }
     }
 
@@ -71,13 +96,34 @@ impl ProviderError {
         matches!(self, Self::Auth { .. })
     }
 
+    /// Provider-supplied "wait at least this long before retrying"
+    /// hint. Only populated for `Retryable` errors that came with a
+    /// known reset window; everything else returns None. The polling
+    /// driver clamps the next-tick sleep to at least this many
+    /// seconds when populated.
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Self::Retryable {
+                retry_after_secs, ..
+            } => *retry_after_secs,
+            _ => None,
+        }
+    }
+
     /// Full diagnostic — provider id + variant tag + the underlying
     /// error chain. Goes to the log file; not shown in the TUI by
     /// default (use `RUST_LOG=debug` or tail `/tmp/pilot.log`).
     pub fn diagnostic(&self) -> String {
         match self {
-            Self::Retryable { source, detail } => {
-                format!("[{source}] retryable: {detail}")
+            Self::Retryable {
+                source,
+                detail,
+                retry_after_secs,
+            } => {
+                let after = retry_after_secs
+                    .map(|s| format!(" (retry after {s}s)"))
+                    .unwrap_or_default();
+                format!("[{source}] retryable{after}: {detail}")
             }
             Self::Auth { source, detail } => format!("[{source}] auth: {detail}"),
             Self::Permanent { source, detail } => {
@@ -90,9 +136,14 @@ impl ProviderError {
     /// is one row.
     pub fn user_message(&self) -> String {
         match self {
-            Self::Retryable { source, .. } => {
-                format!("{source} hiccup, retrying next cycle")
-            }
+            Self::Retryable {
+                source,
+                retry_after_secs,
+                ..
+            } => match retry_after_secs {
+                Some(s) => format!("{source} throttled, retrying in {s}s"),
+                None => format!("{source} hiccup, retrying next cycle"),
+            },
             Self::Auth { source, .. } => {
                 format!("{source} auth failed — rotate token then `pilot --fresh`")
             }
@@ -169,5 +220,41 @@ mod tests {
         assert!(!s.contains("secret detail"));
         assert!(s.contains("github"));
         assert!(s.contains("retrying"));
+    }
+
+    #[test]
+    fn retryable_default_has_no_retry_after_hint() {
+        let r = ProviderError::retryable("github", "tcp reset");
+        assert_eq!(r.retry_after_secs(), None);
+    }
+
+    #[test]
+    fn retryable_after_carries_seconds() {
+        // The polling driver consults `retry_after_secs` to decide
+        // how long to back off — must round-trip exactly through
+        // the constructor.
+        let r = ProviderError::retryable_after("github", "rate limit hit", 600);
+        assert_eq!(r.retry_after_secs(), Some(600));
+        assert!(r.is_retryable());
+    }
+
+    #[test]
+    fn retry_after_only_meaningful_for_retryable_variant() {
+        // Auth and Permanent errors never carry a retry hint —
+        // they're "stop trying" by definition.
+        let a = ProviderError::auth("github", "401");
+        assert_eq!(a.retry_after_secs(), None);
+        let p = ProviderError::permanent("github", "bad query");
+        assert_eq!(p.retry_after_secs(), None);
+    }
+
+    #[test]
+    fn user_message_mentions_throttle_when_retry_after_set() {
+        // Distinct from the generic "hiccup, retrying next cycle"
+        // wording so the user sees "we're paused, here's how long".
+        let r = ProviderError::retryable_after("github", "rate limit", 300);
+        let msg = r.user_message();
+        assert!(msg.contains("300s"), "got {msg}");
+        assert!(msg.contains("throttled"), "got {msg}");
     }
 }

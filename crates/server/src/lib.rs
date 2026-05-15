@@ -480,6 +480,7 @@ impl Server {
                                     polling::TickOutcome {
                                         polled: vec![],
                                         any_source_succeeded: true,
+                                        retry_after_secs: None,
                                     }
                                 } else {
                                     polling::tick_with_state(&cfg, &sources, &mut state).await

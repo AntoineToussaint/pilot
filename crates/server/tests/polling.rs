@@ -996,6 +996,7 @@ async fn rescope_removes_workspaces_with_no_active_session() {
             &make_task("o/r#current"),
         ))],
         any_source_succeeded: true,
+        retry_after_secs: None,
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1040,6 +1041,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
             &make_task("o/r#kept-elsewhere"),
         ))],
         any_source_succeeded: true,
+        retry_after_secs: None,
     };
     let mut state = polling::TickState::default();
     polling::rescope_with_state(&config, &outcome, &mut state).await;
@@ -1089,6 +1091,7 @@ async fn rescope_with_empty_but_successful_poll_still_cleans_up() {
     let outcome = polling::TickOutcome {
         polled: vec![],
         any_source_succeeded: true,
+        retry_after_secs: None,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1115,6 +1118,7 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
     let outcome = polling::TickOutcome {
         polled: vec![],
         any_source_succeeded: false,
+        retry_after_secs: None,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1613,4 +1617,79 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
         entry.0, pr_session_key,
         "terminal_meta entry must point at the PR's session_key after merge",
     );
+}
+
+// ── retry_after_secs propagation ──────────────────────────────────────
+
+struct ThrottledSource {
+    name: String,
+    retry_after_secs: u64,
+}
+
+impl TaskSource for ThrottledSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        let name = self.name.clone();
+        let secs = self.retry_after_secs;
+        Box::pin(async move {
+            Err(pilot_core::ProviderError::retryable_after(
+                name,
+                "rate limited (test)",
+                secs,
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn tick_surfaces_retry_after_from_throttled_source() {
+    // The polling driver consults `TickOutcome::retry_after_secs`
+    // to extend the sleep between ticks. Verify the per-source
+    // hint propagates through `tick_with_state` unchanged.
+    let config = ServerConfig::in_memory();
+    let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(ThrottledSource {
+        name: "github".into(),
+        retry_after_secs: 600,
+    })];
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    assert_eq!(outcome.retry_after_secs, Some(600));
+}
+
+#[tokio::test]
+async fn tick_max_aggregates_retry_after_across_sources() {
+    // Two sources both throttled with different hints — the outer
+    // driver sleeps the LONGER, not the average. Tighter would
+    // re-fire the worse-throttled source mid-window.
+    let config = ServerConfig::in_memory();
+    let sources: Vec<Box<dyn TaskSource>> = vec![
+        Box::new(ThrottledSource {
+            name: "github".into(),
+            retry_after_secs: 60,
+        }),
+        Box::new(ThrottledSource {
+            name: "linear".into(),
+            retry_after_secs: 900,
+        }),
+    ];
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    assert_eq!(outcome.retry_after_secs, Some(900));
+}
+
+#[tokio::test]
+async fn tick_no_retry_after_when_no_source_supplied_a_hint() {
+    // Generic retryable errors (no hint) must NOT populate the
+    // field. Otherwise the driver would synthesize a sleep where
+    // a plain network hiccup should retry on normal cadence.
+    let config = ServerConfig::in_memory();
+    let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(FailingSource("github".into()))];
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    assert_eq!(outcome.retry_after_secs, None);
 }

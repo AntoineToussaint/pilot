@@ -19,6 +19,18 @@ pub enum GhError {
     /// data-visibility regression worth surfacing.
     #[error("all {count} watched-repo queries failed")]
     WatchAllFailed { count: usize },
+    /// Rate budget said no. `retry_after_secs` carries the precise
+    /// reset window (from GitHub's `rateLimit.resetAt` for remote,
+    /// or the local-bucket refill ETA for local exhaustion) so the
+    /// polling layer can sleep exactly until the budget opens up
+    /// instead of retrying blindly. Distinct from `Graphql` so the
+    /// `From<GhError>` mapping can preserve the `retry_after_secs`
+    /// hint into `ProviderError::Retryable`.
+    #[error("rate budget blocked the request: {reason} (retry after {retry_after_secs}s)")]
+    RateLimited {
+        retry_after_secs: u64,
+        reason: String,
+    },
 }
 
 /// Render a `GhError` as a useful string. The Display impl on
@@ -29,6 +41,10 @@ pub enum GhError {
 fn detail_of(err: &GhError) -> String {
     match err {
         GhError::Graphql(s) => s.clone(),
+        GhError::RateLimited {
+            retry_after_secs,
+            reason,
+        } => format!("{reason} (retry after {retry_after_secs}s)"),
         GhError::Truncated { count, pages } => format!(
             "GitHub returned {count} PRs across {pages} pages and we hit the safety cap. \
              Your filter likely matches too many PRs — narrow it in Settings."
@@ -58,6 +74,22 @@ impl From<GhError> for pilot_core::ProviderError {
     fn from(err: GhError) -> Self {
         const SOURCE: &str = "github";
         let detail = detail_of(&err);
+
+        // Rate-budget refusals carry an exact `retry_after_secs`
+        // hint — preserve it into `ProviderError::Retryable` so the
+        // polling driver can sleep until the reset window opens
+        // instead of retrying on its normal cadence and burning the
+        // same error repeatedly.
+        if let GhError::RateLimited {
+            retry_after_secs, ..
+        } = &err
+        {
+            return pilot_core::ProviderError::retryable_after(
+                SOURCE,
+                detail,
+                *retry_after_secs,
+            );
+        }
 
         // Status-aware classification when we have an octocrab
         // GitHub error: 401/403 → auth; 5xx + 429 → retryable. This
@@ -221,7 +253,24 @@ impl GhClient {
     fn acquire_or_block(&self, op: &str) -> Result<(), GhError> {
         if let Err(reason) = self.try_acquire() {
             tracing::warn!("{op} blocked by rate budget: {reason}");
-            return Err(GhError::Graphql(reason.to_string()));
+            let retry_after_secs = match &reason {
+                crate::rate_budget::AcquireError::LocalBudgetExhausted { wait_secs } => {
+                    *wait_secs
+                }
+                crate::rate_budget::AcquireError::RemoteLow { reset_at, .. } => {
+                    // `reset_at` is in the future when this fires (the
+                    // budget check is `reset_at > now`); clamp to >=1
+                    // so we always sleep at least a second instead of
+                    // tight-looping if the wall clock is slewing.
+                    let now = chrono::Utc::now();
+                    let secs = (*reset_at - now).num_seconds();
+                    secs.max(1) as u64
+                }
+            };
+            return Err(GhError::RateLimited {
+                retry_after_secs,
+                reason: reason.to_string(),
+            });
         }
         Ok(())
     }

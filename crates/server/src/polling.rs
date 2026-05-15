@@ -511,6 +511,12 @@ pub async fn tick_with_state(
     // actually report?" — a genuinely empty result set (filter
     // matches nothing) is data; "all sources errored" is not.
     let mut any_source_succeeded = false;
+    // Longest "retry after N seconds" hint surfaced by any source
+    // this tick. Plumbed back into the driver loop so we sleep at
+    // least that long before the next attempt — without it we'd
+    // keep firing the same rate-limited query at the normal cadence
+    // and watch the budget stay pegged.
+    let mut max_retry_after_secs: Option<u64> = None;
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
@@ -549,6 +555,15 @@ pub async fn tick_with_state(
                 } else {
                     "permanent"
                 };
+                // Capture the longest retry-after hint across all
+                // failing sources this tick. Provider gave us a
+                // precise number (GitHub's rateLimit.resetAt) —
+                // honor it.
+                if let Some(secs) = e.retry_after_secs() {
+                    max_retry_after_secs = Some(
+                        max_retry_after_secs.map_or(secs, |existing| existing.max(secs)),
+                    );
+                }
                 // Debounce: only emit a ProviderError if the message
                 // changed since the last failure for this source.
                 // Same rate-limit error every minute → one event,
@@ -570,6 +585,7 @@ pub async fn tick_with_state(
     TickOutcome {
         polled,
         any_source_succeeded,
+        retry_after_secs: max_retry_after_secs,
     }
 }
 
@@ -581,6 +597,14 @@ pub async fn tick_with_state(
 pub struct TickOutcome {
     pub polled: Vec<WorkspaceKey>,
     pub any_source_succeeded: bool,
+    /// Longest "wait at least N seconds before retrying" hint
+    /// surfaced by any source this tick — populated when a provider
+    /// reports a precise reset window (GitHub's `rateLimit.resetAt`,
+    /// HTTP `Retry-After`, …). The polling loop's outer driver uses
+    /// this to extend the sleep before the next tick, instead of
+    /// blindly tick-tick-ticking at the configured cadence and
+    /// burning the same rate-limit error each time.
+    pub retry_after_secs: Option<u64>,
 }
 
 /// Compare `polled` against the persisted workspace set; remove
@@ -721,13 +745,25 @@ pub fn spawn(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        // First tick fires immediately; subsequent ticks honor `interval`.
-        ticker.tick().await;
-        run_one_tick(&config).await;
         loop {
-            ticker.tick().await;
-            run_one_tick(&config).await;
+            // First iteration also runs immediately — the loop
+            // structure differs from the previous `tokio::time::interval`
+            // tick-then-act dance because we want the sleep duration
+            // computed AFTER each tick (rate-limit hints override
+            // the normal cadence). Trade-off: tick-jitter accumulates
+            // over hours; rate-limit honoring is more important.
+            let retry_after = run_one_tick(&config).await;
+            let sleep_for = match retry_after {
+                Some(secs) => interval.max(Duration::from_secs(secs)),
+                None => interval,
+            };
+            if retry_after.is_some() {
+                tracing::warn!(
+                    "polling: backing off {}s before next tick (rate-limit hint)",
+                    sleep_for.as_secs(),
+                );
+            }
+            tokio::time::sleep(sleep_for).await;
         }
     })
 }
@@ -747,15 +783,16 @@ pub fn spawn_with_sources(
             tracing::warn!("no provider sources configured — polling task is idle");
             return;
         }
-        let mut ticker = tokio::time::interval(interval);
         let mut state = TickState::default();
-        ticker.tick().await;
-        let outcome = tick_with_state(&config, &sources, &mut state).await;
-        rescope_with_state(&config, &outcome, &mut state).await;
         loop {
-            ticker.tick().await;
             let outcome = tick_with_state(&config, &sources, &mut state).await;
+            let retry_after = outcome.retry_after_secs;
             rescope_with_state(&config, &outcome, &mut state).await;
+            let sleep_for = match retry_after {
+                Some(secs) => interval.max(Duration::from_secs(secs)),
+                None => interval,
+            };
+            tokio::time::sleep(sleep_for).await;
         }
     })
 }
@@ -765,12 +802,12 @@ pub fn spawn_with_sources(
 /// long-lived spawn and the `Command::Refresh` immediate-tick path.
 /// Uses `config.poll_state` so prompt-dismissal memory crosses both
 /// paths.
-pub async fn run_one_tick(config: &ServerConfig) {
+pub async fn run_one_tick(config: &ServerConfig) -> Option<u64> {
     let setup = match pilot_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
         Err(e) => {
             tracing::warn!("polling: config.yaml load failed: {e}");
-            return;
+            return None;
         }
     };
     let sources = sources_for(&setup, config.bus.clone()).await;
@@ -785,12 +822,15 @@ pub async fn run_one_tick(config: &ServerConfig) {
         let outcome = TickOutcome {
             polled: vec![],
             any_source_succeeded: true,
+            retry_after_secs: None,
         };
         rescope_with_state(config, &outcome, &mut state).await;
-        return;
+        return None;
     }
     let outcome = tick_with_state(config, &sources, &mut state).await;
+    let retry_after = outcome.retry_after_secs;
     rescope_with_state(config, &outcome, &mut state).await;
+    retry_after
 }
 
 /// Merge `task` into the existing workspace for its workspace key
