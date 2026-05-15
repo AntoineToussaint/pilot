@@ -501,6 +501,69 @@ async fn migrate_handles_zero_sessions() {
     assert!(!moved, "no sessions → nothing to migrate");
 }
 
+#[tokio::test]
+async fn migrate_picks_up_pr_title_rename() {
+    // Regression for the deferred concern flagged in the
+    // worktree-slug stability tests: when a PR's title is edited
+    // upstream, `worktree_slug()` returns a new string, and the
+    // session's persisted `worktree_path` no longer matches.
+    //
+    // Path: this scenario falls into the "dir doesn't exist" branch
+    // (we never created the old folder in this test — just put a
+    // bogus path on the session record). Migration must rewrite
+    // the record to the new slug-derived path.
+    //
+    // The real git-worktree-move branch isn't covered here because
+    // it requires a real bare clone — different test file's job.
+    use pilot_core::WorkspaceSession;
+    let config = ServerConfig::in_memory();
+
+    // Build the workspace with the ORIGINAL title.
+    let mut task = make_task("o/r#7413");
+    task.title = "Initial draft".into();
+    let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
+    let session = WorkspaceSession::new(
+        ws.key.clone(),
+        pilot_core::SessionKind::Shell,
+        // Use a path that DOES match the original slug so we can
+        // assert it changes after the rename — same fallback the
+        // production spawn handler uses.
+        pilot_server::spawn_handler::worktree_root().join(ws.worktree_slug()),
+        Utc::now(),
+    );
+    let original_slug = ws.worktree_slug();
+    let original_path = session.worktree_path.clone();
+    ws.add_session(session);
+
+    // PR's title is renamed upstream. The next poll attaches a
+    // task with the same PR number but a new title — exactly what
+    // `prepare_upsert` does in production.
+    let mut renamed = make_task("o/r#7413");
+    renamed.title = "Propagate status code into FatalStreamError".into();
+    ws.attach_task(renamed);
+
+    // Sanity-check our fixture: the slug actually changed.
+    let renamed_slug = ws.worktree_slug();
+    assert_ne!(original_slug, renamed_slug, "fixture must trigger the rename");
+    assert!(renamed_slug.starts_with("PR-7413-"));
+
+    let moved = pilot_server::spawn_handler::migrate_session_paths_if_needed(
+        &config, &mut ws,
+    )
+    .await;
+    assert!(moved, "rename must trigger migration");
+
+    let expected = pilot_server::spawn_handler::worktree_root().join(&renamed_slug);
+    assert_eq!(
+        ws.sessions[0].worktree_path, expected,
+        "session path follows the new slug after migration",
+    );
+    assert_ne!(
+        ws.sessions[0].worktree_path, original_path,
+        "session path actually changed (not a no-op)",
+    );
+}
+
 // ── Create empty workspace (n key flow) ──────────────────────────────
 
 #[tokio::test]
