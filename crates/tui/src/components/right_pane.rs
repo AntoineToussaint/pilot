@@ -115,10 +115,16 @@ pub fn should_arm_mark_timer(
     workspace: Option<&pilot_core::Workspace>,
     cursor: usize,
 ) -> bool {
-    focused
-        && workspace
-            .map(|w| w.is_activity_unread(cursor))
-            .unwrap_or(false)
+    // `focused` is now ignored — see `tick` for rationale. Kept in
+    // the signature so existing call sites compile without churn
+    // and so a future opt-in (user wants focus-gating back) is
+    // one boolean away. Net effect: as long as the cursor sits
+    // on an unread row, the timer arms regardless of which pane
+    // owns keyboard focus.
+    let _ = focused;
+    workspace
+        .map(|w| w.is_activity_unread(cursor))
+        .unwrap_or(false)
 }
 
 impl RightPane {
@@ -238,10 +244,17 @@ impl RightPane {
     /// path. Returns `(session_key, index)` when the timer fired and
     /// an activity was just marked, so the App can persist via IPC.
     pub fn tick(&mut self, focused: bool) -> Option<(pilot_core::SessionKey, usize)> {
-        if !focused {
-            self.mark_timer.disarm();
-            return None;
-        }
+        // `focused` parameter kept for API compatibility but no
+        // longer gates the fire. The reasoning was originally "user
+        // navigated away, stop the countdown" but in practice the
+        // user often KEEPS the sidebar focused while looking at the
+        // activity that's already rendered in the right pane (the
+        // right pane shows the sidebar's selected workspace either
+        // way). The result was auto-mark only firing if the user
+        // explicitly Tab-ed into the right pane, which most users
+        // didn't do. Now: the timer ticks regardless of which pane
+        // owns keyboard focus.
+        let _ = focused;
         if !self.mark_timer.ready(self.auto_mark_delay) {
             return None;
         }
@@ -1191,9 +1204,15 @@ mod should_arm_mark_timer_tests {
     }
 
     #[test]
-    fn unfocused_never_arms() {
+    fn focus_no_longer_gates_arming() {
+        // Pre-fix the predicate required `focused=true`. Result:
+        // the auto-mark-read timer would never fire if the user
+        // kept the sidebar pane focused while reading the activity
+        // shown in the right pane. Now: as long as the cursor sits
+        // on an unread row, the timer arms regardless of focus.
         let w = ws_with_activity(3, 0);
-        assert!(!should_arm_mark_timer(false, Some(&w), 0));
+        assert!(should_arm_mark_timer(false, Some(&w), 0));
+        assert!(should_arm_mark_timer(true, Some(&w), 0));
     }
 
     #[test]

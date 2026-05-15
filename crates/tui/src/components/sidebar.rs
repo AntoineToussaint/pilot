@@ -1717,21 +1717,12 @@ impl Sidebar {
                                 &mut spans,
                             );
                         }
-                        // Inline unread dot — `●` glyph in the hover
-                        // accent when this workspace has any unread
-                        // activity. Sits right after the role suffix
-                        // so the eye lands on it during the natural
-                        // PR-number scan.
-                        if workspace.is_some_and(|w| w.unread_count() > 0) {
-                            let dot_style = if is_cursor {
-                                row_style
-                            } else {
-                                Style::default()
-                                    .fg(theme.hover)
-                                    .add_modifier(Modifier::BOLD)
-                            };
-                            push(Span::styled(" ●", dot_style), &mut used, &mut spans);
-                        }
+                        // Unread dot moved to the right-side trailer
+                        // (see `unread_dot` below) so the title text
+                        // doesn't shift around between read / unread
+                        // states. Mid-row position was hard to scan
+                        // when half the column was taken up by an
+                        // intermittent glyph.
                         // Inline needs-input marker — a bright `?`
                         // when any agent session in this workspace is
                         // `Asking`. Reuses the header glyph from the
@@ -1804,6 +1795,26 @@ impl Sidebar {
                         let between = badges.len().saturating_sub(1);
                         pills + between + 1 // +1 leading space before pills
                     };
+                    // Unread pill — sits in the right-side trailer
+                    // (instead of mid-row between the role badge
+                    // and the title) so the title's left edge stays
+                    // stable across read / unread states. Format:
+                    // ` ●N ` for N unread (typical 1-9); ` ●N+`
+                    // when truncated to two digits + plus sign for
+                    // anything past 99. Keeping it always-3-chars-
+                    // visible-plus-leading-space stops trailer
+                    // alignment from jittering.
+                    let unread = workspace.map(|w| w.unread_count()).unwrap_or(0);
+                    let unread_text: Option<String> = if unread == 0 {
+                        None
+                    } else if unread < 10 {
+                        Some(format!(" ●{unread} "))
+                    } else if unread < 100 {
+                        Some(format!(" ●{unread}"))
+                    } else {
+                        Some(" ●99+".to_string())
+                    };
+                    let unread_len = unread_text.as_deref().map(visual_width).unwrap_or(0);
                     let status = task.and_then(status_pill);
                     let time_text = task.map(|t| relative_time(t.updated_at, now));
                     let fixed_cols_len = if task.is_some() {
@@ -1811,7 +1822,7 @@ impl Sidebar {
                     } else {
                         0
                     };
-                    let trailer_len = badges_len + fixed_cols_len;
+                    let trailer_len = unread_len + badges_len + fixed_cols_len;
 
                     let title_budget = row_budget
                         .saturating_sub(used)
@@ -1832,9 +1843,24 @@ impl Sidebar {
                             spans.push(Span::styled(" ".repeat(pad), row_style));
                             used = used.saturating_add(pad);
                         }
-                        // Runner badges first (between title + fixed
-                        // cols) so the fixed cols always sit at the
-                        // same x.
+                        // Unread pill first — leftmost trailer
+                        // element. Bright `●N` so the eye picks it
+                        // up at the right edge of the row while the
+                        // status pill stays in its fixed column.
+                        if let Some(text) = unread_text.as_deref() {
+                            let style = if is_cursor {
+                                row_style
+                            } else {
+                                Style::default()
+                                    .fg(theme.hover)
+                                    .add_modifier(Modifier::BOLD)
+                            };
+                            spans.push(Span::styled(text.to_string(), style));
+                            used = used.saturating_add(visual_width(text));
+                        }
+                        // Runner badges second (between unread pill
+                        // + fixed cols) so the fixed cols always sit
+                        // at the same x.
                         if !badges.is_empty() {
                             spans.push(Span::styled(" ", row_style));
                             used = used.saturating_add(1);
