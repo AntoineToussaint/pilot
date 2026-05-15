@@ -2019,25 +2019,14 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
         return;
     }
 
-    // Merge into the workspace's activity list, dedup by node_id.
-    // Activities without a node_id never come from this path (the
-    // GraphQL response always carries comment ids) but the guard
-    // is cheap and future-proof.
-    let existing_ids: std::collections::HashSet<String> = ws
-        .activity
-        .iter()
-        .filter_map(|a| a.node_id.clone())
-        .collect();
+    // Route through `Workspace::merge_activity` — the same path the
+    // poll cycle uses. Crucial: it dedups by (author, body,
+    // created_at) AND remaps `read_indices` across the post-sort
+    // positions. The prior implementation here did a raw push +
+    // sort, which left `read_indices` pointing at stale slots —
+    // every lazy-fetch silently scrambled the user's read marks.
     let merged_count = activities.len();
-    for act in activities {
-        if let Some(id) = act.node_id.as_ref()
-            && existing_ids.contains(id)
-        {
-            continue;
-        }
-        ws.activity.push(act);
-    }
-    ws.activity.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    ws.merge_activity(&activities);
     tracing::info!(
         "fetch_pr_details: merged {} review-thread activities into {workspace_key}",
         merged_count,

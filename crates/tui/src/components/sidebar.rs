@@ -1362,6 +1362,11 @@ impl Sidebar {
                 }
             }
             Event::AgentState { session_key, state } => {
+                tracing::info!(
+                    %session_key,
+                    state = ?state,
+                    "sidebar: received Event::AgentState",
+                );
                 // The daemon-side detector flipped an agent into
                 // `Asking` (yes/no prompt) or back to `Active`.
                 // Update the sidebar-local `agents_asking` set —

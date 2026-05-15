@@ -322,6 +322,17 @@ pub async fn handle_spawn(
             }
             map.insert(id, new_state);
             drop(map);
+            // Loud log so when the user reports "the pill didn't
+            // show", we can confirm whether the daemon-side
+            // detector actually fired vs. the event got lost
+            // somewhere downstream. Keyed off TerminalId so
+            // grep-ing the log file makes the path obvious.
+            tracing::info!(
+                terminal_id = ?id,
+                %session_key,
+                state = ?new_state,
+                "agent state transition → broadcasting Event::AgentState",
+            );
             let _ = bus.send(Event::AgentState {
                 session_key: session_key.clone(),
                 state: new_state,
@@ -392,42 +403,45 @@ pub async fn handle_spawn(
         let backend_key = backend_key.clone();
         let id = terminal_id;
         tokio::spawn(async move {
-            // Wait for the agent's input area to be ready. For agents
-            // whose first interactive screen registers as `Asking`
-            // (yes/no prompt detectors that fire on the welcome
-            // banner), this short-circuits. For Claude — whose
-            // welcome screen registers as `Active` — we fall through
-            // to the 1.5s settle and then write. 10s is the hard
-            // upper bound for slow cold starts (npm bootstrapping,
-            // first-run auth).
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            let mut settled = false;
+            // Readiness check: wait until the agent has emitted
+            // ANY output (its `AgentState` map entry was populated
+            // by the pump task's first `detect_state` call), then
+            // a brief settle so the banner finishes drawing before
+            // we paste. The previous version waited for
+            // `state == Asking` — but Claude's welcome banner
+            // registers as `Active`, never `Asking`, so the wait
+            // ALWAYS hit its 10s deadline plus a 1.5s settle = ~12s
+            // of dead air between Claude spawn and the prompt
+            // appearing. Felt completely broken.
+            //
+            // The output-presence proxy is faster and more accurate:
+            // - 50ms poll interval (vs. 200ms before)
+            // - bail when the map has any entry for this terminal
+            // - 5s hard cap for cold starts that block on auth/npm
+            // - 600ms settle after first output (Claude's banner
+            //   typically finishes drawing in <500ms)
+            const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+            const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+            const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+            let deadline = std::time::Instant::now() + HARD_DEADLINE;
+            let mut got_output = false;
             while std::time::Instant::now() < deadline {
-                let ready = states
-                    .lock()
-                    .await
-                    .get(&id)
-                    .copied()
-                    .map(|s| s == pilot_ipc::AgentState::Asking)
-                    .unwrap_or(false);
-                if ready {
-                    settled = true;
+                let has_entry = states.lock().await.contains_key(&id);
+                if has_entry {
+                    got_output = true;
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(POLL_INTERVAL).await;
             }
-            if !settled {
-                // Cold start fallback: give the agent a beat to draw
-                // its input area before pasting. Without this, fast
-                // Claude startups race the paste and the first few
-                // bytes land in the welcome banner instead of the
-                // input box.
+            if !got_output {
                 tracing::warn!(
                     terminal_id = ?id,
-                    "initial_prompt: agent never reached Asking — writing after settle delay"
+                    "initial_prompt: agent produced no output in {:?} — \
+                     writing anyway (cold start / agent hung?)",
+                    HARD_DEADLINE,
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             }
+            tokio::time::sleep(SETTLE).await;
             if let Err(e) = backend.write(&backend_key, &paste).await {
                 tracing::warn!(
                     terminal_id = ?id,

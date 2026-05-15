@@ -749,38 +749,18 @@ impl RightPane {
         let workspace = self.workspace.as_ref();
         let has_workspace = workspace.is_some();
         let has_activity = workspace.map(|w| !w.activity.is_empty()).unwrap_or(false);
-        let has_selection = !self.selected_activities.is_empty();
+        let selected: Vec<usize> = self.selected_activities.iter().copied().collect();
+        let has_selection = !selected.is_empty();
         let has_body = workspace
             .and_then(|w| w.primary_task())
             .and_then(|t| t.body.as_deref())
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        // `w` label is derived from the same priority chain the
-        // handler dispatches on, so the footer never lies about what
-        // pressing it will do. Selected comments win > workspace-
-        // level work (fix CI / implement issue) > nothing.
-        let work_label: Option<&'static str> = if has_selection {
-            Some("address comments")
-        } else if let Some(ws) = workspace {
-            match crate::components::sidebar::build_work_prompt(ws) {
-                Some(_) => {
-                    let primary = ws.primary_task();
-                    if primary
-                        .map(|t| matches!(t.ci, pilot_core::CiStatus::Failure))
-                        .unwrap_or(false)
-                    {
-                        Some("fix CI")
-                    } else if primary.map(|t| t.url.contains("/issues/")).unwrap_or(false) {
-                        Some("implement")
-                    } else {
-                        Some("work on this")
-                    }
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
+
+        // `w` label comes from the SAME classifier the keypress
+        // dispatcher uses. No parallel hardcoded match to drift —
+        // see `intent::classify_work` + `WorkPriority::label`.
+        let work_label = crate::intent::classify_work(workspace, &selected).map(|p| p.label());
 
         if has_workspace {
             out.push(Binding { keys: "r", label: "reply" });
@@ -788,8 +768,14 @@ impl RightPane {
         if let Some(label) = work_label {
             out.push(Binding { keys: "w", label });
         }
-        if has_activity && !has_selection {
-            out.push(Binding { keys: "v", label: "select comments" });
+        // Always advertise `v` when there's activity — even with
+        // existing selections, the user can press `v` to toggle
+        // more rows in or out. The label flips so the footer hints
+        // the next action ("select" → start a selection, "toggle"
+        // → there's a selection in progress).
+        if has_activity {
+            let label = if has_selection { "toggle row" } else { "select row" };
+            out.push(Binding { keys: "v", label });
         }
         if has_body {
             out.push(Binding { keys: "b", label: "description" });
