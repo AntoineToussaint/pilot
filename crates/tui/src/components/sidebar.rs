@@ -1875,32 +1875,62 @@ impl Sidebar {
                                 used = used.saturating_add(text_w.min(UNREAD_COL_W));
                             }
                         }
-                        // Badge column — fixed BADGE_COL_W cells. We
-                        // show the first badge (Claude or shell) only;
-                        // multi-badge workspaces are rare and a
-                        // crowded row reads worse than a single
-                        // representative letter.
+                        // Badge column — fixed BADGE_COL_W cells.
+                        // Render every (letter, count) from
+                        // runner_badges, each as its own colored
+                        // pill, separated by single row-styled
+                        // spaces. Right-aligned within the column so
+                        // status + time stay anchored. Drops badges
+                        // that overflow rather than truncating mid-
+                        // pill (a half-rendered ` C×` reads worse
+                        // than just leaving the second badge off).
                         {
-                            let first = badges.first();
-                            let label = match first {
-                                Some((letter, n)) if *n > 1 => {
-                                    format!(" {letter}×{n} ")
+                            // Build the labels first so we know the
+                            // total width before emitting spans.
+                            let labels: Vec<(char, String, usize)> = badges
+                                .iter()
+                                .map(|(letter, n)| {
+                                    let s = if *n > 1 {
+                                        format!(" {letter}×{n} ")
+                                    } else {
+                                        format!(" {letter} ")
+                                    };
+                                    let w = visual_width(&s);
+                                    (*letter, s, w)
+                                })
+                                .collect();
+                            // Greedily fit from the right (so the
+                            // most recently-added badge gets dropped
+                            // first when crowded — usually the user
+                            // sees their primary agent + the new
+                            // shell with shell as the dropped one;
+                            // sort already puts shell last so the
+                            // important badge survives).
+                            let mut included: Vec<(char, String, usize)> = Vec::new();
+                            let mut total_w = 0usize;
+                            for (letter, s, w) in labels {
+                                let sep = if included.is_empty() { 0 } else { 1 };
+                                if total_w + sep + w > BADGE_COL_W {
+                                    break;
                                 }
-                                Some((letter, _)) => format!(" {letter} "),
-                                None => String::new(),
-                            };
-                            let label_w = visual_width(&label);
-                            let pad = BADGE_COL_W.saturating_sub(label_w);
+                                total_w += sep + w;
+                                included.push((letter, s, w));
+                            }
+                            let pad = BADGE_COL_W.saturating_sub(total_w);
                             if pad > 0 {
                                 spans.push(Span::styled(" ".repeat(pad), row_style));
                                 used = used.saturating_add(pad);
                             }
-                            if let Some((letter, _)) = first {
+                            for (idx, (letter, label, w)) in included.into_iter().enumerate() {
+                                if idx > 0 {
+                                    spans.push(Span::styled(" ", row_style));
+                                    used = used.saturating_add(1);
+                                }
                                 spans.push(Span::styled(
                                     label,
-                                    badge_pill_style(theme, *letter),
+                                    badge_pill_style(theme, letter),
                                 ));
-                                used = used.saturating_add(label_w.min(BADGE_COL_W));
+                                used = used.saturating_add(w);
                             }
                         }
                         if fixed_cols_len > 0 {
@@ -2001,11 +2031,12 @@ const TIME_COL_W: usize = 4;
 /// case (5 cells). Rows without unread render 5 row-styled spaces
 /// so the badge / status / time columns to its right don't shift.
 const UNREAD_COL_W: usize = 5;
-/// Visible width of the agent-badge column. ` C ` (3 cells) is the
-/// common case; ` C×2 ` (5) appears only when 2+ shells share a
-/// workspace, which is rare enough to truncate-fit. Rows without a
-/// badge render this many row-styled spaces.
-const BADGE_COL_W: usize = 4;
+/// Visible width of the agent-badge column. Sized to fit the common
+/// "one agent + one shell" case (` C  S ` = 6 cells); a single
+/// badge gets right-aligned padding, more than two get truncated.
+/// Rows without any badge render this many row-styled spaces so
+/// the status / time columns to the right stay anchored.
+const BADGE_COL_W: usize = 6;
 
 /// Right-side status pill showing the most actionable problem on the
 /// PR. One pill at a time, ordered by severity: merge conflict beats
