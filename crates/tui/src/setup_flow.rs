@@ -92,10 +92,10 @@ pub fn persisted_to_outcome(p: PersistedSetup, report: SetupReport) -> SetupOutc
 
 /// Path to the user's YAML config. The setup wizard, `,` Settings
 /// palette, and any hand edits all converge here. Empty / missing
-/// → no persisted setup, wizard runs on first launch.
+/// → no persisted setup, wizard runs on first launch. Profile-aware
+/// via the shared `pilot_core::paths` resolver.
 fn config_yaml_path() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
-    std::path::PathBuf::from(home).join(".pilot/config.yaml")
+    pilot_core::paths::config_yaml()
 }
 
 /// Load the persisted setup from `~/.pilot/config.yaml::setup`.

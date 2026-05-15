@@ -19,13 +19,13 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Canonical daemon run-dir. Override via `PILOT_RUNTIME_DIR`.
+/// Canonical daemon run-dir. Override via `PILOT_RUNTIME_DIR` (legacy
+/// — wins over `PILOT_HOME` for back-compat) or via `PILOT_HOME` (the
+/// preferred multi-profile knob). Implementation lives in
+/// [`pilot_core::paths::runtime_dir`]; this thin re-export keeps the
+/// existing `lifecycle::runtime_dir` import path working.
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PILOT_RUNTIME_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".pilot").join("run")
+    pilot_core::paths::runtime_dir()
 }
 
 pub fn socket_path() -> PathBuf {

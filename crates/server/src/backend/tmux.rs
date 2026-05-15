@@ -44,9 +44,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
-/// Socket name for the pilot-owned tmux server. Isolating to a private
-/// socket means we never touch the user's interactive tmux sessions
-/// running on the default socket.
+/// Default socket name for the pilot-owned tmux server. Isolating to
+/// a private socket means we never touch the user's interactive tmux
+/// sessions running on the default socket.
+///
+/// The runtime socket name comes from
+/// [`pilot_core::paths::tmux_socket_name`] which derives a unique
+/// name per profile (`PILOT_HOME=~/.pilot-dev` → `pilot-dev`). The
+/// constant below is kept for backward compatibility with callers
+/// that imported it directly.
 pub const TMUX_SOCKET: &str = "pilot";
 
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
@@ -97,7 +103,12 @@ impl TmuxBackend {
         }
         let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
         tracing::info!("tmux backend available: {version}");
-        Self::with_socket(TMUX_SOCKET).ok()
+        // Profile-aware socket name. Default profile resolves to
+        // "pilot" — backward compatible with running sessions; a
+        // dev profile (`PILOT_HOME=~/.pilot-dev`) gets "pilot-dev"
+        // so two pilot daemons don't share session state.
+        let socket = pilot_core::paths::tmux_socket_name();
+        Self::with_socket(&socket).ok()
     }
 
     /// Build a backend pinned to a specific tmux socket name. Useful

@@ -1883,6 +1883,7 @@ dependencies = [
 name = "pilot-git-ops"
 version = "0.1.0"
 dependencies = [
+ "pilot-core",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

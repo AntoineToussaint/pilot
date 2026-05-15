@@ -566,8 +566,12 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         if self.setup.editors.is_empty() {
+            let path = pilot_core::paths::config_yaml();
             self.status.notice = Some(Notice::new(
-                "no editor detected — add one under `editors:` in ~/.pilot/config.yaml",
+                format!(
+                    "no editor detected — add one under `editors:` in {}",
+                    path.display(),
+                ),
                 NoticeSeverity::Info,
             ));
             self.redraw = true;

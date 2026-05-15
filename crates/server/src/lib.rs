@@ -33,13 +33,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, broadcast};
 
-/// Where pilot keeps its persistent state.
+/// Where pilot keeps its persistent state. Thin alias over
+/// [`pilot_core::paths::state_db`] so callers don't have to import
+/// the paths module just for this one helper. Override via the
+/// `PILOT_HOME` env var (see `pilot_core::paths` for details).
 pub fn state_db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home)
-        .join(".pilot")
-        .join("v2")
-        .join("state.db")
+    pilot_core::paths::state_db()
 }
 
 /// Open the persistent store at the canonical path. Returns `None` on

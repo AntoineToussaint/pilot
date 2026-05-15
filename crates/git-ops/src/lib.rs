@@ -64,14 +64,14 @@ impl WorktreeManager {
         }
     }
 
-    /// Default base dir: ~/.pilot/v2/
+    /// Default base dir: `<PILOT_HOME>/v2/` (default `~/.pilot/v2/`).
     ///
     /// v2-rooted so all of pilot's on-disk state — `state.db`, the
     /// bare-clone cache, every worktree — sits under one directory.
-    /// One `rm -rf ~/.pilot/v2/` wipes pilot completely.
+    /// One `rm -rf <PILOT_HOME>/v2/` wipes pilot completely.
+    /// Profile-aware via `pilot_core::paths::state_root`.
     pub fn default_base() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        Self::new(PathBuf::from(home).join(".pilot").join("v2"))
+        Self::new(pilot_core::paths::state_root())
     }
 
     fn bare_clone_path(&self, owner: &str, repo: &str) -> PathBuf {

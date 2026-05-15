@@ -850,10 +850,10 @@ pub async fn migrate_session_paths_if_needed(
 
 /// Root directory for every workspace's worktrees. Sits under the v2
 /// state root next to `state.db` so a single `rm -rf ~/.pilot/v2/`
-/// wipes everything pilot owns on disk.
+/// wipes everything pilot owns on disk. Override the parent via the
+/// `PILOT_HOME` env var (see `pilot_core::paths`).
 pub fn worktree_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".pilot").join("v2").join("worktrees")
+    pilot_core::paths::worktrees_root()
 }
 
 /// Compose the on-disk path for the Nth session of a workspace.

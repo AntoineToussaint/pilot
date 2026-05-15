@@ -490,10 +490,12 @@ pub struct HooksConfig {
 
 impl Default for HooksConfig {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         Self {
             enabled: true,
-            dir: PathBuf::from(home).join(".pilot").join("hooks"),
+            // Profile-aware. `~/.pilot-dev` keeps its own hooks
+            // distinct from `~/.pilot`, so a "send Slack on merge"
+            // hook configured in stable doesn't spam from dev runs.
+            dir: pilot_core::paths::hooks_dir(),
             schedule: HooksSchedule::default(),
             script_timeout: Duration::from_secs(300),
         }
@@ -656,8 +658,7 @@ impl Config {
     }
 
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".pilot").join("config.yaml")
+        pilot_core::paths::config_yaml()
     }
 }
 
