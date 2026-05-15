@@ -117,28 +117,6 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
-        reviewThreads(first: 20) {
-          nodes {
-            id
-            isResolved
-            isOutdated
-            path
-            line
-            originalLine
-            comments(first: 5) {
-              nodes {
-                id
-                author { login }
-                body
-                createdAt
-                path
-                line
-                originalLine
-                diffHunk
-              }
-            }
-          }
-        }
       }
     }
   }
@@ -277,7 +255,12 @@ pub struct GqlPr {
     pub review_requests: GqlReviewRequests,
     pub comments: GqlComments,
     pub reviews: GqlReviews,
-    #[serde(rename = "reviewThreads")]
+    /// Inline review-thread comments. Now lazy-fetched per PR via
+    /// `Command::FetchPrDetails` (see `PR_DETAILS_QUERY`) instead of
+    /// being pulled on every poll cycle — the eager fetch was the
+    /// single biggest contributor to GraphQL query cost. `#[serde(default)]`
+    /// because the inbox-scan query no longer requests this field.
+    #[serde(default, rename = "reviewThreads")]
     pub review_threads: GqlReviewThreads,
     pub commits: GqlCommits,
     /// Issues this PR will close on merge (linked via "Closes #N" in
@@ -430,8 +413,9 @@ pub struct GqlReview {
     pub submitted_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct GqlReviewThreads {
+    #[serde(default)]
     pub nodes: Vec<GqlReviewThread>,
 }
 
@@ -1719,18 +1703,26 @@ mod tests {
     // doesn't immediately re-trip RemoteLow.
 
     #[test]
-    fn pr_query_connection_sizes_are_pinned_low() {
-        // `reviewThreads × comments` is the dominant cost. The
-        // pre-fix combination of 50 × 10 = 500 items per PR was
-        // what blew the budget on busy inboxes.
+    fn pr_query_omits_review_threads_entirely() {
+        // `reviewThreads × comments` was the dominant cost
+        // (50 × 10 = 500 items per PR per inbox scan, every poll).
+        // The lazy-fetch path (`PR_DETAILS_QUERY`) now back-fills
+        // these on PR open, so the inbox-scan query MUST NOT
+        // request them. Hard regression guard — a re-introduction
+        // would silently undo the entire lazy split.
         assert!(
-            SEARCH_QUERY.contains("reviewThreads(first: 20)"),
-            "reviewThreads cap drifted",
+            !SEARCH_QUERY.contains("reviewThreads"),
+            "reviewThreads must not appear in the inbox-scan query — see PR_DETAILS_QUERY",
         );
+        // Sanity-check the lazy query still has them.
         assert!(
-            SEARCH_QUERY.contains("comments(first: 5)"),
-            "reviewThreads inner comments cap drifted",
+            PR_DETAILS_QUERY.contains("reviewThreads(first: 50)"),
+            "PR_DETAILS_QUERY is the new home for reviewThreads",
         );
+    }
+
+    #[test]
+    fn pr_query_other_connection_sizes_are_pinned_low() {
         assert!(
             SEARCH_QUERY.contains("comments(first: 15)"),
             "top-level comments cap drifted",
@@ -1745,7 +1737,6 @@ mod tests {
         );
         // Hard guard: the previous bloated numbers must NOT come
         // back accidentally.
-        assert!(!SEARCH_QUERY.contains("reviewThreads(first: 50)"));
         assert!(!SEARCH_QUERY.contains("comments(first: 30)"));
         assert!(!SEARCH_QUERY.contains("reviews(first: 20)"));
     }

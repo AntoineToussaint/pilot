@@ -361,6 +361,16 @@ pub enum Command {
     MergePr {
         workspace_key: pilot_core::WorkspaceKey,
     },
+    /// Lazy-fetch the workspace's PR-detail activity (review-thread
+    /// comments). The inbox-scan query intentionally skips
+    /// `reviewThreads` for cost reasons; this command back-fills
+    /// them when the user opens the workspace's activity pane. The
+    /// daemon merges the result into the workspace's activity list
+    /// and broadcasts an updated `WorkspaceUpserted`. No-op when
+    /// the workspace has no PR (issues don't have review threads).
+    FetchPrDetails {
+        workspace_key: pilot_core::WorkspaceKey,
+    },
     /// Start an agent runtime using a structured protocol surface. This
     /// does not replace `Spawn`; terminal clients can keep using PTY
     /// bytes while structured clients subscribe to run events.

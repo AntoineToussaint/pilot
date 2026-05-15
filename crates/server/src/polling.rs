@@ -1943,3 +1943,107 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
         pr_label,
     });
 }
+
+/// Handle `Command::FetchPrDetails`: pull the workspace's PR
+/// review-thread activity from GitHub (the field the inbox-scan
+/// query deliberately omits), merge it into the workspace's
+/// activity list, and broadcast `WorkspaceUpserted`.
+///
+/// Idempotent: re-fetching produces the same activities. The merge
+/// step dedupes by `node_id`, so calling this twice (e.g. user
+/// re-opens the same PR) doesn't duplicate rows. No-op when the
+/// workspace has no PR — issue-only workspaces don't have review
+/// threads.
+///
+/// Errors are silent at the user-facing level (no error toast):
+/// the inbox row already shows what we have; an upgrade-only
+/// failure shouldn't pop a modal. The diagnostic still lands in
+/// `/tmp/pilot.log`.
+pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let Some(mut ws) = load_workspace(config, &workspace_key) else {
+        tracing::info!("fetch_pr_details: workspace {workspace_key} not found");
+        return;
+    };
+    let Some(pr) = ws.pr.as_ref() else {
+        tracing::debug!("fetch_pr_details: workspace {workspace_key} has no PR");
+        return;
+    };
+    let Some(node_id) = pr.node_id.clone() else {
+        tracing::debug!("fetch_pr_details: PR has no node_id (needs a poll first)");
+        return;
+    };
+
+    // Use the persistent client from TickState so the rate budget
+    // and observations carry across calls — same logic as the
+    // long-lived poll loop. Without this we'd build a fresh client
+    // for every user-triggered fetch.
+    let client = {
+        let mut state = config.poll_state.lock().await;
+        match state.gh_client.clone() {
+            Some(c) => c,
+            None => {
+                let chain = CredentialChain::new()
+                    .with(EnvProvider::new("GH_TOKEN"))
+                    .with(EnvProvider::new("GITHUB_TOKEN"))
+                    .with(CommandProvider::new("gh", &["auth", "token"]));
+                let cred = match chain.resolve("github").await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("fetch_pr_details credentials: {e}");
+                        return;
+                    }
+                };
+                match GhClient::from_credential(cred).await {
+                    Ok(c) => {
+                        state.gh_client = Some(c.clone());
+                        c
+                    }
+                    Err(e) => {
+                        tracing::warn!("fetch_pr_details client init: {e}");
+                        return;
+                    }
+                }
+            }
+        }
+    };
+
+    let activities = match client.fetch_pr_details(&node_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("fetch_pr_details({node_id}): {e}");
+            return;
+        }
+    };
+    if activities.is_empty() {
+        tracing::debug!("fetch_pr_details({node_id}): no review-thread activity");
+        return;
+    }
+
+    // Merge into the workspace's activity list, dedup by node_id.
+    // Activities without a node_id never come from this path (the
+    // GraphQL response always carries comment ids) but the guard
+    // is cheap and future-proof.
+    let existing_ids: std::collections::HashSet<String> = ws
+        .activity
+        .iter()
+        .filter_map(|a| a.node_id.clone())
+        .collect();
+    let merged_count = activities.len();
+    for act in activities {
+        if let Some(id) = act.node_id.as_ref()
+            && existing_ids.contains(id)
+        {
+            continue;
+        }
+        ws.activity.push(act);
+    }
+    ws.activity.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    tracing::info!(
+        "fetch_pr_details: merged {} review-thread activities into {workspace_key}",
+        merged_count,
+    );
+
+    // Persist + broadcast through the same commit phase the poll
+    // path uses — keeps the store + bus consistent.
+    commit_upsert(config, &workspace_key, ws);
+}

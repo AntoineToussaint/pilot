@@ -241,6 +241,13 @@ pub struct Model<T: TerminalAdapter> {
     /// `handle_pane_key` match is still hardcoded and migrates here
     /// in follow-up commits. Read from `~/.pilot/config.yaml::ui.keybindings`.
     keybindings: pilot_config::Keybindings,
+    /// Workspace keys for which we've already fired
+    /// `Command::FetchPrDetails` this session — the lazy-fetch path
+    /// that back-fills review-thread activity. Used to dedupe the
+    /// trigger so a flicker of focus doesn't spam the daemon.
+    /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
+    /// so a re-added workspace gets a fresh fetch.
+    pr_details_fetched: std::collections::HashSet<pilot_core::WorkspaceKey>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -341,6 +348,7 @@ impl<T: TerminalAdapter> Model<T> {
             adopt_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: pilot_config::UiDefaults::default(),
+            pr_details_fetched: std::collections::HashSet::new(),
             keybindings: pilot_config::Keybindings::default(),
         }
     }
@@ -2201,6 +2209,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Clear the lazy-fetch dedupe entry when a workspace is
+        // removed, so a re-added workspace (e.g. user re-checks a
+        // filter) gets a fresh details fetch on next focus.
+        if let IpcEvent::WorkspaceRemoved(key) = &event {
+            self.pr_details_fetched.remove(key);
+        }
         self.sidebar.on_daemon_event(&event);
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
@@ -2280,6 +2294,21 @@ impl<T: TerminalAdapter> Model<T> {
     fn sync_panes(&mut self) {
         let workspace = self.sidebar.selected_workspace().cloned();
         let session_key = self.sidebar.selected_workspace_key().cloned();
+        // Lazy-fetch trigger: when the focused workspace has a PR
+        // and we haven't pulled its review-thread activity this
+        // session, kick off the back-fill. The dedupe set prevents
+        // re-firing on every key press / poll event for the same
+        // workspace; `WorkspaceRemoved` clears the entry so a
+        // re-added workspace gets a fresh fetch.
+        if let Some(w) = workspace.as_ref()
+            && w.pr.is_some()
+            && !self.pr_details_fetched.contains(&w.key)
+        {
+            self.pr_details_fetched.insert(w.key.clone());
+            self.send_cmd(IpcCommand::FetchPrDetails {
+                workspace_key: w.key.clone(),
+            });
+        }
         // Also forward the workspace's persisted SessionLayout to
         // the terminal stack so the user's tile arrangement
         // follows them across workspace switches. Each workspace's
