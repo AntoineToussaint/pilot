@@ -845,6 +845,7 @@ impl<T: TerminalAdapter> Model<T> {
         // also need `&mut self.app` etc. inside.
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
+        let sidebar_user_resized = self.layout.sidebar_user_resized;
         let polling_status: Option<(&'static str, String)> = self
             .status
             .polling
@@ -868,7 +869,7 @@ impl<T: TerminalAdapter> Model<T> {
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
             let (left, right_top, right_bottom) =
-                pane_areas(pane_area, sidebar_pct, right_top_pct);
+                pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized);
             self.sidebar.view_in(left, f);
             self.right.view_in(right_top, f);
             self.terminals.view_in(right_bottom, f);
@@ -1737,6 +1738,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.layout.last_area,
             self.layout.sidebar_pct,
             self.layout.right_top_pct,
+            self.layout.sidebar_user_resized,
         );
 
         match m.kind {

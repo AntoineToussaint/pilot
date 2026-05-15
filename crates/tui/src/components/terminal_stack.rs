@@ -557,6 +557,31 @@ impl TerminalStack {
         ))
     }
 
+    /// Last-resort fallback for scrollback navigation: drive
+    /// the viewport directly via Top/Bottom anchors rather than
+    /// Delta. The Delta path appears to no-op against libghostty-vt
+    /// (offset doesn't change even though `scroll_viewport(Delta)`
+    /// is called). Top/Bottom is a known-good API that lets us at
+    /// least verify the terminal HAS scrollback content to look at.
+    /// Returns the scrollbar state for the diagnostic notice.
+    pub fn scroll_to_top(&mut self) -> Option<String> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get_mut(&id)?;
+        slot.vt
+            .terminal
+            .scroll_viewport(vt::terminal::ScrollViewport::Top);
+        self.scrollbar_summary()
+    }
+
+    pub fn scroll_to_bottom(&mut self) -> Option<String> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get_mut(&id)?;
+        slot.vt
+            .terminal
+            .scroll_viewport(vt::terminal::ScrollViewport::Bottom);
+        self.scrollbar_summary()
+    }
+
     /// Did the user click on a terminal-tab label? Returns the tab
     /// index when `(col, row)` lands inside one of the click
     /// targets cached during render. Called by the orchestrator's

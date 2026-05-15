@@ -44,6 +44,14 @@ pub(crate) struct LayoutCtx {
     pub right_top_pct: u16,
     pub last_area: Rect,
     pub active_drag: Option<DragTarget>,
+    /// True iff the user has explicitly set the sidebar width
+    /// (via persisted YAML or a runtime nudge / drag). When true,
+    /// the absolute-column cap (`SIDEBAR_MAX_COLS`) is lifted —
+    /// "default" and "user-chosen" are different things, and the
+    /// user's deliberate choice always wins. When false, the cap
+    /// is still applied so a fresh user on a wide monitor doesn't
+    /// get a 160-col sidebar staring back at them.
+    pub sidebar_user_resized: bool,
 }
 
 impl LayoutCtx {
@@ -53,14 +61,18 @@ impl LayoutCtx {
             right_top_pct: DEFAULT_RIGHT_TOP_PCT,
             last_area: Rect::default(),
             active_drag: None,
+            sidebar_user_resized: false,
         }
     }
 
     /// Apply persisted splits from `~/.pilot/config.yaml::ui`. `None`
-    /// leaves the default in place.
+    /// leaves the default in place. A persisted value counts as a
+    /// "user choice" — it ended up in YAML because the user nudged
+    /// or hand-edited — so the cap is lifted.
     pub fn apply_persisted(&mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) {
         if let Some(s) = sidebar_pct {
             self.sidebar_pct = clamp_pct(s as i16);
+            self.sidebar_user_resized = true;
         }
         if let Some(t) = right_top_pct {
             self.right_top_pct = clamp_pct(t as i16);
@@ -112,13 +124,14 @@ impl LayoutCtx {
                     .clamp(SPLIT_MIN as i32, SPLIT_MAX as i32) as u16;
                 if pct != self.sidebar_pct {
                     self.sidebar_pct = pct;
+                    self.sidebar_user_resized = true;
                     return true;
                 }
                 false
             }
             DragTarget::ActivityTerminals => {
                 let (_, right_top_rect, right_bottom_rect) =
-                    pane_areas(self.last_area, self.sidebar_pct, self.right_top_pct);
+                    pane_areas(self.last_area, self.sidebar_pct, self.right_top_pct, self.sidebar_user_resized);
                 let right_height = right_top_rect.height + right_bottom_rect.height;
                 if right_height == 0 {
                     return false;
@@ -143,6 +156,12 @@ impl LayoutCtx {
         let new_sidebar = clamp_pct(self.sidebar_pct as i16 + dx);
         let new_top = clamp_pct(self.right_top_pct as i16 + dy);
         if new_sidebar != self.sidebar_pct || new_top != self.right_top_pct {
+            if new_sidebar != self.sidebar_pct {
+                // Mark user-resized so the absolute-column cap is
+                // lifted — Shift-arrow is an explicit "I want this
+                // width, default-cap doesn't apply" signal.
+                self.sidebar_user_resized = true;
+            }
             self.sidebar_pct = new_sidebar;
             self.right_top_pct = new_top;
             self.persist();
@@ -191,24 +210,33 @@ pub(crate) const SIDEBAR_MIN_COLS: u16 = 30;
 /// `right_top_pct` is the activity row's share of the right column's
 /// height. Both should already be clamped to `[SPLIT_MIN, SPLIT_MAX]`.
 ///
-/// The sidebar width gets a final `[SIDEBAR_MIN_COLS, SIDEBAR_MAX_COLS]`
-/// clamp so it never collapses below readable on narrow terminals
-/// nor dominates an ultra-wide monitor (where 40% of 400 cols =
-/// 160 cols sidebar, four times what the longest row needs).
+/// `user_resized` controls the absolute-column cap:
+/// - `false` (default state) → cap at `SIDEBAR_MAX_COLS` so a fresh
+///   user on a wide monitor doesn't get a 160-col sidebar.
+/// - `true` (user nudged / drag-resized / persisted choice) → no
+///   cap. The user's deliberate choice wins. They can grow the
+///   sidebar to whatever Shift-Right takes them, all the way to
+///   `SPLIT_MAX = 80%`.
+///
+/// `SIDEBAR_MIN_COLS` always applies — even a deliberate "make it
+/// tiny" choice shouldn't collapse the rows into unreadable noise.
 pub(crate) fn pane_areas(
     area: Rect,
     sidebar_pct: u16,
     right_top_pct: u16,
+    user_resized: bool,
 ) -> (Rect, Rect, Rect) {
-    // Resolve the percentage → absolute cols, then clamp. Doing the
-    // clamp here (rather than mutating `sidebar_pct`) preserves the
-    // user's persisted preference: if they nudge to 60% on a wide
-    // monitor it stays 60%, but the rendered sidebar still caps at
-    // SIDEBAR_MAX_COLS. Resize the terminal smaller and the
-    // sidebar shrinks back toward their 60%.
     let preferred = (area.width as u32 * sidebar_pct as u32 / 100) as u16;
+    let upper = if user_resized {
+        // No cap — honor the user's percentage. Still bounded by
+        // the available width and SPLIT_MAX (which `sidebar_pct`
+        // is already pre-clamped to).
+        area.width
+    } else {
+        SIDEBAR_MAX_COLS
+    };
     let sidebar_cols = preferred
-        .clamp(SIDEBAR_MIN_COLS, SIDEBAR_MAX_COLS)
+        .clamp(SIDEBAR_MIN_COLS, upper)
         .min(area.width);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -286,7 +314,7 @@ mod tests {
     #[test]
     fn hit_test_finds_the_vertical_splitter() {
         let c = ctx();
-        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct);
+        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
         // Hover one cell right of the sidebar's right edge → vertical splitter.
         let v_x = sidebar.x + sidebar.width;
         assert_eq!(
@@ -298,7 +326,7 @@ mod tests {
     #[test]
     fn hit_test_finds_the_horizontal_splitter() {
         let c = ctx();
-        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct);
+        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
         let h_y = right_top.y + right_top.height;
         assert_eq!(
             c.hit_test_splitter(right_top.x + 5, h_y, sidebar, right_top),
@@ -309,7 +337,7 @@ mod tests {
     #[test]
     fn hit_test_misses_inside_a_pane() {
         let c = ctx();
-        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct);
+        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
         // Middle of the sidebar — not on any splitter.
         assert_eq!(c.hit_test_splitter(2, 10, sidebar, right_top), None);
     }
