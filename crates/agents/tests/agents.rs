@@ -133,6 +133,35 @@ fn claude_active_when_just_streaming() {
 }
 
 #[test]
+fn claude_detects_choice_arrow() {
+    // Claude's permission / tool-approval / multi-choice UI renders
+    // the selected row as `❯ 1.` (or `❯ 1)`). That glyph+digit
+    // sequence is unambiguous — no question pairing needed. This
+    // is the path that kept failing for the user: the chat output
+    // doesn't have an "Esc to cancel" footer in the buffer once
+    // status ticks scroll it out, but the arrow line is always
+    // re-rendered as long as the chooser is up.
+    let agent = Claude;
+    let buf = "Allow Bash this command?\n\
+               ❯ 1. Yes\n\
+                 2. Yes, and don't ask again\n\
+                 3. No, and tell Claude what to do differently\n";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::Asking),
+    );
+}
+
+#[test]
+fn claude_detects_choice_arrow_ascii_fallback() {
+    // Some terminals / tmux configs render the arrow as `> ` when
+    // the UTF-8 glyph isn't available. Cover both shapes.
+    let agent = Claude;
+    let buf = b"Do you want to make this edit?\n> 1. Yes\n  2. No\n";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+}
+
+#[test]
 fn generic_cli_spawn_and_resume() {
     let agent = GenericCli {
         id: "custom",

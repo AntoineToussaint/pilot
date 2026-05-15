@@ -197,8 +197,20 @@ pub mod builtins {
         /// cached state would stay Asking forever.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = strip_ansi_lossy(recent_output);
-            // Footer marker — highest-confidence. Claude renders
-            // this only while a chooser is up.
+            // Choice arrow + numbered option — Claude's permission /
+            // tool-approval / multi-choice UI always renders the
+            // selected row as `❯ 1.` (or `❯ 1)`). That exact
+            // glyph+digit+punct sequence doesn't appear in chat
+            // output, so no pairing required. Single highest-
+            // confidence signal for "claude is waiting for a choice."
+            if super::detect::contains_any(
+                &s,
+                &["❯ 1.", "❯ 1)", "> 1.", "> 1)"],
+            ) {
+                return Some(AgentState::Asking);
+            }
+            // Footer marker — Claude renders this while editing a
+            // prompt in the textarea.
             if super::detect::contains_paired(
                 &s,
                 &["Esc to cancel"],
@@ -206,13 +218,18 @@ pub mod builtins {
             ) {
                 return Some(AgentState::Asking);
             }
-            // Numbered/y-n choice paired with a question phrase.
-            // Pairing keeps chat output that happens to include
-            // "Do you want to" from triggering a false Asking.
+            // Paired fallback for older / non-arrow prompt shapes
+            // and for `(y/n)` bare prompts that happen to land here.
             if super::detect::contains_paired(
                 &s,
                 &["1. Yes", "(y/n)", "[y/n]"],
-                &["Do you want to", "Allow Claude", "Approve"],
+                &[
+                    "Do you want",
+                    "Allow Claude",
+                    "Approve",
+                    "Continue?",
+                    "Proceed?",
+                ],
             ) {
                 return Some(AgentState::Asking);
             }
@@ -280,11 +297,17 @@ pub mod builtins {
     /// enough to make pattern matches survive cursor moves and color
     /// codes interleaved with the literal text.
     fn strip_ansi_lossy(bytes: &[u8]) -> String {
-        let mut out = String::with_capacity(bytes.len());
+        // Filter out ANSI CSI / OSC escape sequences in-place, then
+        // UTF-8-decode the remainder. Earlier this function pushed
+        // `bytes[i] as char` — that mangled multi-byte UTF-8 glyphs
+        // like Claude's choice arrow `❯` (U+276F, 3 bytes) into three
+        // separate Latin-1 chars, so any pattern containing the
+        // glyph silently failed to match. We need the raw glyph
+        // preserved so the patterns can search for it literally.
+        let mut filtered: Vec<u8> = Vec::with_capacity(bytes.len());
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] == 0x1b {
-                // ESC: skip until the next final byte for CSI/OSC.
                 i += 1;
                 if i >= bytes.len() {
                     break;
@@ -315,12 +338,10 @@ pub mod builtins {
                 }
                 continue;
             }
-            // Cheap UTF-8: push byte regardless. The pattern matcher
-            // works on byte-equivalent ASCII substrings.
-            out.push(bytes[i] as char);
+            filtered.push(bytes[i]);
             i += 1;
         }
-        out
+        String::from_utf8_lossy(&filtered).into_owned()
     }
 
     /// User-defined agent loaded from YAML. Kept minimal — spawn cmd +

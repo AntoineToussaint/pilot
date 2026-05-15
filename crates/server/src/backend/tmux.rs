@@ -75,6 +75,8 @@ set -g mouse on
 set -g history-limit 10000
 set -g default-terminal \"xterm-256color\"
 set -g escape-time 0
+set -g mode-style \"fg=default,bg=default\"
+set -g message-style \"fg=default,bg=default\"
 unbind-key -a
 ";
 
