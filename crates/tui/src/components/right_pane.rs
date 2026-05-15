@@ -775,7 +775,14 @@ impl RightPane {
         // see `intent::classify_work` + `WorkPriority::label`.
         let work_label = crate::intent::classify_work(workspace, &selected).map(|p| p.label());
 
-        if has_workspace {
+        // `r` only when there's an activity row under the cursor —
+        // reply is always relative to the focused message, so it
+        // makes no sense to advertise it on an empty activity feed.
+        // The handler itself opens the PR-thread textarea (no
+        // per-comment threading yet), but the hint follows the
+        // user's mental model: "I'm looking at a message, r replies."
+        let _ = has_workspace;
+        if has_activity {
             out.push(Binding { keys: "r", label: "reply" });
         }
         if let Some(label) = work_label {

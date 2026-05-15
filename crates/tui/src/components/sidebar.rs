@@ -942,10 +942,11 @@ impl Sidebar {
             out.push(Binding { keys: "w", label: priority.label() });
         }
 
-        // Reply / read are useful whenever there's a PR or issue.
-        if primary.is_some() {
-            out.push(Binding { keys: "r", label: "reply" });
-        }
+        // `r` reply belongs to Activity, not the sidebar — you reply
+        // to the message you're focused on, and the sidebar doesn't
+        // have an activity cursor. Footer hint stays scoped to the
+        // right pane to match the action's actual context.
+        let _ = primary;
 
         // Session lifecycle — show whichever side is actionable.
         if has_sessions {
