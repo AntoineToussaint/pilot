@@ -539,6 +539,147 @@ pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
+/// Per-PR "give me everything heavy" query. Pulls full review-thread
+/// data (50 threads × 10 comments) for a single PR by node id. Used
+/// by the lazy-fetch path: the inbox search returns lightweight
+/// metadata, and `fetch_pr_details` only fires when the user opens
+/// a PR's activity pane.
+///
+/// Cost trade-off: GitHub charges this at roughly `1 + 50×(1 + 10)`
+/// ≈ 550 cost units, but only WHEN the user asks. The inbox search,
+/// which fires every poll cycle for every PR, is correspondingly
+/// cheaper without these fields.
+const PR_DETAILS_QUERY: &str = r#"
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequest {
+      id
+      updatedAt
+      reviewThreads(first: 50) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 10) {
+            nodes {
+              id
+              author { login }
+              body
+              createdAt
+              path
+              line
+              originalLine
+              diffHunk
+            }
+          }
+        }
+      }
+    }
+  }
+  rateLimit {
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn pr_details_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": PR_DETAILS_QUERY,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
+/// Response wrapper for `PR_DETAILS_QUERY`. Just the fields we need
+/// from the lazy-fetch path — the rest of the PR data is already on
+/// `Task` from the inbox search.
+#[derive(Deserialize, Debug)]
+pub struct GqlPrDetailsResponse {
+    pub data: Option<GqlPrDetailsData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlPrDetailsData {
+    pub node: Option<GqlPrDetailsNode>,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlPrDetailsNode {
+    #[serde(rename = "reviewThreads")]
+    pub review_threads: GqlReviewThreads,
+}
+
+/// Convert the lazy-fetched review-thread data into the same
+/// `Activity` shape the inbox search produces. Same formatting
+/// rules as `pr_to_task`'s reviewThreads loop (✅/📌 prefixes,
+/// thread-level path fallback, diff-hunk on first comment only) so
+/// the merged activity list is indistinguishable from the eager
+/// path.
+pub fn pr_details_to_activities(node: &GqlPrDetailsNode) -> Vec<Activity> {
+    let mut activities = Vec::new();
+    for thread in &node.review_threads.nodes {
+        let thread_path = thread
+            .path
+            .clone()
+            .or_else(|| thread.comments.nodes.first().and_then(|c| c.path.clone()));
+        let thread_line = thread.line.or(thread.original_line).or_else(|| {
+            thread
+                .comments
+                .nodes
+                .first()
+                .and_then(|c| c.line.or(c.original_line))
+        });
+        for (i, c) in thread.comments.nodes.iter().enumerate() {
+            let author = c
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_else(|| "?".into());
+            if c.body.trim().is_empty() {
+                continue;
+            }
+            let mut body = c.body.clone();
+            if thread.is_resolved {
+                body = format!("✅ {body}");
+            } else if thread.is_outdated {
+                body = format!("📌 outdated: {body}");
+            }
+            if i > 0 {
+                body = format!("↳ {body}");
+            }
+            let (path, line, diff_hunk) = if i == 0 {
+                (
+                    c.path.clone().or_else(|| thread_path.clone()),
+                    c.line.or(c.original_line).or(thread_line),
+                    c.diff_hunk.clone(),
+                )
+            } else {
+                (thread_path.clone(), thread_line, None)
+            };
+            activities.push(Activity {
+                author,
+                body,
+                created_at: c.created_at,
+                kind: ActivityKind::Review,
+                node_id: c.id.clone(),
+                path,
+                line,
+                diff_hunk,
+                thread_id: thread.id.clone(),
+            });
+        }
+    }
+    activities
+}
+
 /// Convert GraphQL PR data to our Task type.
 pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     let repo = extract_repo_from_url(&pr.url);
@@ -1616,5 +1757,137 @@ mod tests {
             "issue comments cap drifted",
         );
         assert!(!ISSUES_QUERY.contains("comments(first: 30)"));
+    }
+
+    // ── PR details (lazy-fetch) ────────────────────────────────────
+
+    #[test]
+    fn pr_details_body_carries_node_id() {
+        // Variable binding must reach GitHub or the query returns
+        // `node: null` and the lazy-fetch ships zero activities for
+        // every PR.
+        let body = pr_details_body("PR_kwDOFOO");
+        assert_eq!(body["variables"]["id"], "PR_kwDOFOO");
+        assert!(
+            body["query"].as_str().unwrap().contains("reviewThreads"),
+            "lazy-fetch query must include reviewThreads — that's the whole point",
+        );
+    }
+
+    #[test]
+    fn pr_details_to_activities_preserves_eager_formatting() {
+        // Drop-in equivalence: the lazy-fetch's activities must look
+        // identical to the eager path's reviewThreads loop in
+        // `pr_to_task`, so merging the two doesn't produce a visible
+        // discontinuity in the activity feed.
+        let when = DateTime::parse_from_rfc3339("2026-05-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let node = GqlPrDetailsNode {
+            review_threads: GqlReviewThreads {
+                nodes: vec![GqlReviewThread {
+                    id: Some("T_thread1".into()),
+                    is_resolved: false,
+                    is_outdated: true,
+                    path: Some("src/lib.rs".into()),
+                    line: Some(42),
+                    original_line: None,
+                    comments: GqlComments {
+                        nodes: vec![
+                            GqlComment {
+                                id: Some("C_first".into()),
+                                author: Some(GqlAuthor {
+                                    login: "alice".into(),
+                                }),
+                                body: "needs nil check".into(),
+                                created_at: when,
+                                path: Some("src/lib.rs".into()),
+                                line: Some(42),
+                                original_line: None,
+                                diff_hunk: Some("@@ -1 +1 @@".into()),
+                            },
+                            GqlComment {
+                                id: Some("C_reply".into()),
+                                author: Some(GqlAuthor {
+                                    login: "bob".into(),
+                                }),
+                                body: "good catch".into(),
+                                created_at: when,
+                                path: None,
+                                line: None,
+                                original_line: None,
+                                diff_hunk: None,
+                            },
+                        ],
+                    },
+                }],
+            },
+        };
+        let acts = pr_details_to_activities(&node);
+        assert_eq!(acts.len(), 2, "two thread comments → two activities");
+
+        // First comment: outdated marker, has the diff hunk.
+        assert_eq!(acts[0].author, "alice");
+        assert!(acts[0].body.starts_with("📌 outdated:"), "{}", acts[0].body);
+        assert_eq!(acts[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(acts[0].line, Some(42));
+        assert_eq!(acts[0].diff_hunk.as_deref(), Some("@@ -1 +1 @@"));
+        assert_eq!(acts[0].thread_id.as_deref(), Some("T_thread1"));
+        assert_eq!(acts[0].kind, ActivityKind::Review);
+
+        // Reply: ↳ prefix wraps the thread-status prefix, no diff
+        // hunk, inherits path+line from thread.
+        assert_eq!(acts[1].author, "bob");
+        assert!(
+            acts[1].body.starts_with("↳ 📌 outdated:"),
+            "reply prefix is outermost, then thread status: {}",
+            acts[1].body,
+        );
+        assert_eq!(acts[1].path.as_deref(), Some("src/lib.rs"));
+        assert!(acts[1].diff_hunk.is_none(), "replies don't carry diff hunks");
+        assert_eq!(acts[1].thread_id.as_deref(), Some("T_thread1"));
+    }
+
+    #[test]
+    fn pr_details_to_activities_empty_threads_is_empty() {
+        let node = GqlPrDetailsNode {
+            review_threads: GqlReviewThreads { nodes: vec![] },
+        };
+        assert!(pr_details_to_activities(&node).is_empty());
+    }
+
+    #[test]
+    fn pr_details_to_activities_skips_blank_body_comments() {
+        // Github lets users push empty review-thread comments (or
+        // strip-whitespace ones); we drop those rather than render
+        // an empty row.
+        let when = DateTime::parse_from_rfc3339("2026-05-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let node = GqlPrDetailsNode {
+            review_threads: GqlReviewThreads {
+                nodes: vec![GqlReviewThread {
+                    id: Some("T_thread1".into()),
+                    is_resolved: false,
+                    is_outdated: false,
+                    path: None,
+                    line: None,
+                    original_line: None,
+                    comments: GqlComments {
+                        nodes: vec![GqlComment {
+                            id: None,
+                            author: None,
+                            body: "   \n  ".into(),
+                            created_at: when,
+                            path: None,
+                            line: None,
+                            original_line: None,
+                            diff_hunk: None,
+                        }],
+                    },
+                }],
+            },
+        };
+        assert!(pr_details_to_activities(&node).is_empty());
     }
 }

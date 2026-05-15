@@ -984,6 +984,55 @@ impl GhClient {
     /// github.com. Requires the PR's GraphQL node ID. We don't pin
     /// the merge method; GitHub will use whatever the repo's
     /// settings allow / require.
+    /// Lazy-fetch one PR's heavy fields (review threads — inline code
+    /// comments). The inbox-scan query trades these off for cost; this
+    /// method back-fills them when the user actually opens a PR.
+    ///
+    /// Returns the merged `Activity` list ready to splice into the
+    /// workspace's existing activity collection. Caller is responsible
+    /// for dedup (by `node_id`) since this re-fetches data the eager
+    /// path might still be loading. Both paths produce the same shape
+    /// — same kind, same body formatting, same path/line/diff_hunk
+    /// extraction — so the merged list is indistinguishable from a
+    /// purely-eager fetch.
+    pub async fn fetch_pr_details(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<Vec<pilot_core::Activity>, GhError> {
+        self.acquire_or_block("PR details lazy-fetch")?;
+        let body = graphql::pr_details_body(pull_request_node_id);
+        let response: graphql::GqlPrDetailsResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("fetch_pr_details GraphQL errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| GhError::Graphql("fetch_pr_details: no data".into()))?;
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        let Some(node) = data.node else {
+            // PR was deleted / not visible to this token between the
+            // inbox search and the lazy fetch. Not retryable — return
+            // an empty activity list so the caller can clean up.
+            tracing::info!(
+                "fetch_pr_details: node {} not found (deleted or scope changed)",
+                pull_request_node_id,
+            );
+            return Ok(Vec::new());
+        };
+        Ok(graphql::pr_details_to_activities(&node))
+    }
+
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
