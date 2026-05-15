@@ -1429,14 +1429,18 @@ fn work_key_emits_spawn_command_on_issue() {
 // ── Event::AgentState wiring ──────────────────────────────────────────
 //
 // The daemon broadcasts `Event::AgentState { Asking }` when Claude /
-// Codex hits a yes-no prompt. Before this wiring landed, the sidebar
-// dropped the event on the floor: the workspace's `sessions[i].state`
-// stayed `Active`, so the row pill + header `? N input` counter both
-// stayed dark. These tests pin the path end-to-end:
+// Codex hits a yes-no prompt. Pilot tracks this in a sidebar-local
+// asking-set (NOT on `workspace.sessions[i].state`, which gets
+// blown away every poll cycle when `WorkspaceUpserted` reloads
+// the workspace from the persisted store). These tests pin:
 //
-//   AgentState event  →  workspace.sessions[i].state = Asking
-//                     →  workspace_is_asking == true
-//                     →  focus_next_asking_workspace can find it.
+//   1. AgentState event → asking-set updated → row pill renders
+//      (verified via the externally-visible jump-to-asking method).
+//   2. WorkspaceUpserted between two AgentState events does NOT
+//      clobber the set — the silent-clobber bug fix's regression
+//      guard.
+//   3. Notification fires once per Active→Asking edge, not on
+//      repeat broadcasts.
 
 fn agent_workspace(repo: &str, key: &str, now: DateTime<Utc>) -> Workspace {
     use pilot_core::{SessionKind, WorkspaceSession};
@@ -1460,11 +1464,11 @@ fn agent_workspace(repo: &str, key: &str, now: DateTime<Utc>) -> Workspace {
 }
 
 #[test]
-fn agent_state_asking_flips_workspace_session_state() {
-    // Round-trip the IPC event through `on_event` and assert the
-    // workspace's session-state field reflects the new status. This
-    // is the wiring that the row pill + `? N input` header both
-    // depend on — without it the rest of the feature is decorative.
+fn agent_state_asking_makes_workspace_findable_by_bang() {
+    // The row pill + header counter + `!` jump all read from the
+    // sidebar's asking-set. We can't peek at it directly (private
+    // field) but `focus_next_asking_workspace` is its public
+    // observer. Use that as the proof the wiring worked end-to-end.
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w = agent_workspace("owner/repo", "o/r#1", now);
@@ -1474,17 +1478,64 @@ fn agent_state_asking_flips_workspace_session_state() {
         terminals: vec![],
     });
 
+    // Before the AgentState event: `!` finds nothing.
+    assert!(
+        !s.focus_next_asking_workspace(),
+        "no asking workspace before the event",
+    );
+
     s.on_event(&Event::AgentState {
         session_key: key.clone(),
         state: pilot_ipc::AgentState::Asking,
     });
 
-    let ws = s.workspace_by_key(&key).expect("workspace present");
+    // After: `!` can find it.
     assert!(
-        ws.sessions
-            .iter()
-            .any(|sess| sess.state == pilot_core::SessionRunState::Asking),
-        "Event::AgentState {{ Asking }} must mark the agent session Asking"
+        s.focus_next_asking_workspace(),
+        "Event::AgentState {{ Asking }} must register in the asking-set",
+    );
+    assert_eq!(s.selected_session_key(), Some(&key));
+}
+
+#[test]
+fn workspace_upserted_does_not_clobber_asking_state() {
+    // REGRESSION for the silent-clobber bug: when polling runs
+    // between Asking detection and the user looking at the
+    // sidebar, the workspace is reloaded from the store and
+    // re-broadcast as WorkspaceUpserted. The asking signal must
+    // survive that re-broadcast — otherwise the `?` pill flashes
+    // on for a second then disappears at the next poll tick.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = agent_workspace("owner/repo", "o/r#1", now);
+    let key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w.clone()],
+        terminals: vec![],
+    });
+
+    // 1. Agent goes Asking.
+    s.on_event(&Event::AgentState {
+        session_key: key.clone(),
+        state: pilot_ipc::AgentState::Asking,
+    });
+    assert!(s.focus_next_asking_workspace(), "asking after the event");
+
+    // 2. Polling re-broadcasts the workspace (fresh from store —
+    //    no transient asking state).
+    s.on_event(&Event::WorkspaceUpserted(Box::new(w)));
+
+    // 3. The asking-set must STILL hold the entry.
+    s.focus_workspace_key(&ws_key(&make_workspace(
+        "owner/repo",
+        "o/r#1",
+        now,
+    ))); // re-anchor cursor
+    // focus_next_asking_workspace walks from after-current; reset
+    // to None by re-snapshotting the cursor.
+    assert!(
+        s.focus_next_asking_workspace(),
+        "WorkspaceUpserted must not clobber the asking state",
     );
 }
 

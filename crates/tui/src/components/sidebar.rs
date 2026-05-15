@@ -183,6 +183,13 @@ pub struct Sidebar {
     /// The outer wrapper (`realm::components::sidebar`) drains this
     /// after each event delivery and routes to `platform::notify_user`.
     pending_notifications: Vec<PendingNotification>,
+    /// Workspace keys whose agent is currently in `AgentState::Asking`.
+    /// Single source of truth for the `?` row pill, the `? N input`
+    /// header counter, and `!` jump-to-asking. Source: `Event::AgentState`
+    /// broadcasts from the daemon, sidebar-local — independent of
+    /// `Workspace.sessions[i].state` (which gets clobbered every
+    /// poll cycle when the daemon re-broadcasts `WorkspaceUpserted`).
+    agents_asking: std::collections::HashSet<SessionKey>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -224,6 +231,7 @@ impl Sidebar {
             default_agent: "claude".to_string(),
             show_inactive_in_inbox: false,
             pending_notifications: Vec::new(),
+            agents_asking: std::collections::HashSet::new(),
         }
     }
 
@@ -473,7 +481,7 @@ impl Sidebar {
             .collect();
         let current = self.selected_session_key().cloned();
         let Some(target) = crate::agent_attention::next_asking_workspace(
-            &self.workspaces,
+            &self.agents_asking,
             &keys_order,
             current.as_ref(),
         ) else {
@@ -595,7 +603,9 @@ impl Sidebar {
                 VisibleRow::Workspace(k) => self.workspaces.get(k),
                 _ => None,
             })
-            .filter(|w| workspace_attention_signals(w).contains(&signal))
+            .filter(|w| {
+                workspace_attention_signals(w, &self.agents_asking).contains(&signal)
+            })
             .count()
     }
 
@@ -805,7 +815,7 @@ impl Sidebar {
             if let Some(rows) = by_repo.get(repo) {
                 summary.active = rows.len();
                 for (_, w) in rows {
-                    if workspace_needs_attention(w, &self.attention) {
+                    if workspace_needs_attention(w, &self.attention, &self.agents_asking) {
                         summary.attention += 1;
                     }
                 }
@@ -1354,36 +1364,33 @@ impl Sidebar {
             }
             Event::AgentState { session_key, state } => {
                 // The daemon-side detector flipped an agent into
-                // `Asking` (yes/no prompt) or back to `Active`. Two
-                // things need to happen:
+                // `Asking` (yes/no prompt) or back to `Active`.
+                // Update the sidebar-local `agents_asking` set —
+                // the canonical store for this transient signal.
                 //
-                // 1. Mirror the new state onto the workspace's
-                //    sessions so the row pill + header counter
-                //    render. (Until this wiring landed, the
-                //    `SessionRunState::Asking` check in
-                //    `workspace_needs_attention` was dead code — no
-                //    code path ever set the state, so the signal
-                //    never lit up.)
+                // Why a sidebar-local set instead of mutating
+                // `workspace.sessions[i].state`: the next poll
+                // cycle's `WorkspaceUpserted` rebuilds the workspace
+                // from the persisted store, which doesn't (and
+                // shouldn't) carry transient agent state. Mutating
+                // it here would be silently undone within 60s. The
+                // set survives poll broadcasts because nothing
+                // touches it except `Event::AgentState`.
                 //
-                // 2. On the Active → Asking transition only, enqueue
-                //    a desktop notification so the user sees the
-                //    prompt even when pilot isn't the focused
-                //    window. The notification itself is fired by
-                //    the outer wrapper layer (see
-                //    `realm::components::sidebar::on_daemon_event`)
-                //    after draining `pending_notifications` — this
-                //    way library tests construct a `Sidebar`
-                //    directly and never trigger a real OS-level
-                //    `osascript` / `notify-send`.
-                if let Some(workspace) = self.workspaces.get_mut(session_key) {
-                    let transition = crate::agent_attention::apply_agent_state(
-                        &mut workspace.sessions,
-                        *state,
-                    );
-                    if matches!(
-                        transition,
-                        crate::agent_attention::AttentionTransition::NowAsking
-                    ) {
+                // On the Active → Asking edge, enqueue a desktop
+                // notification (drained + fired by the outer
+                // wrapper so library tests never trigger a real
+                // `osascript` / `notify-send`).
+                let transition = crate::agent_attention::apply_agent_state(
+                    &mut self.agents_asking,
+                    session_key,
+                    *state,
+                );
+                if matches!(
+                    transition,
+                    crate::agent_attention::AttentionTransition::NowAsking
+                ) {
+                    if let Some(workspace) = self.workspaces.get(session_key) {
                         let title = format!("pilot — {} needs input", workspace.name);
                         let body = workspace
                             .primary_task()
@@ -1391,6 +1398,11 @@ impl Sidebar {
                             .unwrap_or_else(|| workspace.name.clone());
                         self.pending_notifications.push(PendingNotification { title, body });
                     }
+                }
+                if !matches!(
+                    transition,
+                    crate::agent_attention::AttentionTransition::NoChange
+                ) {
                     self.recompute_visible();
                 }
             }
@@ -1685,6 +1697,16 @@ impl Sidebar {
                             } else {
                                 Style::default().fg(color).add_modifier(Modifier::BOLD)
                             };
+                            // Space separator before the role letter:
+                            // `#7204 R` reads cleaner than `#7204R`,
+                            // which scanned as one weird token. The
+                            // role letter still gets its own color so
+                            // it pops out of the dim PR number.
+                            push(
+                                Span::styled(" ", row_style),
+                                &mut used,
+                                &mut spans,
+                            );
                             push(
                                 Span::styled(letter.to_string(), role_style),
                                 &mut used,
@@ -1714,9 +1736,12 @@ impl Sidebar {
                         // Sits right after the unread dot — the user
                         // already scans this column for "stuff that
                         // needs me."
-                        if workspace
-                            .is_some_and(crate::agent_attention::workspace_is_asking)
-                        {
+                        if workspace.is_some_and(|w| {
+                            crate::agent_attention::workspace_is_asking(
+                                w,
+                                &self.agents_asking,
+                            )
+                        }) {
                             let style = if is_cursor {
                                 row_style
                             } else {
@@ -2133,15 +2158,19 @@ pub enum AttentionSignal {
 /// (even without ChangesRequested), `workspace_needs_attention`
 /// didn't — so a repo with reviewers-only PRs lit the header
 /// counter but not the repo badge.
-pub fn workspace_attention_signals(w: &Workspace) -> Vec<AttentionSignal> {
+pub fn workspace_attention_signals(
+    w: &Workspace,
+    agents_asking: &std::collections::HashSet<SessionKey>,
+) -> Vec<AttentionSignal> {
     let mut out = Vec::new();
     if w.unread_count() > 0 {
         out.push(AttentionSignal::Unread);
     }
-    if w.sessions
-        .iter()
-        .any(|s| matches!(s.state, pilot_core::SessionRunState::Asking))
-    {
+    // AgentAsking signal: source of truth is the sidebar-local
+    // `agents_asking` set (driven by `Event::AgentState` deltas).
+    // NOT `w.sessions[i].state` — that gets blown away every poll
+    // when `WorkspaceUpserted` re-loads from the persisted store.
+    if crate::agent_attention::workspace_is_asking(w, agents_asking) {
         out.push(AttentionSignal::AgentAsking);
     }
     if let Some(t) = w.primary_task() {
@@ -2183,8 +2212,12 @@ fn attention_gate(signal: AttentionSignal, cfg: &pilot_config::AttentionConfig) 
     }
 }
 
-fn workspace_needs_attention(w: &Workspace, cfg: &pilot_config::AttentionConfig) -> bool {
-    workspace_attention_signals(w)
+fn workspace_needs_attention(
+    w: &Workspace,
+    cfg: &pilot_config::AttentionConfig,
+    agents_asking: &std::collections::HashSet<SessionKey>,
+) -> bool {
+    workspace_attention_signals(w, agents_asking)
         .iter()
         .any(|s| attention_gate(*s, cfg))
 }
@@ -3017,8 +3050,7 @@ mod attention_signal_tests {
 
     use super::*;
     use super::status_pill_tests::base_task;
-    use pilot_core::{ReviewStatus, SessionRunState, SessionKind, TaskRole, Workspace, WorkspaceKey, WorkspaceSession};
-    use std::path::PathBuf;
+    use pilot_core::{ReviewStatus, TaskRole, Workspace};
 
     fn ws_from_pr(mut task: pilot_core::Task) -> Workspace {
         // The classifier slots tasks based on URL — `/pull/N` lands in
@@ -3030,27 +3062,21 @@ mod attention_signal_tests {
         Workspace::from_task(task, chrono::Utc::now())
     }
 
-    fn agent_session(state: SessionRunState) -> WorkspaceSession {
-        WorkspaceSession {
-            id: pilot_core::SessionId::new(),
-            workspace_key: WorkspaceKey::new("k"),
-            name: "claude".into(),
-            kind: SessionKind::Agent {
-                agent_id: "claude".into(),
-            },
-            state,
-            worktree_path: PathBuf::from("/tmp/x"),
-            created_at: chrono::Utc::now(),
-            last_output_at: None,
-            layout: Default::default(),
-        }
+    fn empty_set() -> std::collections::HashSet<SessionKey> {
+        std::collections::HashSet::new()
+    }
+
+    fn set_with(ws: &Workspace) -> std::collections::HashSet<SessionKey> {
+        let mut s = std::collections::HashSet::new();
+        s.insert(SessionKey::from(&ws.key));
+        s
     }
 
     #[test]
     fn no_signals_when_quiet() {
         // Plain open PR, no review, no CI, no unread: no signals.
         let w = ws_from_pr(base_task());
-        assert!(workspace_attention_signals(&w).is_empty());
+        assert!(workspace_attention_signals(&w, &empty_set()).is_empty());
     }
 
     #[test]
@@ -3058,30 +3084,35 @@ mod attention_signal_tests {
         let mut t = base_task();
         t.ci = pilot_core::CiStatus::Failure;
         let w = ws_from_pr(t);
-        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::CiFailing));
+        assert!(
+            workspace_attention_signals(&w, &empty_set())
+                .contains(&AttentionSignal::CiFailing),
+        );
     }
 
     #[test]
     fn ci_mixed_also_emits_ci_failing_signal() {
         // CI Mixed is a "partial failure" — treated the same as
-        // Failure for attention purposes. Pinned because the
-        // matches!() body easily drifts.
+        // Failure for attention purposes.
         let mut t = base_task();
         t.ci = pilot_core::CiStatus::Mixed;
         let w = ws_from_pr(t);
-        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::CiFailing));
+        assert!(
+            workspace_attention_signals(&w, &empty_set())
+                .contains(&AttentionSignal::CiFailing),
+        );
     }
 
     #[test]
     fn reviewers_requested_emits_review_signal_even_without_pending_status() {
-        // The pre-unification bug: a PR with reviewers but
-        // ReviewStatus::None bumped the header counter but not the
-        // repo badge. Now both see the same signal.
         let mut t = base_task();
         t.review = ReviewStatus::None;
         t.reviewers = vec!["alice".into()];
         let w = ws_from_pr(t);
-        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::ReviewPending));
+        assert!(
+            workspace_attention_signals(&w, &empty_set())
+                .contains(&AttentionSignal::ReviewPending),
+        );
     }
 
     #[test]
@@ -3089,7 +3120,10 @@ mod attention_signal_tests {
         let mut t = base_task();
         t.review = ReviewStatus::ChangesRequested;
         let w = ws_from_pr(t);
-        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::ReviewPending));
+        assert!(
+            workspace_attention_signals(&w, &empty_set())
+                .contains(&AttentionSignal::ReviewPending),
+        );
     }
 
     #[test]
@@ -3097,28 +3131,41 @@ mod attention_signal_tests {
         let mut t = base_task();
         t.role = TaskRole::Mentioned;
         let w = ws_from_pr(t);
-        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::Mentioned));
+        assert!(
+            workspace_attention_signals(&w, &empty_set())
+                .contains(&AttentionSignal::Mentioned),
+        );
     }
 
     #[test]
-    fn agent_asking_session_emits_signal() {
-        let mut w = ws_from_pr(base_task());
-        w.sessions = vec![agent_session(SessionRunState::Asking)];
-        assert!(workspace_attention_signals(&w).contains(&AttentionSignal::AgentAsking));
-    }
+    fn agent_asking_signal_comes_from_asking_set_not_workspace_sessions() {
+        // Regression for the silent-clobber bug fixed in this
+        // commit: the AgentAsking signal MUST be driven by the
+        // sidebar-local `agents_asking` set, NOT
+        // `Workspace.sessions[i].state`. The poll cycle reloads
+        // workspace data from store every minute, which would
+        // wipe a state-mutation-based signal.
+        let w = ws_from_pr(base_task());
 
-    #[test]
-    fn agent_active_session_does_not_emit_asking_signal() {
-        let mut w = ws_from_pr(base_task());
-        w.sessions = vec![agent_session(SessionRunState::Active)];
-        assert!(!workspace_attention_signals(&w).contains(&AttentionSignal::AgentAsking));
+        // No entry in the set → no signal even if sessions claim
+        // Asking (in production they never do, but the test pins
+        // the contract).
+        assert!(
+            !workspace_attention_signals(&w, &empty_set())
+                .contains(&AttentionSignal::AgentAsking),
+        );
+
+        // Add the workspace's key to the set → signal fires.
+        assert!(
+            workspace_attention_signals(&w, &set_with(&w))
+                .contains(&AttentionSignal::AgentAsking),
+        );
     }
 
     // ── needs_attention vs the gate ───────────────────────────────
 
     #[test]
     fn needs_attention_returns_false_when_all_signals_gated_off() {
-        // All gates off → no attention even with active signals.
         let mut t = base_task();
         t.ci = pilot_core::CiStatus::Failure;
         t.review = ReviewStatus::ChangesRequested;
@@ -3130,7 +3177,7 @@ mod attention_signal_tests {
             agent_asking: false,
             mentioned: false,
         };
-        assert!(!workspace_needs_attention(&w, &cfg));
+        assert!(!workspace_needs_attention(&w, &cfg, &empty_set()));
     }
 
     #[test]
@@ -3145,27 +3192,28 @@ mod attention_signal_tests {
             agent_asking: false,
             mentioned: false,
         };
-        assert!(!workspace_needs_attention(&w, &cfg), "all gates off → false");
+        assert!(
+            !workspace_needs_attention(&w, &cfg, &empty_set()),
+            "all gates off → false",
+        );
         cfg.ci_failing = true;
-        assert!(workspace_needs_attention(&w, &cfg), "CI gate on → true");
+        assert!(
+            workspace_needs_attention(&w, &cfg, &empty_set()),
+            "CI gate on → true",
+        );
     }
 
     // ── consistency contract: badge vs counter ─────────────────────
 
     #[test]
     fn reviewers_requested_workspace_lights_both_counter_and_attention() {
-        // Regression for the pre-audit divergence: this exact
-        // shape (reviewers requested, status None) used to
-        // contribute to `review_pending_count` but not
-        // `workspace_needs_attention`. Now both see the same
-        // ReviewPending signal.
         let mut t = base_task();
         t.review = ReviewStatus::None;
         t.reviewers = vec!["alice".into()];
         let w = ws_from_pr(t);
-        let signals = workspace_attention_signals(&w);
+        let signals = workspace_attention_signals(&w, &empty_set());
         assert!(signals.contains(&AttentionSignal::ReviewPending));
         let cfg = pilot_config::AttentionConfig::default();
-        assert!(workspace_needs_attention(&w, &cfg));
+        assert!(workspace_needs_attention(&w, &cfg, &empty_set()));
     }
 }
