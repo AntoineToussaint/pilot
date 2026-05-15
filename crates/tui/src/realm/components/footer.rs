@@ -28,8 +28,12 @@ pub enum NoticeSeverity {
     Auth,
     /// Hard failure. `theme.error`. Sticky.
     Permanent,
-    /// Plain informational. `theme.text_dim`.
+    /// Plain informational. `theme.text_dim`. 15s fade.
     Info,
+    /// Brief one-shot hint (e.g. "scroll: alt-screen") — dim, 3s
+    /// fade. Same color as Info but a much shorter lifetime so
+    /// repeated triggers don't follow the user around the UI.
+    Hint,
 }
 
 /// One footer notice — message + severity + when it was set
@@ -76,7 +80,7 @@ pub fn render(
         let sev_color = match n.severity {
             NoticeSeverity::Retryable | NoticeSeverity::Auth => theme.warn,
             NoticeSeverity::Permanent => theme.error,
-            NoticeSeverity::Info => theme.text_dim,
+            NoticeSeverity::Info | NoticeSeverity::Hint => theme.text_dim,
         };
         Some(Line::from(vec![
             Span::styled(" ", bg),

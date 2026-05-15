@@ -1884,41 +1884,12 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                // Diagnostic notice: surfaces in the footer the
-                // moment a scroll event arrives, so the user can
-                // see whether pilot detected the trackpad gesture
-                // at all (sometimes the host terminal eats them).
-                // Includes the cursor position and whether it hit
-                // the terminal-pane rect — that's the single most
-                // common reason a scroll silently no-ops.
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
-                let dir = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                    "↑"
-                } else {
-                    "↓"
-                };
-                let in_terminal = rect_contains(right_bottom_rect, m.column, m.row);
-                self.status.notice = Some(Notice::new(
-                    format!(
-                        "scroll {dir} at ({},{}) — terminal pane: {}",
-                        m.column,
-                        m.row,
-                        if in_terminal { "yes" } else { "NO" },
-                    ),
-                    NoticeSeverity::Info,
-                ));
-                tracing::debug!(
-                    col = m.column,
-                    row = m.row,
-                    in_terminal = in_terminal,
-                    direction = dir,
-                    "mouse scroll event received",
-                );
-                self.redraw = true;
-                if !in_terminal {
+                // Bail silently when the cursor isn't over the
+                // terminal pane — sidebar / activity / footer all
+                // ignore scroll, no need to surface a notice.
+                if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
-                // 5 rows per notch — smooth but not sluggish.
                 const STEP: isize = 5;
                 let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
                     -STEP
@@ -1926,28 +1897,24 @@ impl<T: TerminalAdapter> Model<T> {
                     STEP
                 };
                 use crate::components::terminal_stack::ScrollOutcome;
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let outcome = self.terminals.scroll_active(delta);
                 tracing::debug!(
                     delta = delta,
                     outcome = ?outcome,
                     "terminal_stack.scroll_active",
                 );
-                let notice = match outcome {
-                    ScrollOutcome::NoTerminal => format!(
-                        "scroll {dir} ignored: no focused terminal",
-                    ),
-                    ScrollOutcome::NoScrollback { alternate: true } => format!(
-                        "scroll {dir}: alternate screen has no scrollback (use the program's own scrolling)",
-                    ),
-                    ScrollOutcome::NoScrollback { alternate: false } => format!(
-                        "scroll {dir}: no scrollback yet — produce more output first",
-                    ),
-                    ScrollOutcome::Moved { offset, total, len } => format!(
-                        "scroll {dir}: offset={offset} / {} (window {len})",
-                        total.saturating_sub(len),
-                    ),
-                };
-                self.status.notice = Some(Notice::new(notice, NoticeSeverity::Info));
+                // Success is silent — the moved viewport IS the
+                // feedback. Only surface a notice when the scroll
+                // can't move because the underlying program owns
+                // its own scrollback (claude/vim/less on alt-screen).
+                if let ScrollOutcome::NoScrollback { alternate: true } = outcome {
+                    self.status.notice = Some(Notice::new(
+                        "scroll: this view manages its own scrollback — use the program's keys",
+                        NoticeSeverity::Hint,
+                    ));
+                }
+                self.redraw = true;
             }
             _ => {}
         }

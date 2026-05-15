@@ -15,6 +15,9 @@ const RETRYABLE_FADE: Duration = Duration::from_secs(5);
 /// stay visible if their triggering event never lands. Longer than
 /// retryable so a slow worktree creation doesn't fade mid-flight.
 const INFO_FADE: Duration = Duration::from_secs(15);
+/// One-shot hints (e.g. "scroll: this view manages its own scrollback")
+/// fade quickly so they don't follow the user around the UI.
+const HINT_FADE: Duration = Duration::from_secs(3);
 /// Heartbeat interval for the polling-modal spinner. Cheap, keeps
 /// the spinner glyph advancing at ~12 fps.
 const POLLING_TICK_INTERVAL: Duration = Duration::from_millis(80);
@@ -65,6 +68,7 @@ impl StatusCtx {
         let timeout = match n.severity {
             NoticeSeverity::Retryable => Some(RETRYABLE_FADE),
             NoticeSeverity::Info => Some(INFO_FADE),
+            NoticeSeverity::Hint => Some(HINT_FADE),
             NoticeSeverity::Auth | NoticeSeverity::Permanent => None,
         };
         if let Some(t) = timeout
