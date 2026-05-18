@@ -22,9 +22,10 @@ use tuirealm::state::State;
 /// Y/N confirmation prompt.
 pub struct Confirm {
     question: String,
-    /// Whether `Enter` defaults to "yes". Drives which option renders
-    /// in bold accent.
-    default_yes: bool,
+    /// Currently-highlighted option. True = Yes, false = No. Initialized
+    /// from `default_yes` (or `default_no`); ←/→ arrows flip it; Enter
+    /// fires the highlighted side.
+    selected_yes: bool,
 }
 
 impl Confirm {
@@ -32,14 +33,14 @@ impl Confirm {
     pub fn new(question: impl Into<String>) -> Self {
         Self {
             question: question.into(),
-            default_yes: true,
+            selected_yes: true,
         }
     }
 
     /// Make `Enter` default to "no". Use for destructive prompts where
     /// the safer option is to back out.
     pub fn default_no(mut self) -> Self {
-        self.default_yes = false;
+        self.selected_yes = false;
         self
     }
 }
@@ -75,14 +76,14 @@ impl Component for Confirm {
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
 
-        let yes_style = if self.default_yes {
+        let yes_style = if self.selected_yes {
             Style::default()
                 .fg(theme.success)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text_dim)
         };
-        let no_style = if self.default_yes {
+        let no_style = if self.selected_yes {
             Style::default().fg(theme.text_dim)
         } else {
             Style::default()
@@ -99,6 +100,8 @@ impl Component for Confirm {
                 Span::raw("    "),
                 Span::styled("[N]o", no_style),
                 Span::raw("    "),
+                Span::styled("← / →", theme.hint()),
+                Span::raw("  "),
                 Span::styled("Esc cancel", theme.hint()),
             ]),
         ];
@@ -139,9 +142,34 @@ impl AppComponent<Msg, UserEvent> for Confirm {
                 code: Key::Char('n') | Key::Char('N'),
                 ..
             }) => Some(Msg::Confirmed(false)),
+            // ← highlights Yes (left side), → highlights No (right
+            // side). Also accept Vim-style h/l for keyboard-first
+            // users. Principle of least surprise: in any UI that
+            // shows two options side-by-side, arrows should toggle.
+            Event::Keyboard(KeyEvent {
+                code: Key::Left | Key::Char('h'),
+                ..
+            }) => {
+                self.selected_yes = true;
+                None
+            }
+            Event::Keyboard(KeyEvent {
+                code: Key::Right | Key::Char('l'),
+                ..
+            }) => {
+                self.selected_yes = false;
+                None
+            }
+            // Tab also toggles — pairs well with single-handed use.
+            Event::Keyboard(KeyEvent {
+                code: Key::Tab, ..
+            }) => {
+                self.selected_yes = !self.selected_yes;
+                None
+            }
             Event::Keyboard(KeyEvent {
                 code: Key::Enter, ..
-            }) => Some(Msg::Confirmed(self.default_yes)),
+            }) => Some(Msg::Confirmed(self.selected_yes)),
             _ => None,
         }
     }

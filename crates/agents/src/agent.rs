@@ -208,16 +208,20 @@ pub mod builtins {
             // So strict substring matching for `❯ 1.` fails even when
             // the prompt is visually on screen.
             //
-            // Fix: pair on tolerant signals. The arrow `❯` AND the
-            // numbered-yes shape (`1. Yes` or `1) Yes`) together is
-            // strong evidence of a chooser, regardless of whether
-            // they're adjacent. Same for the textarea footer.
+            // Generalized matcher: the arrow `❯` ANYWHERE in the
+            // buffer paired with a numbered-choice shape (any `1.` /
+            // `1)` followed by a text option AND any `2.` / `2)`)
+            // catches every chooser claude renders today: permission
+            // prompts, tool-approval, multi-choice continuations,
+            // custom yes/no — anything with at least two numbered
+            // options. The `2.` / `2)` second requirement filters out
+            // chat lists that happen to start with `1.` (the second
+            // option is the giveaway: a chooser is always followed
+            // immediately by `2.`).
             let has_arrow = s.contains('❯') || s.contains("> 1.") || s.contains("> 1)");
-            let has_numbered_yes = s.contains("1. Yes")
-                || s.contains("1) Yes")
-                || s.contains("1.Yes")
-                || s.contains("1)Yes");
-            if has_arrow && has_numbered_yes {
+            let has_two_options = (s.contains("1.") || s.contains("1)"))
+                && (s.contains("2.") || s.contains("2)"));
+            if has_arrow && has_two_options {
                 return Some(AgentState::Asking);
             }
 
