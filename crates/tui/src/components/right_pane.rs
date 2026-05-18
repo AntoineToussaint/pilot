@@ -780,14 +780,17 @@ impl RightPane {
             // Read activities dim to text_dim across the whole row;
             // unread keep full text + bold author. Single biggest
             // visual differentiator — without it the 9-of-11-new
-            // header counter doesn't match the actual rows. The
-            // cursor still wins over read/unread coloring so the
-            // user can see which row j/k landed on.
+            // header counter doesn't match the actual rows.
+            //
+            // Cursor highlight ONLY when the pane is focused. The
+            // earlier `is_cursor && !focused → bold` branch made the
+            // first activity row look picked-out even when the user
+            // was in a terminal, which read as a stuck-selection bug
+            // ("why is this row bold?"). When unfocused the cursor's
+            // existence is irrelevant; row styling is just unread/read.
             let read_dim = !is_unread && !(is_cursor && focused);
             let header_style = if is_cursor && focused {
                 theme.row_focused()
-            } else if is_cursor {
-                theme.row_unfocused().add_modifier(Modifier::BOLD)
             } else if is_unread {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {

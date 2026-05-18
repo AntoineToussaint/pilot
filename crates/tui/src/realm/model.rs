@@ -190,6 +190,13 @@ pub struct Model<T: TerminalAdapter> {
     /// toggles expand/collapse on the card. Crossterm doesn't
     /// report double-clicks natively — we synthesize them here.
     last_click: Option<(u16, u16, std::time::Instant)>,
+    /// True if the user has typed at least one non-Tab key since
+    /// focus entered the terminal pane. While `false`, Tab in the
+    /// terminal pane cycles focus like everywhere else; once the
+    /// user has typed anything, Tab routes to the PTY (autocomplete).
+    /// Reset to `false` on every focus-enter of `Terminals` so each
+    /// fresh visit gets the cycle-out behavior.
+    terminal_user_typed_since_focus: bool,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window kicks focus back to
     /// the sidebar instead of forwarding to the PTY.
@@ -354,6 +361,7 @@ impl<T: TerminalAdapter> Model<T> {
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             last_click: None,
+            terminal_user_typed_since_focus: false,
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
@@ -1339,8 +1347,14 @@ impl<T: TerminalAdapter> Model<T> {
             Key::Tab
                 if !key.modifiers.contains(KeyModifiers::SHIFT)
                     && (self.focus != PaneFocus::Terminals
-                        || self.terminals.is_empty()) =>
+                        || self.terminals.is_empty()
+                        || !self.terminal_user_typed_since_focus) =>
             {
+                // Empty terminal pane OR fresh-entry-no-typing-yet →
+                // cycle focus instead of forwarding Tab to the PTY.
+                // After the user has typed even one character in this
+                // focus session the flag flips and Tab goes to the
+                // shell for autocomplete.
                 self.q_latch.disarm();
                 self.focus = self.focus.next();
                 self.set_focus_attr();
@@ -1583,7 +1597,13 @@ impl<T: TerminalAdapter> Model<T> {
             PaneFocus::Terminals if self.terminals.is_empty() => {
                 self.sidebar.handle_key_direct(ct, &mut cmds);
             }
-            PaneFocus::Terminals => self.terminals.handle_key_direct(ct, &mut cmds),
+            PaneFocus::Terminals => {
+                // Anything routed to the PTY counts as "user typed":
+                // Tab gates above won't see this key as a cycle
+                // trigger anymore.
+                self.terminal_user_typed_since_focus = true;
+                self.terminals.handle_key_direct(ct, &mut cmds);
+            }
         }
         // Surface spawn intent in the footer so the user sees that
         // worktree creation / process startup is happening (can take
@@ -2315,6 +2335,12 @@ impl<T: TerminalAdapter> Model<T> {
         self.right.set_focused(self.focus == PaneFocus::Right);
         self.terminals
             .set_focused(self.focus == PaneFocus::Terminals);
+        // Reset the typed-since-focus flag every time focus changes.
+        // A fresh visit to the terminal pane starts with `false` so
+        // a single Tab cycles back out (no input → no autocomplete
+        // target). After the first non-Tab key the flag flips and
+        // Tab routes to the PTY normally.
+        self.terminal_user_typed_since_focus = false;
     }
 
     /// Forward an inbound daemon event into all three panes. Each
@@ -2743,13 +2769,16 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             match crossterm::event::read() {
                 Ok(crossterm::event::Event::Key(key)) => {
                     // With KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    // pushed at startup, the host terminal sends both
-                    // Press and Release events for every keystroke.
-                    // Processing both would double every character;
-                    // skip Release / Repeat. (Press is also the default
-                    // when no flags are pushed, so this is safe on
-                    // terminals that don't support the protocol.)
-                    if !matches!(key.kind, crossterm::event::KeyEventKind::Press) {
+                    // pushed at startup, the host terminal distinguishes
+                    // Press / Repeat / Release. We skip Release only —
+                    // Repeat must be honored so held keys autorepeat
+                    // (arrow keys in Claude code, holding j to scroll,
+                    // etc.). The previous filter skipped Repeat too,
+                    // which made every "held key" feel broken even
+                    // though Backspace worked (Backspace events arrive
+                    // as Press from the terminal's auto-repeat
+                    // emulation when extended keyboards aren't on).
+                    if matches!(key.kind, crossterm::event::KeyEventKind::Release) {
                         continue;
                     }
                     let realm_key = crossterm_to_realm(key);
