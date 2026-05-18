@@ -1028,9 +1028,13 @@ impl Sidebar {
             out.push(Binding { keys: "c", label: "claude" });
             out.push(Binding { keys: "s", label: "shell" });
             out.push(Binding { keys: "e", label: "editor" });
-            if has_sessions {
-                out.push(Binding { keys: "Shift-X", label: "kill" });
-            }
+            // `Shift-X` archives the focused workspace (removes from
+            // inbox + kills any sessions). Always available when a
+            // workspace is selected — gating on has_sessions hid the
+            // shortcut for the most common case (read-only review
+            // workspace the user wants to dismiss).
+            let kill_label = if has_sessions { "archive (kills sessions)" } else { "archive" };
+            out.push(Binding { keys: "Shift-X", label: kill_label });
         }
         out.push(Binding { keys: "n", label: "new workspace" });
 
