@@ -3,6 +3,9 @@
 //! the Subscribe → Snapshot contract works end-to-end — just like
 //! the in-process `channel::pair` path, but over a real Unix socket.
 
+#[allow(unused_macros)]
+macro_rules! async_test_body { ($body:block) => { match tokio::time::timeout(std::time::Duration::from_secs(5), async move $body).await { Ok(()) => (), Err(_) => panic!("test exceeded 5s timeout") } }; }
+
 use pilot_ipc::{Command, Event, socket};
 use pilot_server::ServerConfig;
 use pilot_server::lifecycle;
@@ -45,7 +48,7 @@ async fn spawn_service(
 // ── Socket end-to-end ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn socket_subscribe_yields_snapshot() {
+async fn socket_subscribe_yields_snapshot() { async_test_body!({
     let base = TempDir::new().unwrap();
     let (sock, handle, shutdown) = spawn_service(&base).await;
 
@@ -59,10 +62,10 @@ async fn socket_subscribe_yields_snapshot() {
 
     shutdown.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
-}
+}); }
 
 #[tokio::test]
-async fn socket_service_creates_pid_file() {
+async fn socket_service_creates_pid_file() { async_test_body!({
     let base = TempDir::new().unwrap();
     let (_sock, handle, shutdown) = spawn_service(&base).await;
     let pid_file = base.path().join("daemon.pid");
@@ -73,10 +76,10 @@ async fn socket_service_creates_pid_file() {
 
     shutdown.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
-}
+}); }
 
 #[tokio::test]
-async fn socket_service_cleans_up_on_shutdown() {
+async fn socket_service_cleans_up_on_shutdown() { async_test_body!({
     let base = TempDir::new().unwrap();
     let (sock, handle, shutdown) = spawn_service(&base).await;
     let pid_file = base.path().join("daemon.pid");
@@ -89,10 +92,10 @@ async fn socket_service_cleans_up_on_shutdown() {
 
     assert!(!sock.exists(), "socket removed on clean shutdown");
     assert!(!pid_file.exists(), "pid file removed on clean shutdown");
-}
+}); }
 
 #[tokio::test]
-async fn stale_socket_is_cleaned_up_on_bind() {
+async fn stale_socket_is_cleaned_up_on_bind() { async_test_body!({
     let base = TempDir::new().unwrap();
     let (sock, pid) = runtime_paths(&base);
     // Leave a stale file where the socket will bind.
@@ -124,7 +127,7 @@ async fn stale_socket_is_cleaned_up_on_bind() {
 
     shutdown.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
-}
+}); }
 
 // ── Pure lifecycle helpers ─────────────────────────────────────────────
 

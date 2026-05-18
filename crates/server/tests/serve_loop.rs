@@ -2,6 +2,9 @@
 //! `ipc::channel::pair` — zero serialization, zero sockets — so tests
 //! are fast and deterministic.
 
+#[allow(unused_macros)]
+macro_rules! async_test_body { ($body:block) => { match tokio::time::timeout(std::time::Duration::from_secs(5), async move $body).await { Ok(()) => (), Err(_) => panic!("test exceeded 5s timeout") } }; }
+
 use pilot_ipc::{
     AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, PrincipalId,
     ProviderCredentialInput, channel,
@@ -9,7 +12,7 @@ use pilot_ipc::{
 use pilot_server::{Server, ServerConfig};
 
 #[tokio::test]
-async fn subscribe_yields_snapshot() {
+async fn subscribe_yields_snapshot() { async_test_body!({
     let (mut client, server) = channel::pair();
     tokio::spawn(async move {
         Server::new(ServerConfig::in_memory())
@@ -34,10 +37,10 @@ async fn subscribe_yields_snapshot() {
         }
         other => panic!("expected Snapshot, got {other:?}"),
     }
-}
+}); }
 
 #[tokio::test]
-async fn shutdown_closes_loop_cleanly() {
+async fn shutdown_closes_loop_cleanly() { async_test_body!({
     let (client, server) = channel::pair();
     let handle = tokio::spawn(async move {
         Server::new(ServerConfig::in_memory())
@@ -55,10 +58,10 @@ async fn shutdown_closes_loop_cleanly() {
         .await
         .expect("daemon exits promptly on Shutdown")
         .unwrap();
-}
+}); }
 
 #[tokio::test]
-async fn start_agent_run_unknown_agent_reports_error() {
+async fn start_agent_run_unknown_agent_reports_error() { async_test_body!({
     let (mut client, server) = channel::pair();
     tokio::spawn(async move {
         Server::new(ServerConfig::in_memory())
@@ -88,10 +91,10 @@ async fn start_agent_run_unknown_agent_reports_error() {
         }
         other => panic!("expected ProviderError, got {other:?}"),
     }
-}
+}); }
 
 #[tokio::test]
-async fn send_agent_input_unknown_run_reports_error() {
+async fn send_agent_input_unknown_run_reports_error() { async_test_body!({
     let (mut client, server) = channel::pair();
     tokio::spawn(async move {
         Server::new(ServerConfig::in_memory())
@@ -120,10 +123,10 @@ async fn send_agent_input_unknown_run_reports_error() {
         }
         other => panic!("expected ProviderError, got {other:?}"),
     }
-}
+}); }
 
 #[tokio::test]
-async fn provider_credential_commands_return_metadata_without_secrets() {
+async fn provider_credential_commands_return_metadata_without_secrets() { async_test_body!({
     let (mut client, server) = channel::pair();
     tokio::spawn(async move {
         Server::new(ServerConfig::in_memory())
@@ -208,7 +211,7 @@ async fn provider_credential_commands_return_metadata_without_secrets() {
         }
         other => panic!("expected ProviderCredentialRemoved, got {other:?}"),
     }
-}
+}); }
 
 #[tokio::test]
 async fn client_drop_terminates_daemon_loop() {

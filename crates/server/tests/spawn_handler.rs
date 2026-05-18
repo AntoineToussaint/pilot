@@ -4,6 +4,9 @@
 //! curl. Tests drive synthetic output via `MockBackend::emit` and end
 //! sessions via `finish`.
 
+#[allow(unused_macros)]
+macro_rules! async_test_body { ($body:block) => { match tokio::time::timeout(std::time::Duration::from_secs(5), async move $body).await { Ok(()) => (), Err(_) => panic!("test exceeded 5s timeout") } }; }
+
 use pilot_ipc::{Command, Event, TerminalKind, channel};
 use pilot_server::backend::{MockBackend, SessionBackend};
 use pilot_server::{Server, ServerConfig};
@@ -79,7 +82,7 @@ async fn spawn_and_wait(
 }
 
 #[tokio::test]
-async fn spawn_shell_emits_terminal_spawned_event() {
+async fn spawn_shell_emits_terminal_spawned_event() { async_test_body!({
     timeout(TEST_DEADLINE, async {
         let config = ServerConfig::in_memory();
         let mut client = subscribed(config).await;
@@ -87,10 +90,10 @@ async fn spawn_shell_emits_terminal_spawned_event() {
     })
     .await
     .expect("deadline");
-}
+}); }
 
 #[tokio::test]
-async fn unknown_agent_id_emits_provider_error() {
+async fn unknown_agent_id_emits_provider_error() { async_test_body!({
     timeout(TEST_DEADLINE, async {
         let config = ServerConfig::in_memory();
         let mut client = subscribed(config).await;
@@ -119,10 +122,10 @@ async fn unknown_agent_id_emits_provider_error() {
     })
     .await
     .expect("deadline");
-}
+}); }
 
 #[tokio::test]
-async fn spawned_subprocess_output_reaches_client_via_bus() {
+async fn spawned_subprocess_output_reaches_client_via_bus() { async_test_body!({
     timeout(TEST_DEADLINE, async {
         // Build the config + grab the typed mock so the test can
         // inject output the daemon's pump task will forward.
@@ -160,10 +163,10 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
     })
     .await
     .expect("deadline");
-}
+}); }
 
 #[tokio::test]
-async fn close_drops_terminal_and_emits_exit_event() {
+async fn close_drops_terminal_and_emits_exit_event() { async_test_body!({
     timeout(TEST_DEADLINE, async {
         let config = ServerConfig::in_memory();
         let mut client = subscribed(config.clone()).await;
@@ -188,10 +191,10 @@ async fn close_drops_terminal_and_emits_exit_event() {
     })
     .await
     .expect("deadline");
-}
+}); }
 
 #[tokio::test]
-async fn snapshot_includes_running_terminals_for_late_subscribers() {
+async fn snapshot_includes_running_terminals_for_late_subscribers() { async_test_body!({
     timeout(TEST_DEADLINE, async {
         let config = ServerConfig::in_memory();
         let mut producer = subscribed(config.clone()).await;
@@ -211,14 +214,14 @@ async fn snapshot_includes_running_terminals_for_late_subscribers() {
     })
     .await
     .expect("deadline");
-}
+}); }
 
 /// Regression: `--connect` clients reconnecting mid-session need the
 /// PTY ring buffer in `TerminalSnapshot.replay` to reconstruct the
 /// screen. Without it they see a blank terminal until the next chunk
 /// arrives — which for an idle agent could be never.
 #[tokio::test]
-async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
+async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() { async_test_body!({
     timeout(TEST_DEADLINE, async {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut producer = subscribed(config.clone()).await;
@@ -260,7 +263,7 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
     })
     .await
     .expect("deadline");
-}
+}); }
 
 /// Recovery scenario: a backend has a session running (simulating
 /// "pilot crashed"), then a fresh `ServerConfig` is built around the

@@ -4,6 +4,9 @@ pub use pilot_server::{Server, ServerConfig};
 #[path = "../src/api_gateway.rs"]
 mod api_gateway;
 
+#[allow(unused_macros)]
+macro_rules! async_test_body { ($body:block) => { match tokio::time::timeout(std::time::Duration::from_secs(5), async move $body).await { Ok(()) => (), Err(_) => panic!("test exceeded 5s timeout") } }; }
+
 use api_gateway::{
     CommandResponse, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
     WorkspacesResponse,
@@ -134,7 +137,7 @@ fn bearer_token_helper_allows_requests_when_token_is_not_configured() {
 }
 
 #[tokio::test]
-async fn health_route_returns_json() {
+async fn health_route_returns_json() { async_test_body!({
     let request = Request::builder()
         .method(Method::GET)
         .uri("/v1/health")
@@ -152,10 +155,10 @@ async fn health_route_returns_json() {
     let payload: HealthResponse = read_json(response).await;
     assert_eq!(payload.service, "pilot-api-gateway");
     assert!(payload.ok);
-}
+}); }
 
 #[tokio::test]
-async fn health_route_enforces_bearer_token_when_configured() {
+async fn health_route_enforces_bearer_token_when_configured() { async_test_body!({
     let request = Request::builder()
         .method(Method::GET)
         .uri("/v1/health")
@@ -169,10 +172,10 @@ async fn health_route_enforces_bearer_token_when_configured() {
     let response = api_gateway::handle_request(ServerConfig::in_memory(), options, request).await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
+}); }
 
 #[tokio::test]
-async fn workspaces_route_returns_current_store_snapshot() {
+async fn workspaces_route_returns_current_store_snapshot() { async_test_body!({
     let config = ServerConfig::in_memory();
     let workspace = Workspace::from_task(make_task("o/r#42"), Utc::now());
     config
@@ -200,10 +203,10 @@ async fn workspaces_route_returns_current_store_snapshot() {
     let payload: WorkspacesResponse = read_json(response).await;
     assert_eq!(payload.workspaces.len(), 1);
     assert_eq!(payload.workspaces[0].pr.as_ref().unwrap().id.key, "o/r#42");
-}
+}); }
 
 #[tokio::test]
-async fn command_route_accepts_json_client_frame() {
+async fn command_route_accepts_json_client_frame() { async_test_body!({
     let frame = JsonClientFrame::Command(Command::Refresh);
     let request = Request::builder()
         .method(Method::POST)
@@ -221,10 +224,10 @@ async fn command_route_accepts_json_client_frame() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: CommandResponse = read_json(response).await;
     assert!(payload.ok);
-}
+}); }
 
 #[tokio::test]
-async fn command_route_rejects_malformed_json() {
+async fn command_route_rejects_malformed_json() { async_test_body!({
     let request = Request::builder()
         .method(Method::POST)
         .uri("/v1/commands")
@@ -239,10 +242,10 @@ async fn command_route_rejects_malformed_json() {
     .await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-}
+}); }
 
 #[tokio::test]
-async fn events_route_streams_initial_snapshot_as_ndjson() {
+async fn events_route_streams_initial_snapshot_as_ndjson() { async_test_body!({
     let request = Request::builder()
         .method(Method::GET)
         .uri("/v1/events")
@@ -275,10 +278,10 @@ async fn events_route_streams_initial_snapshot_as_ndjson() {
         }
         other => panic!("expected Snapshot frame, got {other:?}"),
     }
-}
+}); }
 
 #[tokio::test]
-async fn stream_route_accepts_ndjson_commands_and_streams_events() {
+async fn stream_route_accepts_ndjson_commands_and_streams_events() { async_test_body!({
     let mut line = serde_json::to_vec(&JsonClientFrame::Command(Command::Subscribe)).unwrap();
     line.push(b'\n');
     let request = Request::builder()
@@ -307,7 +310,7 @@ async fn stream_route_accepts_ndjson_commands_and_streams_events() {
         server_frame,
         JsonServerFrame::Event(Event::Snapshot { .. })
     ));
-}
+}); }
 
 #[cfg(unix)]
 #[tokio::test]
