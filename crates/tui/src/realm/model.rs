@@ -174,14 +174,14 @@ pub struct Model<T: TerminalAdapter> {
     /// keyboard events here when a modal is up so Application's
     /// listener thread picks them up + dispatches.
     modal_event_tx: mpsc::Sender<RealmEvent<UserEvent>>,
-    /// First-press time of the q-q double-tap. The first `q` outside
-    /// a terminal arms the latch; a second `q` within
-    /// `ui_defaults.quit_double_tap_window` quits. Any other key disarms.
-    q_armed_at: Option<std::time::Instant>,
+    /// q-q double-tap quit latch. First `q` outside a terminal arms;
+    /// second `q` within `ui_defaults.quit_double_tap_window` quits.
+    /// Any other key disarms via `q_latch.disarm()`.
+    q_latch: crate::confirm_latch::DoubleTapLatch,
     /// `]]` escape from the terminal pane: first press of the escape
-    /// char is recorded; a second within the window kicks focus
-    /// back to the sidebar instead of forwarding to the PTY.
-    escape_armed_at: Option<std::time::Instant>,
+    /// char arms; a second within the window kicks focus back to
+    /// the sidebar instead of forwarding to the PTY.
+    escape_latch: crate::confirm_latch::DoubleTapLatch,
     /// Pending `--workspace` / `--session` preselect from the CLI.
     /// Applied after the daemon's first Snapshot — by then the
     /// sidebar has the full workspace list and `focus_workspace_key`
@@ -335,8 +335,8 @@ impl<T: TerminalAdapter> Model<T> {
             quit: false,
             setup: SetupCtx::new(),
             modal_event_tx,
-            q_armed_at: None,
-            escape_armed_at: None,
+            q_latch: crate::confirm_latch::DoubleTapLatch::new(),
+            escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
@@ -1312,7 +1312,7 @@ impl<T: TerminalAdapter> Model<T> {
                     && (self.focus != PaneFocus::Terminals
                         || self.terminals.is_empty()) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 self.focus = self.focus.next();
                 self.set_focus_attr();
                 self.redraw = true;
@@ -1330,21 +1330,17 @@ impl<T: TerminalAdapter> Model<T> {
                     self.quit = true;
                     return;
                 }
-                let now = std::time::Instant::now();
-                if let Some(armed_at) = self.q_armed_at
-                    && now.duration_since(armed_at) <= self.ui_defaults.quit_double_tap_window
-                {
+                if self.q_latch.tap(self.ui_defaults.quit_double_tap_window) {
                     self.quit = true;
                     return;
                 }
-                self.q_armed_at = Some(now);
                 self.redraw = true;
                 return;
             }
             _ if self.focus != PaneFocus::Terminals
                 && self.matches_action(&key, pilot_config::Action::Help) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 self.mount_help();
                 return;
             }
@@ -1356,7 +1352,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ if self.focus != PaneFocus::Terminals
                 && self.matches_action(&key, pilot_config::Action::JumpToAsking) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 if self.sidebar.focus_next_asking_workspace() {
                     self.focus = PaneFocus::Sidebar;
                     self.set_focus_attr();
@@ -1372,7 +1368,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ if self.focus == PaneFocus::Sidebar
                 && self.matches_action(&key, pilot_config::Action::FocusActivity) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 self.focus = PaneFocus::Right;
                 self.set_focus_attr();
                 self.redraw = true;
@@ -1384,7 +1380,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if key.modifiers.contains(KeyModifiers::SHIFT)
                     && self.focus != PaneFocus::Terminals =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 let (dx, dy) = match key.code {
                     Key::Left => (-self.ui_defaults.split_step_percent, 0),
                     Key::Right => (self.ui_defaults.split_step_percent, 0),
@@ -1405,7 +1401,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.focus != PaneFocus::Terminals =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 if let Some(spec) = self.focused_detach_spec() {
                     spawn_detached_pilot(&spec);
                 }
@@ -1419,7 +1415,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ if self.focus != PaneFocus::Terminals
                 && self.matches_action(&key, pilot_config::Action::Reply) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 let intent = crate::intent::resolve_reply(self.sidebar.selected_workspace());
                 if let crate::intent::Intent::MountReply { workspace_key } = intent {
                     let session_key: pilot_core::SessionKey = (&workspace_key).into();
@@ -1432,7 +1428,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ if self.focus == PaneFocus::Sidebar
                 && self.matches_action(&key, pilot_config::Action::OpenEditor) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 if matches!(
                     crate::intent::resolve_open_editor(self.sidebar.selected_workspace()),
                     crate::intent::Intent::OpenEditor
@@ -1446,7 +1442,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ if self.focus == PaneFocus::Sidebar
                 && self.matches_action(&key, pilot_config::Action::NewWorkspace) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 if matches!(
                     crate::intent::resolve_new_workspace(),
                     crate::intent::Intent::MountNewWorkspaceInput
@@ -1463,7 +1459,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ if self.focus != PaneFocus::Terminals
                 && self.matches_action(&key, pilot_config::Action::Settings) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 self.open_settings();
                 return;
             }
@@ -1477,7 +1473,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ if self.focus == PaneFocus::Sidebar
                 && self.matches_action(&key, pilot_config::Action::AdoptSessions) =>
             {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 // `resolve_adopt` makes the "do I have sessions to
                 // adopt?" decision and returns either MountAdoptPicker
                 // or a Notice. Handler just executes whichever Intent
@@ -1497,7 +1493,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             _ => {
                 // Any other key disarms.
-                self.q_armed_at = None;
+                self.q_latch.disarm();
             }
         }
 
@@ -1512,18 +1508,23 @@ impl<T: TerminalAdapter> Model<T> {
             && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
         // (escape-char dispatch reads from `ui_defaults.terminal_escape_char`)
         {
-            if self.escape_armed_at.is_some() {
-                // Second `]` — break out to sidebar.
-                self.escape_armed_at = None;
+            // The escape sequence is the SAME key twice in a row, so
+            // a fixed "long enough" window is fine — any other key
+            // arriving between the two `]`s falls through to the
+            // flush-held branch below. Use a generous 1s window so a
+            // hesitant user still gets out.
+            const ESCAPE_WINDOW: std::time::Duration =
+                std::time::Duration::from_secs(1);
+            if self.escape_latch.tap(ESCAPE_WINDOW) {
                 self.focus = PaneFocus::Sidebar;
                 self.set_focus_attr();
                 self.redraw = true;
                 return;
             }
-            self.escape_armed_at = Some(std::time::Instant::now());
             return;
         }
-        if self.focus == PaneFocus::Terminals && self.escape_armed_at.take().is_some() {
+        if self.focus == PaneFocus::Terminals && self.escape_latch.is_armed() {
+            self.escape_latch.disarm();
             // Non-`]` key arrived after a held `]` — flush the held
             // char to the PTY before the new key, so typing patterns
             // like `]a` aren't lost.
@@ -1584,8 +1585,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Returns true when the q-q latch is armed (used by the bottom
     /// hint bar to show "press q again" briefly).
     pub fn q_arm_pending(&self) -> bool {
-        self.q_armed_at
-            .is_some_and(|t| t.elapsed() <= self.ui_defaults.quit_double_tap_window)
+        self.q_latch.is_armed()
     }
 
     /// Read-only accessor — which pane currently has focus. Used by
@@ -1743,7 +1743,7 @@ impl<T: TerminalAdapter> Model<T> {
 
         match m.kind {
             MouseEventKind::Down(button) => {
-                self.q_armed_at = None;
+                self.q_latch.disarm();
                 // Tab-strip click on the terminal pane top row →
                 // switch active tab. Checked BEFORE the
                 // "forward to inner program" path because the tab

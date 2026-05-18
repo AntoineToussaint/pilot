@@ -112,6 +112,61 @@ impl TimerLatch {
     }
 }
 
+/// "Two presses within a window" latch. Same family as
+/// `ConfirmLatch` (two-press) and `TimerLatch` (elapsed-delay),
+/// but the trigger is "second press arrived BEFORE the window
+/// expired" — used for `q q` quit and `]]` exit-terminal.
+///
+/// Replaces hand-rolled `Option<Instant>` fields that previously
+/// lived inline on the orchestrator (`q_armed_at`,
+/// `escape_armed_at`) with the arm / disarm mutations scattered
+/// across ~15 call sites each. The contract:
+///
+/// - `tap(window)`: first press arms; second press within `window`
+///   fires (returns `true`); second press past `window` re-arms.
+/// - `disarm()`: any other key clears the latch (caller invokes
+///   this after dispatching a non-latch key, just like every
+///   other latch in the family).
+///
+/// `is_armed` lets the footer / hint bar render a "press again to
+/// confirm" indicator without exposing the timestamp.
+#[derive(Debug, Default, Clone)]
+pub struct DoubleTapLatch {
+    armed_at: Option<std::time::Instant>,
+}
+
+impl DoubleTapLatch {
+    pub fn new() -> Self {
+        Self { armed_at: None }
+    }
+
+    /// First press → arm; returns `false` ("don't fire yet").
+    /// Second press within `window` → fire and clear; returns `true`.
+    /// Second press past `window` → re-arm with a fresh timestamp;
+    /// returns `false`.
+    pub fn tap(&mut self, window: std::time::Duration) -> bool {
+        if let Some(t) = self.armed_at
+            && t.elapsed() <= window
+        {
+            self.armed_at = None;
+            return true;
+        }
+        self.armed_at = Some(std::time::Instant::now());
+        false
+    }
+
+    /// Force-clear the latch. Called after dispatching any
+    /// non-latch key so a typed `q j` doesn't leave the quit
+    /// prompt armed.
+    pub fn disarm(&mut self) {
+        self.armed_at = None;
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed_at.is_some()
+    }
+}
+
 /// One-shot "consume the next key" prefix latch.
 ///
 /// Third member of the latch family: `ConfirmLatch` keys off a
@@ -295,6 +350,40 @@ mod tests {
         p.arm();
         p.disarm();
         assert!(!p.is_armed());
+    }
+
+    // ── DoubleTapLatch tests ─────────────────────────────────────
+
+    #[test]
+    fn double_tap_first_press_arms_does_not_fire() {
+        let mut l = DoubleTapLatch::new();
+        assert!(!l.tap(std::time::Duration::from_secs(1)));
+        assert!(l.is_armed());
+    }
+
+    #[test]
+    fn double_tap_second_within_window_fires_and_clears() {
+        let mut l = DoubleTapLatch::new();
+        l.tap(std::time::Duration::from_secs(1));
+        assert!(l.tap(std::time::Duration::from_secs(1)));
+        assert!(!l.is_armed());
+    }
+
+    #[test]
+    fn double_tap_second_past_window_re_arms() {
+        let mut l = DoubleTapLatch::new();
+        l.tap(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!l.tap(std::time::Duration::from_millis(10)));
+        assert!(l.is_armed(), "stale arm refreshed, not fired");
+    }
+
+    #[test]
+    fn double_tap_disarm_clears() {
+        let mut l = DoubleTapLatch::new();
+        l.tap(std::time::Duration::from_secs(1));
+        l.disarm();
+        assert!(!l.is_armed());
     }
 
     #[test]
