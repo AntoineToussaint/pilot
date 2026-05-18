@@ -1005,7 +1005,23 @@ async fn prepare_upsert(
 /// error doesn't suppress the bus broadcast, and a bus-send error
 /// doesn't take down the daemon.
 fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace: Workspace) {
-    let json = serde_json::to_string(&workspace).ok();
+    // Serialization failure here means the workspace exists in memory
+    // but won't survive a restart — and the silent `.ok()` previously
+    // stored `None`, so the next process would read back an empty
+    // record without any indication something went wrong. Log loudly
+    // so a broken Serialize impl shows up in /tmp/pilot.log instead
+    // of mysterious post-restart data loss.
+    let json = match serde_json::to_string(&workspace) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!(
+                workspace_key = %key.as_str(),
+                "commit_upsert: serde_json::to_string(workspace) failed: {e} \
+                 — record will persist with NULL json (will read back empty)",
+            );
+            None
+        }
+    };
     let record = WorkspaceRecord {
         key: key.as_str().to_string(),
         created_at: workspace.created_at,

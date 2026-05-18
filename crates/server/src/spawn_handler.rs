@@ -648,7 +648,21 @@ async fn provision_worktree(
     // failure logs a warning but doesn't fail the spawn. Both are
     // idempotent so re-running this on an already-mounted worktree
     // is a no-op.
-    let cfg = pilot_config::Config::load().unwrap_or_default();
+    // YAML load failures used to be `.unwrap_or_default()` — silently
+    // disabling every configured mount on a typo. Surface the parse
+    // error so a broken `~/.pilot/config.yaml` shows up loudly in
+    // `/tmp/pilot.log` instead of users wondering why their mounts
+    // stopped working after an edit.
+    let cfg = match pilot_config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                repo = %format!("{owner}/{name}"),
+                "Config::load failed (mounts will be skipped): {e}",
+            );
+            pilot_config::Config::default()
+        }
+    };
     let mut mounts = config_mounts_to_git(&cfg.worktree.mounts);
     let repo_key = format!("{owner}/{name}");
     if let Some(repo_cfg) = cfg.repos.get(&repo_key) {
