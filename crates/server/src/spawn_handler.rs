@@ -261,6 +261,13 @@ pub async fn handle_spawn(
     // Clone before the pump task takes ownership of `agent_for_pump`;
     // the post-spawn `initial_prompt` injector needs its own handle.
     let agent_for_inject = agent_for_pump.clone();
+    // Signaled by the pump task on first detected output. The
+    // initial-prompt injector waits on this with a timeout, replacing
+    // the old 50ms-poll-on-shared-Mutex loop that competed with the
+    // pump's `agent_states_map.lock()` write path.
+    let first_output_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let first_output_signal_for_pump = first_output_signal.clone();
+    let first_output_signal_for_inject = first_output_signal.clone();
     let session_key_for_pump = session_key.clone();
     // Broadcast BEFORE spawning the pump task. Otherwise a
     // fast-exiting terminal (e.g. a command that immediately
@@ -385,6 +392,12 @@ pub async fn handle_spawn(
             });
         }
 
+        // Notify the initial-prompt injector exactly once when the
+        // first byte of output arrives. `notify_one` STORES a permit
+        // if no one is waiting yet, so we don't race the inject task's
+        // `.notified()` registration — the permit is consumed when
+        // the inject task starts waiting, even if pump runs first.
+        let mut signaled_first_output = false;
         if !sub.replay.is_empty() {
             maybe_emit_state_change(
                 agent_for_pump.as_ref(),
@@ -403,6 +416,8 @@ pub async fn handle_spawn(
                 bytes: sub.replay.clone(),
                 seq: sub.last_seq,
             });
+            first_output_signal_for_pump.notify_waiters();
+            signaled_first_output = true;
         }
         while let Some(chunk) = sub.live.recv().await {
             maybe_emit_state_change(
@@ -417,6 +432,10 @@ pub async fn handle_spawn(
                 ASKING_HYSTERESIS,
             )
             .await;
+            if !signaled_first_output {
+                first_output_signal_for_pump.notify_one();
+                signaled_first_output = true;
+            }
             let _ = bus.send(Event::TerminalOutput {
                 terminal_id: id_for_pump,
                 bytes: chunk.bytes,
@@ -456,40 +475,26 @@ pub async fn handle_spawn(
         let paste = agent.inject_prompt(&prompt);
         let submit = agent.inject_submit();
         let backend = config.backend.clone();
-        let states = config.agent_states.clone();
         let backend_key = backend_key.clone();
         let id = terminal_id;
+        let first_output = first_output_signal_for_inject;
         tokio::spawn(async move {
-            // Readiness check: wait until the agent has emitted
-            // ANY output (its `AgentState` map entry was populated
-            // by the pump task's first `detect_state` call), then
-            // a brief settle so the banner finishes drawing before
-            // we paste. The previous version waited for
-            // `state == Asking` — but Claude's welcome banner
-            // registers as `Active`, never `Asking`, so the wait
-            // ALWAYS hit its 10s deadline plus a 1.5s settle = ~12s
-            // of dead air between Claude spawn and the prompt
-            // appearing. Felt completely broken.
+            // Readiness check: wait until the pump task signals it
+            // saw the first byte of output, then a brief settle so
+            // the banner finishes drawing before we paste. Previously
+            // this was a 50ms-poll loop on `agent_states.lock()` that
+            // competed with the pump task's state-detection writes
+            // (~100 lock acquires per spawn under load). Notify is
+            // zero-overhead: the pump fires it once, the wait wakes
+            // immediately, no lock involved.
             //
-            // The output-presence proxy is faster and more accurate:
-            // - 50ms poll interval (vs. 200ms before)
-            // - bail when the map has any entry for this terminal
-            // - 5s hard cap for cold starts that block on auth/npm
-            // - 600ms settle after first output (Claude's banner
-            //   typically finishes drawing in <500ms)
-            const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+            // 5s hard cap for cold starts that block on auth/npm;
+            // 600ms settle is empirically when Claude's banner
+            // finishes drawing.
             const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
-            let deadline = std::time::Instant::now() + HARD_DEADLINE;
-            let mut got_output = false;
-            while std::time::Instant::now() < deadline {
-                let has_entry = states.lock().await.contains_key(&id);
-                if has_entry {
-                    got_output = true;
-                    break;
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
+            let notified = first_output.notified();
+            let got_output = tokio::time::timeout(HARD_DEADLINE, notified).await.is_ok();
             if !got_output {
                 tracing::warn!(
                     terminal_id = ?id,
