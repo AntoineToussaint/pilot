@@ -2111,11 +2111,11 @@ const TIME_COL_W: usize = 4;
 /// so the badge / status / time columns to its right don't shift.
 const UNREAD_COL_W: usize = 5;
 /// Visible width of the agent-badge column. Sized to fit the common
-/// "one agent + one shell" case (` C  S ` = 6 cells); a single
-/// badge gets right-aligned padding, more than two get truncated.
-/// Rows without any badge render this many row-styled spaces so
-/// the status / time columns to the right stay anchored.
-const BADGE_COL_W: usize = 6;
+/// "one agent + one shell" case ( ` C ` + space + ` S ` = 7 cells);
+/// a single badge gets right-aligned padding, more than two get
+/// truncated. Rows without any badge render this many row-styled
+/// spaces so the status / time columns to the right stay anchored.
+const BADGE_COL_W: usize = 7;
 
 /// Right-side status pill showing the most actionable problem on the
 /// PR. One pill at a time, ordered by severity: merge conflict beats

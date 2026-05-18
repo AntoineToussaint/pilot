@@ -197,6 +197,15 @@ pub struct Model<T: TerminalAdapter> {
     /// Reset to `false` on every focus-enter of `Terminals` so each
     /// fresh visit gets the cycle-out behavior.
     terminal_user_typed_since_focus: bool,
+    /// Whether pilot is capturing mouse events. Toggled by
+    /// `Ctrl-Shift-S` (select). When `false`, pilot has issued
+    /// `DisableMouseCapture` so the host terminal regains native
+    /// text selection — the user can trackpad-select / drag-select
+    /// inside claude / shell scrollback and copy with the host's
+    /// normal Cmd-C. Toggling back on re-enables pilot's mouse
+    /// features (splitter drag, click-to-focus, wheel scroll).
+    #[allow(dead_code)] // accessed indirectly via the Ctrl-Shift-S handler
+    mouse_capture_on: bool,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window kicks focus back to
     /// the sidebar instead of forwarding to the PTY.
@@ -362,6 +371,7 @@ impl<T: TerminalAdapter> Model<T> {
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             last_click: None,
             terminal_user_typed_since_focus: false,
+            mouse_capture_on: true,
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
@@ -1450,6 +1460,19 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
+            // Ctrl-Shift-S: toggle pilot's mouse capture. When OFF
+            // the host terminal regains native text selection so the
+            // user can trackpad-select inside claude / shell
+            // scrollback and Cmd-C the result. Available from any
+            // pane (including Terminals) so users in claude can
+            // escape to a copy gesture without breaking flow.
+            Key::Char('S')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.q_latch.disarm();
+                self.toggle_mouse_capture();
+                return;
+            }
             // `r` opens the reply textarea targeted at the selected
             // workspace. Available from Sidebar AND Right (Activity)
             // — replying is more naturally "an action on the thing
@@ -2365,6 +2388,31 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(top) = self.modal_stack.last() {
             let _ = self.app.active(top);
         }
+        self.redraw = true;
+    }
+
+    /// Flip pilot's mouse capture on/off. Issues
+    /// `EnableMouseCapture` / `DisableMouseCapture` to stdout so the
+    /// host terminal switches between "send mouse to pilot" and
+    /// "handle mouse natively (selection works)". Footer notice
+    /// confirms which mode is now active.
+    fn toggle_mouse_capture(&mut self) {
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        self.mouse_capture_on = !self.mouse_capture_on;
+        let (msg, _) = if self.mouse_capture_on {
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::event::EnableMouseCapture,
+            );
+            ("mouse: pilot (clicks → splitter/focus, wheel → scroll)", ())
+        } else {
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::event::DisableMouseCapture,
+            );
+            ("mouse: host (native selection ON — Ctrl-Shift-S to flip back)", ())
+        };
+        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
         self.redraw = true;
     }
 
