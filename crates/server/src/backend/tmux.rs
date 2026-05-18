@@ -78,6 +78,15 @@ set -g escape-time 0
 set -g mode-style \"fg=default,bg=default\"
 set -g message-style \"fg=default,bg=default\"
 unbind-key -a
+# Wheel scrolls 10 lines per notch (default 5) — pilot's wrapper
+# already produces fast wheel events, but tmux's per-event step
+# is what governs perceived speed inside copy-mode. Bumped after
+# the user reported scrolling felt molasses-slow compared to
+# native terminals.
+bind-key -T copy-mode-vi WheelUpPane send-keys -X -N 10 scroll-up
+bind-key -T copy-mode-vi WheelDownPane send-keys -X -N 10 scroll-down
+bind-key -T copy-mode WheelUpPane send-keys -X -N 10 scroll-up
+bind-key -T copy-mode WheelDownPane send-keys -X -N 10 scroll-down
 ";
 
 const DEFAULT_COLS: u16 = 120;

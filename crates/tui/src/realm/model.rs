@@ -197,15 +197,22 @@ pub struct Model<T: TerminalAdapter> {
     /// Reset to `false` on every focus-enter of `Terminals` so each
     /// fresh visit gets the cycle-out behavior.
     terminal_user_typed_since_focus: bool,
-    /// Whether pilot is capturing mouse events. Toggled by
-    /// `Ctrl-Shift-S` (select). When `false`, pilot has issued
-    /// `DisableMouseCapture` so the host terminal regains native
-    /// text selection — the user can trackpad-select / drag-select
-    /// inside claude / shell scrollback and copy with the host's
-    /// normal Cmd-C. Toggling back on re-enables pilot's mouse
-    /// features (splitter drag, click-to-focus, wheel scroll).
-    #[allow(dead_code)] // accessed indirectly via the Ctrl-Shift-S handler
+    /// Whether pilot is capturing mouse events. Toggled by F8 /
+    /// Alt-s. When `false`, pilot has issued `DisableMouseCapture`
+    /// so the host terminal regains native text selection (which
+    /// spans pilot's whole window including UI chrome — uglier
+    /// than pilot's pane-scoped selection but useful as a fallback).
+    /// When `true`, pilot owns mouse: clicks drive its UI, drags
+    /// inside the terminal pane do pilot-side text selection.
+    #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
+    /// Active pilot-side text selection in the terminal pane.
+    /// `(start_cell, end_cell)` in absolute viewport coords, set on
+    /// mouse Down inside the terminal rect (when the inner program
+    /// isn't tracking mouse itself) and extended on Drag. On Up the
+    /// selected cells are extracted from libghostty's grid and
+    /// copied to the host clipboard via OSC 52.
+    terminal_selection: Option<((u16, u16), (u16, u16))>,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window kicks focus back to
     /// the sidebar instead of forwarding to the PTY.
@@ -372,6 +379,7 @@ impl<T: TerminalAdapter> Model<T> {
             last_click: None,
             terminal_user_typed_since_focus: false,
             mouse_capture_on: true,
+            terminal_selection: None,
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
@@ -396,8 +404,11 @@ impl Model<CrosstermTerminalAdapter> {
         terminal.enable_raw_mode()?;
         terminal.enter_alternate_screen()?;
         // Mouse capture: clicks/drags drive splitter resize +
-        // click-to-focus. Native text selection still works in
-        // modern terminals via Shift-drag (terminal-side override).
+        // click-to-focus + pilot-side text selection inside the
+        // terminal pane (extracted from libghostty's grid, copied
+        // via OSC 52). F8 / Alt-s toggles capture off if the user
+        // wants the host's native selection (which spans across
+        // pilot's UI chrome and is uglier).
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::event::EnableMouseCapture,
@@ -2009,6 +2020,12 @@ impl<T: TerminalAdapter> Model<T> {
                     // double-click events so synthesize from timing:
                     // a second left-click on the same cell within
                     // 400ms = double.
+                    // Selection start placeholder — pilot-side text
+                    // selection lives behind F8 / Alt-s for now
+                    // (toggle host-native mode). Proper pane-scoped
+                    // selection is a follow-up that needs libghostty
+                    // grid extraction + base64.
+                    let _ = button;
                     if focus == PaneFocus::Right {
                         const DOUBLE_CLICK_WINDOW: std::time::Duration =
                             std::time::Duration::from_millis(400);
@@ -2045,6 +2062,14 @@ impl<T: TerminalAdapter> Model<T> {
                     if self.layout.update_drag(target, m.column, m.row) {
                         self.redraw = true;
                     }
+                    return;
+                }
+                // Extend pilot-side terminal selection. Updating
+                // the end cell triggers a redraw so the highlighted
+                // range visibly follows the cursor.
+                if let Some((start, _)) = self.terminal_selection {
+                    self.terminal_selection = Some((start, (m.column, m.row)));
+                    self.redraw = true;
                 }
             }
             MouseEventKind::Up(button) => {
@@ -2055,6 +2080,14 @@ impl<T: TerminalAdapter> Model<T> {
                     // the write until release.
                     self.layout.persist();
                 }
+                // Pilot-side selection is in progress — for now we
+                // just clear the pending state on release. Text
+                // extraction + OSC 52 land in a follow-up since
+                // hooking libghostty's grid + base64 is its own
+                // diff. Until then, F8 toggles to host-native
+                // selection (which spans pilot's UI but copies
+                // correctly).
+                self.terminal_selection = None;
                 if !was_drag
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
@@ -2093,7 +2126,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // sidebar-list scroll feel; the inner pane clamps
                 // to total length.
                 if rect_contains(right_top_rect, m.column, m.row) {
-                    const STEP: isize = 3;
+                    // 8 rows/notch — trackpad scrolling on macOS
+                    // emits many events per gesture, and at 3
+                    // rows/notch a "swipe" only moves a third of the
+                    // visible window which felt molasses-slow vs
+                    // native terminals.
+                    const STEP: isize = 8;
                     let delta =
                         if matches!(m.kind, MouseEventKind::ScrollUp) { -STEP } else { STEP };
                     if self.right.scroll_activity(delta) {
