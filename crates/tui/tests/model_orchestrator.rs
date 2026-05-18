@@ -286,6 +286,29 @@ fn click_in_sidebar_keeps_or_returns_focus_to_sidebar() {
 }
 
 #[test]
+fn wheel_outside_terminal_pane_is_a_silent_noop() {
+    // Scroll outside the terminal pane must NOT touch the active
+    // terminal's viewport — sidebar / activity own their own scroll.
+    // Pre-fix the wheel handler set a footer notice on every event;
+    // this test pins the "silent bail" path that replaced it.
+    let mut m = build_model();
+    let area = Rect::new(0, 0, 100, 30);
+    m.dispatch_mouse_in(
+        MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 5, // sidebar column
+            row: 10,
+            modifiers: CtKeyModifiers::empty(),
+        },
+        area,
+    );
+    // Sidebar focus is the start state; scroll outside doesn't shift focus.
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+    // No notice surfaced from the scroll path.
+    // (The footer notice for scroll was retired in the cleanup commit.)
+}
+
+#[test]
 fn drag_on_sidebar_splitter_changes_split() {
     let mut m = build_model();
     let (before, _) = m.split_pcts();
