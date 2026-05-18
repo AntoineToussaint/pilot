@@ -1807,20 +1807,21 @@ impl Sidebar {
                         // states. Mid-row position was hard to scan
                         // when half the column was taken up by an
                         // intermittent glyph.
-                        // Inline needs-input marker — a bright `?`
-                        // when any agent session in this workspace is
-                        // `Asking`. Reuses the header glyph from the
-                        // top-of-sidebar `? N input` counter so the
-                        // row-level and global signal look consistent.
-                        // Sits right after the unread dot — the user
-                        // already scans this column for "stuff that
-                        // needs me."
-                        if workspace.is_some_and(|w| {
+                        // Inline needs-input marker — bright `?` when
+                        // any agent in this workspace is Asking, else
+                        // a row-styled space so the title column to
+                        // the right stays anchored. Reserving the
+                        // cell unconditionally is what kept the
+                        // [PR]/[I] / #NNN columns from jittering
+                        // between rows that have asking-state and
+                        // rows that don't.
+                        let asking = workspace.is_some_and(|w| {
                             crate::agent_attention::workspace_is_asking(
                                 w,
                                 &self.agents_asking,
                             )
-                        }) {
+                        });
+                        if asking {
                             let style = if is_cursor {
                                 row_style
                             } else {
@@ -1829,6 +1830,8 @@ impl Sidebar {
                                     .add_modifier(Modifier::BOLD)
                             };
                             push(Span::styled(" ?", style), &mut used, &mut spans);
+                        } else {
+                            push(Span::styled("  ", row_style), &mut used, &mut spans);
                         }
                         push(Span::styled(" ", row_style), &mut used, &mut spans);
                     }
@@ -2138,11 +2141,14 @@ struct StatusPill {
 /// scratch workspaces (no PR, no issues — those have no number to
 /// label anyway).
 fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
+    // Pad to 4 cells so [PR] and [I ] line up column-wise — the
+    // `#NNN` number after the label needs the same x position on
+    // every row or the eye can't scan the column.
     if workspace.pr.is_some() {
         return Some("[PR]");
     }
     if !workspace.gh_issues.is_empty() || !workspace.linear_issues.is_empty() {
-        return Some("[I]");
+        return Some("[I ]");
     }
     None
 }
@@ -3117,7 +3123,7 @@ mod workspace_type_label_tests {
     fn issue_workspace_returns_i_label() {
         let mut w = empty_ws();
         w.attach_task(task("https://github.com/o/r/issues/42"));
-        assert_eq!(workspace_type_label(&w), Some("[I]"));
+        assert_eq!(workspace_type_label(&w), Some("[I ]"));
     }
 
     #[test]
