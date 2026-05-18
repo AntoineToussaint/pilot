@@ -1958,63 +1958,58 @@ impl Sidebar {
                                 used = used.saturating_add(text_w.min(UNREAD_COL_W));
                             }
                         }
-                        // Badge column — fixed BADGE_COL_W cells.
-                        // Render every (letter, count) from
-                        // runner_badges, each as its own colored
-                        // pill, separated by single row-styled
-                        // spaces. Right-aligned within the column so
-                        // status + time stay anchored. Drops badges
-                        // that overflow rather than truncating mid-
-                        // pill (a half-rendered ` C×` reads worse
-                        // than just leaving the second badge off).
+                        // Badge column — TWO FIXED SLOTS so the C / S
+                        // letters always land at the same x position
+                        // across rows: agent on the left, shell on
+                        // the right. Layout (BADGE_COL_W = 7):
+                        //
+                        //   [agent_slot 3] [sep 1] [shell_slot 3]
+                        //
+                        // Each slot is either ` X ` (3-cell colored
+                        // pill) or `   ` (3 blank spaces). Multi-
+                        // instance (` C×2 `) widens the agent slot
+                        // by 2 — falls back to its base 3 cells if
+                        // multi isn't running; we accept brief
+                        // visual jitter for that uncommon case
+                        // rather than reserving 5 cells permanently.
                         {
-                            // Build the labels first so we know the
-                            // total width before emitting spans.
-                            let labels: Vec<(char, String, usize)> = badges
+                            let agent_badge = badges
                                 .iter()
-                                .map(|(letter, n)| {
-                                    let s = if *n > 1 {
-                                        format!(" {letter}×{n} ")
-                                    } else {
-                                        format!(" {letter} ")
-                                    };
-                                    let w = visual_width(&s);
-                                    (*letter, s, w)
-                                })
-                                .collect();
-                            // Greedily fit from the right (so the
-                            // most recently-added badge gets dropped
-                            // first when crowded — usually the user
-                            // sees their primary agent + the new
-                            // shell with shell as the dropped one;
-                            // sort already puts shell last so the
-                            // important badge survives).
-                            let mut included: Vec<(char, String, usize)> = Vec::new();
-                            let mut total_w = 0usize;
-                            for (letter, s, w) in labels {
-                                let sep = if included.is_empty() { 0 } else { 1 };
-                                if total_w + sep + w > BADGE_COL_W {
-                                    break;
+                                .find(|(letter, _)| *letter != 'S')
+                                .copied();
+                            let shell_badge = badges
+                                .iter()
+                                .find(|(letter, _)| *letter == 'S')
+                                .copied();
+                            let push_slot = |spans: &mut Vec<Span>,
+                                             used: &mut usize,
+                                             badge: Option<(char, usize)>| {
+                                match badge {
+                                    Some((letter, n)) => {
+                                        let label = if n > 1 {
+                                            format!(" {letter}×{n} ")
+                                        } else {
+                                            format!(" {letter} ")
+                                        };
+                                        let w = visual_width(&label);
+                                        spans.push(Span::styled(
+                                            label,
+                                            badge_pill_style(theme, letter),
+                                        ));
+                                        *used = used.saturating_add(w);
+                                    }
+                                    None => {
+                                        spans.push(Span::styled("   ", row_style));
+                                        *used = used.saturating_add(3);
+                                    }
                                 }
-                                total_w += sep + w;
-                                included.push((letter, s, w));
-                            }
-                            let pad = BADGE_COL_W.saturating_sub(total_w);
-                            if pad > 0 {
-                                spans.push(Span::styled(" ".repeat(pad), row_style));
-                                used = used.saturating_add(pad);
-                            }
-                            for (idx, (letter, label, w)) in included.into_iter().enumerate() {
-                                if idx > 0 {
-                                    spans.push(Span::styled(" ", row_style));
-                                    used = used.saturating_add(1);
-                                }
-                                spans.push(Span::styled(
-                                    label,
-                                    badge_pill_style(theme, letter),
-                                ));
-                                used = used.saturating_add(w);
-                            }
+                            };
+                            push_slot(&mut spans, &mut used, agent_badge);
+                            // Single-cell separator between the two
+                            // slots so the pills don't touch.
+                            spans.push(Span::styled(" ", row_style));
+                            used = used.saturating_add(1);
+                            push_slot(&mut spans, &mut used, shell_badge);
                         }
                         if fixed_cols_len > 0 {
                             // Status column — single colored pill that
