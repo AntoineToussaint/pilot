@@ -183,6 +183,10 @@ pub struct Sidebar {
     /// The outer wrapper (`realm::components::sidebar`) drains this
     /// after each event delivery and routes to `platform::notify_user`.
     pending_notifications: Vec<PendingNotification>,
+    /// One short string per Active→Asking transition since the last
+    /// drain. Surfaces in pilot's footer alongside the OS notification
+    /// so users with notifications muted still see the prompt.
+    pending_asking_notices: Vec<String>,
     /// Workspace keys whose agent is currently in `AgentState::Asking`.
     /// Single source of truth for the `?` row pill, the `? N input`
     /// header counter, and `!` jump-to-asking. Source: `Event::AgentState`
@@ -231,6 +235,7 @@ impl Sidebar {
             default_agent: "claude".to_string(),
             show_inactive_in_inbox: false,
             pending_notifications: Vec::new(),
+            pending_asking_notices: Vec::new(),
             agents_asking: std::collections::HashSet::new(),
         }
     }
@@ -248,6 +253,12 @@ impl Sidebar {
     /// banner.
     pub fn drain_pending_notifications(&mut self) -> Vec<PendingNotification> {
         std::mem::take(&mut self.pending_notifications)
+    }
+
+    /// Drain the footer-notice queue. Each entry is a short message
+    /// ready to be set as a `NoticeSeverity::Hint`.
+    pub fn drain_pending_asking_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_asking_notices)
     }
 
     /// Toggle whether merged + closed PRs surface in the Inbox view.
@@ -1413,7 +1424,16 @@ impl Sidebar {
                             .primary_task()
                             .map(|t| t.title.clone())
                             .unwrap_or_else(|| workspace.name.clone());
-                        self.pending_notifications.push(PendingNotification { title, body });
+                        self.pending_notifications.push(PendingNotification {
+                            title: title.clone(),
+                            body,
+                        });
+                        // Inline footer notice in addition to the OS
+                        // popup — covers users with notifications muted
+                        // (which is most of them while focused). Hint
+                        // severity = 3s fade, dim color.
+                        self.pending_asking_notices
+                            .push(format!("{} needs input — press ! to jump", workspace.name));
                     }
                 }
                 if !matches!(

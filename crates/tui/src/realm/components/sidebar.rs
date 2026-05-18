@@ -79,6 +79,16 @@ impl Sidebar {
         }
     }
 
+    /// Drain footer-notice strings the inner sidebar queued in
+    /// response to AgentState transitions. Returns one short string
+    /// per Active→Asking edge, suitable for `Notice` rendering. The
+    /// OS notification path (above) fires in parallel; this one
+    /// surfaces the same signal inside pilot's footer for users who
+    /// have notifications muted.
+    pub fn drain_pending_asking_notices(&mut self) -> Vec<String> {
+        self.inner.drain_pending_asking_notices()
+    }
+
     /// Render directly into a rect — orchestrator-friendly entry
     /// point that bypasses tuirealm's mount/active dance for panes.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {

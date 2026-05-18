@@ -407,15 +407,34 @@ impl RightPane {
         {
             let target = *idx;
             self.comment_cursor = target;
-            // Click is the mouse equivalent of `v` — toggle the row's
-            // membership in the multi-select set so `w`/`f` know it's
-            // in the batch. Also flip expand so the user gets visual
-            // confirmation of the click (the body opens up).
+            // Single click on a card → move cursor + toggle the
+            // multi-select set. Expand/collapse is double-click
+            // (handled separately) so the user can pick rows without
+            // having to read every body. Matches the mailer pattern.
             if self.selected_activities.contains(&target) {
                 self.selected_activities.remove(&target);
             } else {
                 self.selected_activities.insert(target);
             }
+            self.rearm_mark_timer(true);
+            return true;
+        }
+        false
+    }
+
+    /// Double-click on an activity card → toggle its expanded state.
+    /// Returns `true` when the click landed on a card (caller redraws).
+    /// Header rows (description / activity) ignore double-click;
+    /// their single-click toggle already does what the user wants.
+    pub fn handle_mouse_double_click(&mut self, _col: u16, row: u16) -> bool {
+        if let Some((idx, _)) = self
+            .click_hits
+            .activity_cards
+            .iter()
+            .find(|(_, range)| range.contains(&row))
+        {
+            let target = *idx;
+            self.comment_cursor = target;
             if self.expanded_activities.contains(&target) {
                 self.expanded_activities.remove(&target);
             } else {
@@ -425,6 +444,43 @@ impl RightPane {
             return true;
         }
         false
+    }
+
+    /// Scroll the activity list by `delta` rows. Negative = scroll up
+    /// (older comments — these are the newer ones, since the feed is
+    /// newest-first); positive = scroll down. Used by the mouse-wheel
+    /// handler. Returns `true` when the scroll actually moved so the
+    /// caller can flag a redraw.
+    pub fn scroll_activity(&mut self, delta: isize) -> bool {
+        let total = self
+            .workspace
+            .as_ref()
+            .map(|w| w.activity.len())
+            .unwrap_or(0);
+        if total == 0 || self.activity_collapsed {
+            return false;
+        }
+        let visible = self.last_visible_cards.max(1);
+        let max_scroll = total.saturating_sub(visible);
+        let before = self.comment_scroll;
+        let new = if delta < 0 {
+            before.saturating_sub((-delta) as usize)
+        } else {
+            (before + delta as usize).min(max_scroll)
+        };
+        if new == before {
+            return false;
+        }
+        self.comment_scroll = new;
+        // Keep the cursor inside the visible window so j/k feel
+        // continuous from where the user just scrolled to.
+        if self.comment_cursor < self.comment_scroll {
+            self.comment_cursor = self.comment_scroll;
+        } else if self.comment_cursor >= self.comment_scroll + visible {
+            self.comment_cursor = self.comment_scroll + visible - 1;
+        }
+        self.rearm_mark_timer(true);
+        true
     }
 
     pub fn selected_workspace(&self) -> Option<&Workspace> {
@@ -591,6 +647,21 @@ impl RightPane {
                 format!("{total}"),
                 Style::default().fg(theme.text_dim),
             ));
+            // Position indicator — only when not everything fits
+            // on screen. Tells the user there's more to scroll into
+            // and where they currently are. `last_visible_cards`
+            // is set during the prior render; on first paint it
+            // defaults to 1 which produces a reasonable hint.
+            let visible = self.last_visible_cards.max(1);
+            if total > visible && !self.activity_collapsed {
+                let start = self.comment_scroll + 1;
+                let end = (self.comment_scroll + visible).min(total);
+                header_spans.push(Span::raw("  "));
+                header_spans.push(Span::styled(
+                    format!("[{start}–{end}]"),
+                    Style::default().fg(theme.text_dim),
+                ));
+            }
         }
         if unread > 0 {
             header_spans.push(Span::raw("  "));
@@ -1574,15 +1645,30 @@ mod click_dispatch_tests {
     }
 
     #[test]
-    fn card_click_moves_cursor_and_toggles_expand() {
+    fn card_click_moves_cursor_and_toggles_selection() {
         let mut pane = RightPane::new(PaneId::new(0));
         // Card index 3 occupies rows 12..=14.
         pane.click_hits.activity_cards.push((3, 12..=14));
         assert!(pane.handle_mouse_click(0, 13));
         assert_eq!(pane.comment_cursor, 3);
-        assert!(pane.expanded_activities.contains(&3));
-        // Second click on the same card collapses it.
+        // Single click toggles SELECTION (not expand — that's
+        // double-click).
+        assert!(pane.selected_activities.contains(&3));
+        assert!(!pane.expanded_activities.contains(&3));
+        // Second click toggles selection off.
         assert!(pane.handle_mouse_click(0, 13));
+        assert!(!pane.selected_activities.contains(&3));
+    }
+
+    #[test]
+    fn card_double_click_toggles_expand() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.click_hits.activity_cards.push((3, 12..=14));
+        assert!(pane.handle_mouse_double_click(0, 13));
+        assert_eq!(pane.comment_cursor, 3);
+        assert!(pane.expanded_activities.contains(&3));
+        // Double-click again collapses.
+        assert!(pane.handle_mouse_double_click(0, 13));
         assert!(!pane.expanded_activities.contains(&3));
     }
 }

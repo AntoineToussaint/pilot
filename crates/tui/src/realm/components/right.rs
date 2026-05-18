@@ -119,6 +119,20 @@ impl Right {
     pub fn handle_mouse_click(&mut self, col: u16, row: u16) -> bool {
         self.inner.handle_mouse_click(col, row)
     }
+
+    /// Forward a double-click — toggles expand/collapse on the card
+    /// under the cursor. Section-header double-clicks are no-ops;
+    /// single-click already toggles those.
+    pub fn handle_mouse_double_click(&mut self, col: u16, row: u16) -> bool {
+        self.inner.handle_mouse_double_click(col, row)
+    }
+
+    /// Wheel scroll routed to the activity feed. `delta` is in rows
+    /// (negative = up, positive = down). Returns `true` if the scroll
+    /// moved so the caller redraws.
+    pub fn scroll_activity(&mut self, delta: isize) -> bool {
+        self.inner.scroll_activity(delta)
+    }
 }
 
 impl Component for Right {

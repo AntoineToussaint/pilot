@@ -178,6 +178,12 @@ pub struct Model<T: TerminalAdapter> {
     /// second `q` within `ui_defaults.quit_double_tap_window` quits.
     /// Any other key disarms via `q_latch.disarm()`.
     q_latch: crate::confirm_latch::DoubleTapLatch,
+    /// Last left-click position + timestamp. A second left-click on
+    /// the same row within `DOUBLE_CLICK_WINDOW` is treated as a
+    /// double-click; the right pane's double-click handler then
+    /// toggles expand/collapse on the card. Crossterm doesn't
+    /// report double-clicks natively — we synthesize them here.
+    last_click: Option<(u16, u16, std::time::Instant)>,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window kicks focus back to
     /// the sidebar instead of forwarding to the PTY.
@@ -337,6 +343,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_event_tx,
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
+            last_click: None,
             preselect: None,
             layout: LayoutCtx::new(),
             pending_reply: None,
@@ -1833,14 +1840,41 @@ impl<T: TerminalAdapter> Model<T> {
                         self.sync_panes();
                         self.redraw = true;
                     }
-                    // Right (Activity) pane clicks: header rows toggle
-                    // their respective sections, card clicks move the
-                    // cursor + toggle expand on that card. Hit-test
-                    // data was populated during the last render.
-                    if focus == PaneFocus::Right
-                        && self.right.handle_mouse_click(m.column, m.row)
-                    {
-                        self.redraw = true;
+                    // Right (Activity) pane clicks. Single click =
+                    // toggle multi-select on the card / toggle section
+                    // header. Double click on a card = toggle
+                    // expand/collapse on it. Crossterm doesn't ship
+                    // double-click events so synthesize from timing:
+                    // a second left-click on the same cell within
+                    // 400ms = double.
+                    if focus == PaneFocus::Right {
+                        const DOUBLE_CLICK_WINDOW: std::time::Duration =
+                            std::time::Duration::from_millis(400);
+                        let is_double = matches!(
+                            button,
+                            crossterm::event::MouseButton::Left
+                        ) && self
+                            .last_click
+                            .map(|(c, r, t)| {
+                                c == m.column
+                                    && r == m.row
+                                    && t.elapsed() <= DOUBLE_CLICK_WINDOW
+                            })
+                            .unwrap_or(false);
+                        let handled = if is_double {
+                            self.last_click = None; // consume the pair
+                            self.right.handle_mouse_double_click(m.column, m.row)
+                        } else {
+                            self.last_click = Some((
+                                m.column,
+                                m.row,
+                                std::time::Instant::now(),
+                            ));
+                            self.right.handle_mouse_click(m.column, m.row)
+                        };
+                        if handled {
+                            self.redraw = true;
+                        }
                     }
                 }
             }
@@ -1892,9 +1926,22 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // Wheel inside the activity pane → scroll the
+                // activity list. Three rows per notch matches the
+                // sidebar-list scroll feel; the inner pane clamps
+                // to total length.
+                if rect_contains(right_top_rect, m.column, m.row) {
+                    const STEP: isize = 3;
+                    let delta =
+                        if matches!(m.kind, MouseEventKind::ScrollUp) { -STEP } else { STEP };
+                    if self.right.scroll_activity(delta) {
+                        self.redraw = true;
+                    }
+                    return;
+                }
                 // Bail silently when the cursor isn't over the
-                // terminal pane — sidebar / activity / footer all
-                // ignore scroll, no need to surface a notice.
+                // terminal pane — sidebar / footer ignore scroll,
+                // no need to surface a notice.
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
@@ -2325,6 +2372,17 @@ impl<T: TerminalAdapter> Model<T> {
             self.pr_details_fetched.remove(key);
         }
         self.sidebar.on_daemon_event(&event);
+        // Surface Active→Asking transitions in the footer with a
+        // brief Hint-severity notice. The sidebar already pushed an
+        // OS notification + flipped its `?` glyph; this is the
+        // in-pilot equivalent for users running with notifications
+        // muted. Last one wins if multiple workspaces transition
+        // in the same tick — they'll see them in sequence anyway as
+        // the 3s Hint fade clears each.
+        if let Some(msg) = self.sidebar.drain_pending_asking_notices().pop() {
+            use crate::realm::components::footer::{Notice, NoticeSeverity};
+            self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
+        }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
         if let Some(p) = self.status.polling.as_mut() {
