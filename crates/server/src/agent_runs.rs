@@ -323,7 +323,7 @@ async fn drive_claude_stream(
 async fn write_agent_input(
     stdin: &mut tokio::process::ChildStdin,
     input: AgentInputMessage,
-) -> anyhow::Result<()> {
+) -> Result<(), crate::ServerError> {
     let line = if let Some(json) = input.json {
         if json.ends_with('\n') {
             json

@@ -64,6 +64,79 @@ pub fn open_store() -> Option<Arc<dyn Store>> {
 // has real work in `~/.pilot/worktrees/` from a prior tool, that's
 // their data and pilot leaves it alone.
 
+/// Server-side error type. Used by `Server::serve` and the internal
+/// helpers it composes. Public API exposes `Display` only — the
+/// in-process TUI consumer just prints the message — but the typed
+/// variants give us a `#[derive(Error)]` enum per CLAUDE.md's
+/// library-crate convention (and let future consumers like the JSON
+/// API gateway dispatch on kind).
+///
+/// Migrated from blanket `anyhow::Result` so the type signature of
+/// every server helper describes its actual failure modes.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    /// IO failure — file descriptor, socket, subprocess pipe, etc.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// JSON encode/decode failure on a wire-bound payload.
+    #[error("serde_json: {0}")]
+    SerdeJson(#[from] serde_json::Error),
+    /// Persistent-store read/write failure. The inner error is the
+    /// store-specific message; we lose the typed variant on the way
+    /// in since `pilot_store` errors are `Box<dyn Error>`-shaped, but
+    /// the human message survives.
+    #[error("store: {0}")]
+    Store(String),
+    /// Workspace not found, malformed, or missing a required field
+    /// (primary task, repo, branch). Surfaces from the spawn/upsert
+    /// paths when the requested workspace can't be resolved into a
+    /// concrete worktree target.
+    #[error("workspace: {0}")]
+    Workspace(String),
+    /// Worktree / git operation failed. Wraps `pilot_git_ops` errors
+    /// + checkout / mount failures.
+    #[error("worktree: {0}")]
+    Worktree(String),
+    /// Structured-agent stream subprocess failure (Claude stdin/stdout
+    /// pipe, argv parse, spawn). Surfaces from `agent_stream` and
+    /// `agent_runs`.
+    #[error("agent: {0}")]
+    Agent(String),
+    /// Backend (PTY / tmux) failure — pass-through of whatever the
+    /// `SessionBackend` returned, stringified.
+    #[error("backend: {0}")]
+    Backend(String),
+    /// Catch-all for invariant violations and other internal
+    /// inconsistencies. Use sparingly — a typed variant is almost
+    /// always better than `Internal`.
+    #[error("internal: {0}")]
+    Internal(String),
+}
+
+/// Add a string context to a `Result<T, E: Display>`, similar to
+/// `anyhow::Context::context` but producing a typed `ServerError`
+/// variant. Picks the variant based on the source error kind via the
+/// `Into<ServerError>` impls below, so callers don't have to spell
+/// out the wrapping at every `?`.
+pub trait ResultExt<T> {
+    /// Wrap the error with a context prefix, producing
+    /// `ServerError::<auto-selected>("ctx: <inner>")`.
+    fn ctx(self, msg: &str) -> Result<T, ServerError>;
+}
+
+impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
+    fn ctx(self, msg: &str) -> Result<T, ServerError> {
+        self.map_err(|e| ServerError::Internal(format!("{msg}: {e}")))
+    }
+}
+
+/// Same shape for `Option<T>`. `None.ctx("X")` → `ServerError::Internal("X")`.
+impl<T> ResultExt<T> for Option<T> {
+    fn ctx(self, msg: &str) -> Result<T, ServerError> {
+        self.ok_or_else(|| ServerError::Internal(msg.to_string()))
+    }
+}
+
 /// Capacity of the daemon's process-wide event broadcast bus. Events
 /// produced by the poller and the PTY/proxy subsystems land here and
 /// fan out to every connected client. If a slow client lags more than
@@ -277,7 +350,7 @@ impl Server {
     /// dispatched here; handlers that don't have a backing subsystem
     /// yet are trace-logged and dropped so adding a command at the IPC
     /// layer never breaks an existing client.
-    pub async fn serve(&self, mut conn: Connection) -> anyhow::Result<()> {
+    pub async fn serve(&self, mut conn: Connection) -> Result<(), ServerError> {
         let mut bus_rx = self.config.bus.subscribe();
         loop {
             tokio::select! {

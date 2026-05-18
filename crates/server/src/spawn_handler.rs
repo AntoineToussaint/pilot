@@ -545,7 +545,7 @@ async fn resolve_or_create_session(
     session_key: &SessionKey,
     session_id: Option<SessionId>,
     kind: &TerminalKind,
-) -> anyhow::Result<(PathBuf, SessionId)> {
+) -> Result<(PathBuf, SessionId), crate::ServerError> {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
 
     // Spawn against a workspace that isn't (yet) persisted — common
@@ -567,7 +567,9 @@ async fn resolve_or_create_session(
     if let Some(id) = session_id {
         let session = workspace
             .find_session(id)
-            .ok_or_else(|| anyhow::anyhow!("session {id:?} not in workspace"))?;
+            .ok_or_else(|| {
+                crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
+            })?;
         ensure_worktree_present(config, &workspace, &session.worktree_path).await;
         return Ok((session.worktree_path.clone(), session.id));
     }
@@ -621,27 +623,28 @@ async fn resolve_or_create_session(
 async fn provision_worktree(
     workspace: &Workspace,
     target: &std::path::Path,
-) -> anyhow::Result<()> {
+) -> Result<(), crate::ServerError> {
+    use crate::ServerError;
     let task = workspace
         .primary_task()
-        .ok_or_else(|| anyhow::anyhow!("workspace has no primary task"))?;
+        .ok_or_else(|| ServerError::Workspace("workspace has no primary task".into()))?;
     let repo = task
         .repo
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("task has no repo"))?;
+        .ok_or_else(|| ServerError::Workspace("task has no repo".into()))?;
     let branch = task
         .branch
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("task has no branch"))?;
+        .ok_or_else(|| ServerError::Workspace("task has no branch".into()))?;
     let (owner, name) = repo
         .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("repo '{repo}' is not owner/name"))?;
+        .ok_or_else(|| ServerError::Workspace(format!("repo '{repo}' is not owner/name")))?;
 
     let mgr = pilot_git_ops::WorktreeManager::default_base();
     let worktree = mgr
         .checkout_at(target, owner, name, branch)
         .await
-        .map_err(|e| anyhow::anyhow!("checkout_at failed: {e}"))?;
+        .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?;
 
     // Apply mounts: global `worktree.mounts` + per-repo
     // `repos.<owner/name>.mounts` from YAML. Best-effort — a mount
@@ -673,6 +676,9 @@ async fn provision_worktree(
     {
         tracing::warn!("apply_mounts for {repo_key} failed: {e}");
     }
+    let _ = worktree; // silence dead-binding warning from the
+                     // signature change; the worktree value is what
+                     // apply_mounts mutated and we're done with it.
     Ok(())
 }
 
@@ -1023,19 +1029,24 @@ fn session_kind_from_terminal(kind: &TerminalKind) -> SessionKind {
     }
 }
 
-fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> anyhow::Result<Workspace> {
+fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Result<Workspace, crate::ServerError> {
+    use crate::ServerError;
     let record = config
         .store
         .get_workspace(key)
-        .map_err(|e| anyhow::anyhow!("store: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("unknown workspace {}", key.as_str()))?;
+        .map_err(|e| ServerError::Store(e.to_string()))?
+        .ok_or_else(|| ServerError::Workspace(format!("unknown workspace {}", key.as_str())))?;
     let json = record
         .workspace_json
-        .ok_or_else(|| anyhow::anyhow!("workspace {} has no json", key.as_str()))?;
+        .ok_or_else(|| ServerError::Workspace(format!("workspace {} has no json", key.as_str())))?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn persist_and_broadcast(config: &ServerConfig, workspace: &Workspace) -> anyhow::Result<()> {
+async fn persist_and_broadcast(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Result<(), crate::ServerError> {
+    use crate::ServerError;
     let json = serde_json::to_string(workspace)?;
     config
         .store
@@ -1044,7 +1055,7 @@ async fn persist_and_broadcast(config: &ServerConfig, workspace: &Workspace) -> 
             created_at: workspace.created_at,
             workspace_json: Some(json),
         })
-        .map_err(|e| anyhow::anyhow!("save: {e}"))?;
+        .map_err(|e| ServerError::Store(e.to_string()))?;
     let _ = config
         .bus
         .send(Event::WorkspaceUpserted(Box::new(workspace.clone())));

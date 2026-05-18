@@ -1,9 +1,12 @@
-#[allow(dead_code)]
-#[path = "../src/agent_stream.rs"]
-mod agent_stream;
-
-use agent_stream::{
-    ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, parse_jsonl_line, user_text_value,
+// Originally pulled the module in via `#[path]` to test it without
+// the rest of the server crate. After the anyhow → thiserror
+// migration the module references `crate::ServerError` /
+// `crate::ResultExt`, which only resolve when compiled as part of
+// pilot-server. Import via the public re-export instead;
+// `agent_stream` is already `pub mod` in lib.rs.
+use pilot_server::agent_stream::{
+    ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, parse_jsonl_line,
+    user_text_value,
 };
 use serde_json::json;
 use std::path::PathBuf;

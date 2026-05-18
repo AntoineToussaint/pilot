@@ -4,8 +4,16 @@
 //! types. Callers can map `ParsedAgentEvent` into whatever wire events
 //! exist at integration time while still preserving the original JSON.
 
-use anyhow::{Context, Result, bail};
+use crate::{ResultExt, ServerError};
 use serde::{Deserialize, Serialize};
+
+// Local shorthands so the migration touches each `?`/`Context` line
+// minimally. `Result<T>` keeps existing call shapes; `bail!` swaps to
+// a typed `ServerError::Agent` return.
+type Result<T> = std::result::Result<T, ServerError>;
+macro_rules! bail {
+    ($($t:tt)*) => { return Err(crate::ServerError::Agent(format!($($t)*))) };
+}
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -99,7 +107,7 @@ impl ClaudeUserTextMessage {
 
     /// Serialize as one JSONL record, including the trailing newline.
     pub fn to_jsonl(&self) -> Result<String> {
-        let mut line = serde_json::to_string(self).context("serialize Claude user message")?;
+        let mut line = serde_json::to_string(self).ctx("serialize Claude user message")?;
         line.push('\n');
         Ok(line)
     }
@@ -174,7 +182,7 @@ pub fn parse_jsonl_line(line: &str) -> Result<ParsedAgentEvent> {
     if trimmed.is_empty() {
         bail!("empty Claude stream line");
     }
-    let raw: Value = serde_json::from_str(trimmed).context("parse Claude stream JSONL line")?;
+    let raw: Value = serde_json::from_str(trimmed).ctx("parse Claude stream JSONL line")?;
     Ok(parse_value(raw))
 }
 
@@ -396,11 +404,11 @@ impl ClaudeStreamChild {
         self.stdin
             .write_all(line.as_bytes())
             .await
-            .context("write Claude stream input")?;
+            .ctx("write Claude stream input")?;
         self.stdin
             .flush()
             .await
-            .context("flush Claude stream input")?;
+            .ctx("flush Claude stream input")?;
         Ok(())
     }
 
@@ -409,7 +417,7 @@ impl ClaudeStreamChild {
             .stdout
             .next_line()
             .await
-            .context("read Claude stream output")?
+            .ctx("read Claude stream output")?
         {
             Some(line) => parse_jsonl_line(&line).map(Some),
             None => Ok(None),
@@ -417,7 +425,7 @@ impl ClaudeStreamChild {
     }
 
     pub async fn wait(mut self) -> Result<std::process::ExitStatus> {
-        self.child.wait().await.context("wait for Claude child")
+        self.child.wait().await.ctx("wait for Claude child")
     }
 
     pub(crate) fn split(self) -> (Child, ChildStdin, Lines<BufReader<ChildStdout>>) {
@@ -429,7 +437,7 @@ pub async fn spawn_claude_stream(config: ClaudeStreamConfig) -> Result<ClaudeStr
     let argv = config.argv();
     let (program, args) = argv
         .split_first()
-        .context("Claude argv must contain a program")?;
+        .ctx("Claude argv must contain a program")?;
 
     let mut command = Command::new(program);
     command.args(args);
@@ -441,15 +449,15 @@ pub async fn spawn_claude_stream(config: ClaudeStreamConfig) -> Result<ClaudeStr
     command.stderr(Stdio::inherit());
     command.kill_on_drop(true);
 
-    let mut child = command.spawn().context("spawn Claude stream child")?;
+    let mut child = command.spawn().ctx("spawn Claude stream child")?;
     let stdin = child
         .stdin
         .take()
-        .context("Claude child stdin unavailable")?;
+        .ctx("Claude child stdin unavailable")?;
     let stdout = child
         .stdout
         .take()
-        .context("Claude child stdout unavailable")?;
+        .ctx("Claude child stdout unavailable")?;
 
     Ok(ClaudeStreamChild {
         child,
