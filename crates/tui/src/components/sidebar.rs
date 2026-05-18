@@ -131,11 +131,12 @@ pub struct Sidebar {
     /// j/k handlers maintain that invariant.
     cursor: usize,
     mailbox: Mailbox,
-    /// Two-press confirm latch for `Shift-M` (merge). Generic
-    /// `ConfirmLatch<SessionKey>` replaces the three hand-rolled
-    /// `Option<SessionKey>` fields these used to be (kill / merge /
-    /// long-snooze) — same contract, one source of truth.
-    merge_latch: crate::confirm_latch::ConfirmLatch<SessionKey>,
+    /// Workspace keys queued for a Confirm-modal "Merge PR #N?"
+    /// prompt. Sidebar appends on `Shift-M`; orchestrator drains in
+    /// `dispatch_key` and mounts the modal. Replaces the previous
+    /// inline `[merge?]` latch — the modal is clearer and doesn't
+    /// leave the sidebar row in a half-armed state across redraws.
+    pending_merge_requests: Vec<pilot_core::WorkspaceKey>,
     /// Two-press confirm latch for `Shift-Z` (1-year snooze).
     long_snooze_latch: crate::confirm_latch::ConfirmLatch<SessionKey>,
     /// `z` snooze duration. Configurable via
@@ -224,7 +225,7 @@ impl Sidebar {
             cursor: 0,
             mailbox: Mailbox::Inbox,
             kill_latch: crate::confirm_latch::ConfirmLatch::new(),
-            merge_latch: crate::confirm_latch::ConfirmLatch::new(),
+            pending_merge_requests: Vec::new(),
             long_snooze_latch: crate::confirm_latch::ConfirmLatch::new(),
             short_snooze: pilot_config::UiDefaults::default().short_snooze,
             long_snooze: pilot_config::UiDefaults::default().long_snooze,
@@ -259,6 +260,29 @@ impl Sidebar {
     /// ready to be set as a `NoticeSeverity::Hint`.
     pub fn drain_pending_asking_notices(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_asking_notices)
+    }
+
+    /// Drain queued "Merge PR #N?" requests. The orchestrator
+    /// mounts one Confirm modal per entry (typically only one will
+    /// be queued before the next render).
+    pub fn drain_pending_merge_requests(&mut self) -> Vec<pilot_core::WorkspaceKey> {
+        std::mem::take(&mut self.pending_merge_requests)
+    }
+
+    /// Optimistic local update: flip a task to `Merged` so the
+    /// status pill changes immediately, before the next poll cycle
+    /// catches up with GitHub's response. Called when `Event::PrMerged`
+    /// arrives from the daemon — GitHub accepted the merge, so the
+    /// pill should reflect that NOW, not 30s from now when the next
+    /// poll rebroadcasts the workspace.
+    pub fn mark_workspace_merged(&mut self, key: &pilot_core::WorkspaceKey) {
+        let sk: SessionKey = key.into();
+        if let Some(workspace) = self.workspaces.get_mut(&sk) {
+            if let Some(pr) = workspace.pr.as_mut() {
+                pr.state = pilot_core::TaskState::Merged;
+            }
+            self.recompute_visible();
+        }
     }
 
     /// Toggle whether merged + closed PRs surface in the Inbox view.
@@ -1049,9 +1073,7 @@ impl Sidebar {
         }
         let is_shift_m =
             key.code == KeyCode::Char('M') && key.modifiers.contains(KeyModifiers::SHIFT);
-        if !is_shift_m {
-            self.merge_latch.disarm();
-        }
+        let _ = is_shift_m; // merge_latch retired; modal owns the confirm now.
         let is_shift_z =
             key.code == KeyCode::Char('Z') && key.modifiers.contains(KeyModifiers::SHIFT);
         if !is_shift_z {
@@ -1307,14 +1329,14 @@ impl Sidebar {
                     ) =>
             {
                 let intent = crate::intent::resolve_merge(self.selected_workspace());
-                let crate::intent::Intent::MergePr { workspace_key } = intent else {
-                    return PaneOutcome::Consumed;
-                };
-                let session_key: SessionKey = (&workspace_key).into();
-                if !self.merge_latch.arm_or_fire(session_key) {
-                    return PaneOutcome::Consumed;
+                if let crate::intent::Intent::MergePr { workspace_key } = intent {
+                    // Queue a Confirm-modal request; the orchestrator
+                    // drains this after dispatch_key and mounts the
+                    // dialog. On Yes the modal handler dispatches
+                    // `Command::MergePr`; No just dismisses. Replaces
+                    // the previous inline `[merge?]` latch.
+                    self.pending_merge_requests.push(workspace_key);
                 }
-                cmds.push(Command::MergePr { workspace_key });
                 PaneOutcome::Consumed
             }
 
@@ -1659,8 +1681,6 @@ impl Sidebar {
                     let prefix = if is_cursor { "  ▸ " } else { "    " };
                     let kill_mark = if self.kill_latch.armed() == Some(key) {
                         " [kill?]"
-                    } else if self.merge_latch.armed() == Some(key) {
-                        " [merge?]"
                     } else if self.long_snooze_latch.armed() == Some(key) {
                         " [snooze 1y?]"
                     } else {

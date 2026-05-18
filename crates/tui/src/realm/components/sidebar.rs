@@ -89,6 +89,19 @@ impl Sidebar {
         self.inner.drain_pending_asking_notices()
     }
 
+    /// Drain Shift-M "Merge PR #N?" requests. The orchestrator mounts
+    /// a Confirm modal per entry.
+    pub fn drain_pending_merge_requests(&mut self) -> Vec<pilot_core::WorkspaceKey> {
+        self.inner.drain_pending_merge_requests()
+    }
+
+    /// Optimistic local update: mark the workspace's PR as `Merged`
+    /// so the status pill flips immediately on `Event::PrMerged`,
+    /// without waiting for the next poll cycle.
+    pub fn mark_workspace_merged(&mut self, key: &pilot_core::WorkspaceKey) {
+        self.inner.mark_workspace_merged(key);
+    }
+
     /// Render directly into a rect — orchestrator-friendly entry
     /// point that bypasses tuirealm's mount/active dance for panes.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {

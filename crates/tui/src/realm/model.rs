@@ -73,6 +73,12 @@ pub enum Id {
     /// (issue, PR) keys live in `active_merge_prompt`; `Msg::Confirmed`
     /// dispatches `Command::ConfirmMerge` back to the daemon.
     MergeConfirm,
+    /// Confirm dialog for `Shift-M` on a READY PR — "Merge PR #N?".
+    /// Workspace key lives in `active_merge_pr_prompt`; `Msg::Confirmed`
+    /// dispatches `Command::MergePr`. Distinct from `MergeConfirm`
+    /// (which is the issue→PR collapse flow); both share the same
+    /// `Confirm` component but the post-confirmed action differs.
+    MergePrConfirm,
     /// Picker for the `Shift-A` ("adopt") flow — pick the target
     /// workspace the source's sessions should move into. Source is
     /// stashed in `pending_adopt_source`; `Msg::ChoicePicked` reads
@@ -227,6 +233,10 @@ pub struct Model<T: TerminalAdapter> {
     /// (issue, PR) pair currently being prompted about. Consumed by
     /// `Msg::Confirmed` when the top modal is `Id::MergeConfirm`.
     active_merge_prompt: Option<(pilot_core::WorkspaceKey, pilot_core::WorkspaceKey)>,
+    /// Workspace key whose PR is being confirmed for merge by the
+    /// `Shift-M` Confirm modal. Set when the modal mounts, taken on
+    /// `Msg::Confirmed` / `Msg::ModalDismissed`.
+    active_merge_pr_prompt: Option<pilot_core::WorkspaceKey>,
     /// Source workspace key the `Shift-A` adopt picker is gathering
     /// a target for. Set when the picker mounts; consumed when the
     /// user picks (or dismisses).
@@ -351,6 +361,7 @@ impl<T: TerminalAdapter> Model<T> {
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
             active_merge_prompt: None,
+            active_merge_pr_prompt: None,
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
             status: StatusCtx::new(),
@@ -1089,6 +1100,11 @@ impl<T: TerminalAdapter> Model<T> {
                                 });
                             }
                         }
+                        Some(Id::MergePrConfirm) => {
+                            // Esc = cancel; just discard the pending
+                            // target. No command goes to the daemon.
+                            self.active_merge_pr_prompt = None;
+                        }
                         _ => {}
                     }
                     // Always try to surface a queued prompt after a
@@ -1124,6 +1140,12 @@ impl<T: TerminalAdapter> Model<T> {
                                 pr_workspace_key: pr_key,
                                 accept: yes,
                             });
+                        }
+                    }
+                    Some(Id::MergePrConfirm) => {
+                        let target = self.active_merge_pr_prompt.take();
+                        if yes && let Some(workspace_key) = target {
+                            self.send_cmd(IpcCommand::MergePr { workspace_key });
                         }
                     }
                     _ => {}
@@ -1584,8 +1606,46 @@ impl<T: TerminalAdapter> Model<T> {
         for cmd in cmds {
             self.send_cmd(cmd);
         }
+        // Drain any Confirm-modal requests the sidebar queued during
+        // this dispatch (currently just Shift-M "Merge PR #N?").
+        // Mounts one modal per drained entry; in practice only one
+        // will be in the queue per keypress.
+        for workspace_key in self.sidebar.drain_pending_merge_requests() {
+            self.mount_merge_pr_confirm(workspace_key);
+        }
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
+        self.redraw = true;
+    }
+
+    /// Mount the `Shift-M` merge confirm dialog for a specific PR
+    /// workspace. Stashes the key in `active_merge_pr_prompt` so the
+    /// `Msg::Confirmed(true)` handler can dispatch `Command::MergePr`.
+    fn mount_merge_pr_confirm(&mut self, workspace_key: pilot_core::WorkspaceKey) {
+        use crate::realm::components::confirm::Confirm;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+        // Build a helpful question using the task title when known —
+        // "Merge PR #204?" reads better than "Merge github:owner/repo#204?".
+        let session_key: pilot_core::SessionKey = (&workspace_key).into();
+        let label = self
+            .sidebar
+            .workspace_by_key(&session_key)
+            .and_then(|w| w.primary_task())
+            .map(|t| {
+                let id = &t.id.key;
+                let title = t.title.as_str();
+                format!("Merge {id} \"{title}\"?")
+            })
+            .unwrap_or_else(|| format!("Merge {}?", session_key.as_str()));
+        let modal = Confirm::new(label).default_no();
+        self.active_merge_pr_prompt = Some(workspace_key);
+        let _ = self.app.mount(
+            Id::MergePrConfirm,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::MergePrConfirm);
+        let _ = self.app.active(&Id::MergePrConfirm);
         self.redraw = true;
     }
 
@@ -2352,11 +2412,15 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // Shift-M completed: GitHub accepted the merge. Local Task
-        // still reads `Open` until the next poll re-fetches, but the
-        // notice tells the user the click landed.
-        if let IpcEvent::PrMerged { pr_label, .. } = &event {
+        // Shift-M completed: GitHub accepted the merge. Optimistically
+        // flip the local task state to Merged so the badge pill
+        // changes IMMEDIATELY — without this the user has to wait up
+        // to the next poll cycle (~30s) for the visual to catch up,
+        // which felt broken. Refresh still goes out so the next
+        // poll backfills everything else.
+        if let IpcEvent::PrMerged { pr_label, workspace_key, .. } = &event {
             use crate::realm::components::footer::{Notice, NoticeSeverity};
+            self.sidebar.mark_workspace_merged(workspace_key);
             self.status.notice = Some(Notice::new(
                 format!("merged {pr_label}"),
                 NoticeSeverity::Info,

@@ -1213,7 +1213,13 @@ fn merge_target_is_hidden_when_ci_failing() {
 }
 
 #[test]
-fn shift_m_requires_two_presses_to_emit_merge_command() {
+fn shift_m_queues_merge_request_for_modal() {
+    // Updated contract: the inline two-press latch was retired in
+    // favor of a Confirm modal mounted by the orchestrator. The
+    // sidebar's job is now just to queue the workspace key; the
+    // orchestrator drains `pending_merge_requests` and pushes the
+    // modal. So Shift-M emits ZERO IpcCommands directly and one
+    // entry on the merge-request queue.
     use pilot_ipc::Command as IpcCommand;
     let mut s = Sidebar::new(PaneId::new(1));
     let mut pr = make_task("o/r", "o/r#1", Utc::now());
@@ -1228,15 +1234,11 @@ fn shift_m_requires_two_presses_to_emit_merge_command() {
     s.handle_key(shift_char('M'), &mut cmds);
     assert!(
         cmds.is_empty(),
-        "first Shift-M arms the latch; must NOT emit MergePr",
+        "Shift-M no longer emits MergePr directly; orchestrator owns the confirm",
     );
-
-    s.handle_key(shift_char('M'), &mut cmds);
-    assert_eq!(cmds.len(), 1);
-    assert!(
-        matches!(cmds[0], IpcCommand::MergePr { .. }),
-        "second Shift-M fires MergePr",
-    );
+    let queued = s.drain_pending_merge_requests();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].as_str(), "github-o-r-1");
 }
 
 #[test]
