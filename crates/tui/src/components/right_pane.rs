@@ -928,19 +928,30 @@ impl RightPane {
 /// ones that show up in PR descriptions enough to ruin teasers.
 fn strip_inline_markdown_noise(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
+    // Walk by char boundaries, NOT byte boundaries — slicing &s[i..]
+    // panics if `i` lands mid-UTF-8-sequence. Earlier this function
+    // bumped `i += 1` per loop and `&s[i..]` blew up on `✓ APPROVED`
+    // (✓ is 3 bytes; index 1 is inside it).
+    let mut chars = s.char_indices().peekable();
+    while let Some(&(byte_idx, ch)) = chars.peek() {
+        let rest = &s[byte_idx..];
         // `<sub>` / `</sub>` tags — common in PR descriptions for
         // smaller-text disclaimers. We don't render the size change
         // in plain text so the tags are noise.
-        let rest = &s[i..];
-        if let Some(stripped) = rest.strip_prefix("<sub>")
+        if let Some(stripped) = rest
+            .strip_prefix("<sub>")
             .or_else(|| rest.strip_prefix("</sub>"))
             .or_else(|| rest.strip_prefix("<sup>"))
             .or_else(|| rest.strip_prefix("</sup>"))
         {
-            i = s.len() - stripped.len();
+            // Advance the iterator past the consumed prefix length.
+            let target = s.len() - stripped.len();
+            while let Some(&(b, _)) = chars.peek() {
+                if b >= target {
+                    break;
+                }
+                chars.next();
+            }
             continue;
         }
         // `![alt](url)` image refs → keep just alt.
@@ -951,7 +962,13 @@ fn strip_inline_markdown_noise(s: &str) -> String {
                     out.push_str(&alt);
                     out.push(']');
                 }
-                i = s.len() - after.len();
+                let target = s.len() - after.len();
+                while let Some(&(b, _)) = chars.peek() {
+                    if b >= target {
+                        break;
+                    }
+                    chars.next();
+                }
                 continue;
             }
         }
@@ -959,14 +976,20 @@ fn strip_inline_markdown_noise(s: &str) -> String {
         if rest.starts_with('[') {
             if let Some((text, after)) = parse_alt_then_paren_url(&rest[1..]) {
                 out.push_str(&text);
-                i = s.len() - after.len();
+                let target = s.len() - after.len();
+                while let Some(&(b, _)) = chars.peek() {
+                    if b >= target {
+                        break;
+                    }
+                    chars.next();
+                }
                 continue;
             }
         }
-        // Default: passthrough one char.
-        let ch = bytes[i] as char;
+        // Default: passthrough one CHAR (not one byte — that was the
+        // panic source). Pushing the char re-encodes correctly.
         out.push(ch);
-        i += 1;
+        chars.next();
     }
     out
 }
@@ -1600,6 +1623,18 @@ mod teaser_noise_tests {
             strip_inline_markdown_noise("see [the docs](https://example.com)"),
             "see the docs"
         );
+    }
+
+    #[test]
+    fn handles_multibyte_chars_without_panicking() {
+        // Regression: pressing Down on a PR with `✓ APPROVED` in
+        // its activity crashed pilot with "byte index 1 is not a
+        // char boundary; it is inside '✓'". The old loop advanced
+        // by 1 byte at a time then `&s[i..]`-sliced, landing inside
+        // a multi-byte char.
+        let input = "✓ APPROVED · 🚀 ship it";
+        let out = strip_inline_markdown_noise(input);
+        assert_eq!(out, input, "no markdown noise → pass-through unchanged");
     }
 
     #[test]
