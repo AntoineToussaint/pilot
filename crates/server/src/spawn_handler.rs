@@ -207,6 +207,16 @@ pub async fn handle_spawn(
     // a bogus default session_key (inconsistent hit). The
     // `TerminalSpawned` broadcast below tells clients about the
     // newly-complete terminal once both inserts have landed.
+    // INTENTIONAL non-canonical order here: terminal_meta first,
+    // terminal_sessions next, terminals LAST. This is safe (no two
+    // locks co-held — each `.lock().await.insert(...)` releases at
+    // end-of-statement) and the order is deliberate for a *reader*
+    // race, not a writer-writer one: a snapshot that scans `terminals`
+    // is guaranteed to find a matching `terminal_meta` entry, because
+    // the meta lock is inserted into BEFORE the terminals lock. The
+    // canonical order in `crate::TERMINAL_MAP_LOCK_ORDER` applies to
+    // CO-HOLDING; sequential acquire-and-drop can use any order, and
+    // here the snapshot invariant pins this one.
     config
         .terminal_meta
         .lock()
@@ -418,6 +428,13 @@ pub async fn handle_spawn(
             terminal_id: id_for_pump,
             exit_code,
         });
+        // INTENTIONAL non-canonical sequence: terminals first (so
+        // `snapshot_terminals` stops seeing this id immediately) and
+        // terminal_meta LAST (so any snapshot that still saw it in
+        // terminals can resolve the meta lookup). Safe because no two
+        // locks are co-held — each `.lock().await.remove(...)` releases
+        // at end-of-statement. `crate::TERMINAL_MAP_LOCK_ORDER` applies
+        // to co-holding sites only.
         terminals_map.lock().await.remove(&id_for_pump);
         term_sessions_map.lock().await.remove(&id_for_pump);
         agent_states_map.lock().await.remove(&id_for_pump);
@@ -767,15 +784,20 @@ async fn freeze_runners_in_session(
     config: &crate::ServerConfig,
     session_id: pilot_core::SessionId,
 ) -> Vec<String> {
-    let owners = config.terminal_sessions.lock().await;
+    // Lock-order: `terminals` before `terminal_sessions` per
+    // `crate::TERMINAL_MAP_LOCK_ORDER`. This used to acquire them in
+    // the opposite order, which inverted against every other call
+    // site and created an AB/BA deadlock window if a pump-cleanup
+    // path interleaved between the two acquires.
     let term_map = config.terminals.lock().await;
+    let owners = config.terminal_sessions.lock().await;
     let keys: Vec<String> = owners
         .iter()
         .filter(|(_, sid)| **sid == session_id)
         .filter_map(|(tid, _)| term_map.get(tid).cloned())
         .collect();
-    drop(term_map);
     drop(owners);
+    drop(term_map);
     for k in &keys {
         let _ = config.backend.freeze(k).await;
     }

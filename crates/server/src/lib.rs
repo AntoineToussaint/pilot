@@ -71,6 +71,28 @@ pub fn open_store() -> Option<Arc<dyn Store>> {
 /// every other client on the slowest one.
 pub const BUS_CAPACITY: usize = 1024;
 
+/// Canonical lock-acquisition order for the per-terminal maps when
+/// **co-holding** two or more. AB/BA deadlock requires two paths to
+/// each hold one lock while waiting for the other; the order below
+/// rules that out by convention.
+///
+/// **Order:** `terminals → terminal_meta → terminal_sessions → agent_states`.
+///
+/// This is a convention, not a runtime check — Tokio mutexes don't
+/// enforce hierarchies. Sequential acquire-and-drop sites (each
+/// `.lock().await.method(...)` releases at end-of-statement) DO NOT
+/// have to follow this order: the per-statement guard never overlaps
+/// the next statement's, so AB/BA can't form. Those sites are free
+/// to use whatever order best suits their *reader*-consistency needs
+/// (e.g. `handle_spawn` inserts meta before terminals so a snapshot
+/// reader never sees a terminals entry without a matching meta).
+///
+/// The only co-holding site today is
+/// [`spawn_handler::freeze_runners_in_session`]; that's why this
+/// constant exists, as a discoverable name future callers can grep.
+pub const TERMINAL_MAP_LOCK_ORDER: &str =
+    "terminals → terminal_meta → terminal_sessions → agent_states";
+
 /// `ServerConfig` is the per-process state shared across all client
 /// connections — the persistent store, the broadcast bus the poller
 /// pushes events into, and the agent registry the spawn handler reads.
