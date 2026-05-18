@@ -102,6 +102,17 @@ impl Sidebar {
         self.inner.mark_workspace_merged(key);
     }
 
+    /// Forward `find_agent_terminal` — first running agent terminal
+    /// for `(workspace_key, agent_id)` if any. The `w` flow uses
+    /// this to decide between InjectPrompt (existing) and Spawn (new).
+    pub fn find_agent_terminal(
+        &self,
+        workspace_key: &pilot_core::SessionKey,
+        agent_id: &str,
+    ) -> Option<pilot_ipc::TerminalId> {
+        self.inner.find_agent_terminal(workspace_key, agent_id)
+    }
+
     /// Render directly into a rect — orchestrator-friendly entry
     /// point that bypasses tuirealm's mount/active dance for panes.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {

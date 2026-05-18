@@ -269,6 +269,28 @@ impl Sidebar {
         std::mem::take(&mut self.pending_merge_requests)
     }
 
+    /// Find the FIRST running agent terminal for `workspace_key`
+    /// whose agent id matches `agent_id`. Returns `None` when no
+    /// matching terminal is running. Used by the `w` flow to reuse
+    /// an existing claude tab instead of spawning a second one.
+    pub fn find_agent_terminal(
+        &self,
+        workspace_key: &SessionKey,
+        agent_id: &str,
+    ) -> Option<TerminalId> {
+        for (tid, (sk, kind)) in &self.running_terminals {
+            if sk != workspace_key {
+                continue;
+            }
+            if let TerminalKind::Agent(id) = kind
+                && id == agent_id
+            {
+                return Some(*tid);
+            }
+        }
+        None
+    }
+
     /// Optimistic local update: flip a task to `Merged` so the
     /// status pill changes immediately, before the next poll cycle
     /// catches up with GitHub's response. Called when `Event::PrMerged`
@@ -997,7 +1019,11 @@ impl Sidebar {
         // always relevant regardless of whether a session is already
         // running (the user might want a second shell, an editor on
         // the same worktree, etc.). `Shift-X` kill only makes sense
-        // when there's something to kill.
+        // when there's something to kill. `n new workspace` is
+        // always available — creating a fresh pre-PR workspace is
+        // independent of whichever row is selected, and hiding the
+        // shortcut on populated rows made it impossible to discover
+        // unless the inbox happened to be empty.
         if workspace.is_some() {
             out.push(Binding { keys: "c", label: "claude" });
             out.push(Binding { keys: "s", label: "shell" });
@@ -1005,9 +1031,8 @@ impl Sidebar {
             if has_sessions {
                 out.push(Binding { keys: "Shift-X", label: "kill" });
             }
-        } else {
-            out.push(Binding { keys: "n", label: "new workspace" });
         }
+        out.push(Binding { keys: "n", label: "new workspace" });
 
         out
     }

@@ -267,6 +267,18 @@ pub enum Command {
         terminal_id: TerminalId,
         bytes: Vec<u8>,
     },
+    /// Inject a prompt into an EXISTING agent terminal — same flow
+    /// the daemon uses for Spawn's `initial_prompt`, but targeting
+    /// a live terminal so `w fix CI` / `w address comments` reuses
+    /// the user's running claude tab instead of spawning a second
+    /// one. The daemon looks up the agent for `terminal_id` and
+    /// runs `agent.inject_prompt(prompt)` + `agent.inject_submit()`,
+    /// the same paste/submit split used at spawn time. Quietly
+    /// no-ops if the terminal is not an agent or doesn't exist.
+    InjectPrompt {
+        terminal_id: TerminalId,
+        prompt: String,
+    },
     Resize {
         terminal_id: TerminalId,
         cols: u16,

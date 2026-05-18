@@ -1087,6 +1087,66 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     }
 }
 
+/// Inject a prompt into an existing agent terminal. Same paste +
+/// submit split as the spawn-time initial_prompt path, just
+/// targeted at a live terminal instead of a fresh one. Quietly
+/// no-ops if the terminal isn't an agent (shell terminals don't
+/// have `inject_prompt`) or doesn't exist.
+pub async fn handle_inject_prompt(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    prompt: &str,
+) {
+    let backend_key = match config.terminals.lock().await.get(&terminal_id).cloned() {
+        Some(k) => k,
+        None => {
+            tracing::debug!("inject_prompt to unknown terminal {terminal_id:?}");
+            return;
+        }
+    };
+    let kind = match config.terminal_meta.lock().await.get(&terminal_id).cloned() {
+        Some((_session_key, kind)) => kind,
+        None => {
+            tracing::debug!(
+                "inject_prompt: no terminal_meta for {terminal_id:?} — skipping"
+            );
+            return;
+        }
+    };
+    let agent = match &kind {
+        TerminalKind::Agent(id) => match config.agents.get(id) {
+            Some(a) => a,
+            None => {
+                tracing::warn!(
+                    "inject_prompt: unknown agent id `{id}` for terminal {terminal_id:?}"
+                );
+                return;
+            }
+        },
+        _ => {
+            tracing::debug!(
+                "inject_prompt: terminal {terminal_id:?} is not an agent — skipping"
+            );
+            return;
+        }
+    };
+    let paste = agent.inject_prompt(prompt);
+    let submit = agent.inject_submit();
+    if let Err(e) = config.backend.write(&backend_key, &paste).await {
+        tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
+        return;
+    }
+    // Same 200ms gap the spawn-time injector uses so the paste batch
+    // settles before Enter fires (Claude treats rapid bytes as a
+    // paste — Enter inside the paste is a soft line break).
+    if let Some(submit_bytes) = submit {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let Err(e) = config.backend.write(&backend_key, &submit_bytes).await {
+            tracing::warn!("inject_prompt: backend.write(submit) failed: {e}");
+        }
+    }
+}
+
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
     let key = match config.terminals.lock().await.get(&terminal_id).cloned() {
         Some(k) => k,

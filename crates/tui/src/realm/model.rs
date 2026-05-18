@@ -1623,8 +1623,46 @@ impl<T: TerminalAdapter> Model<T> {
                 ));
             }
         }
+        // Rewrite Spawn-with-initial_prompt → InjectPrompt when an
+        // agent terminal already exists for the workspace. The user
+        // pressing `w` on a PR that already has a running claude tab
+        // expects the new prompt to land in that claude (continue the
+        // conversation), not a second claude tab. Same shape works
+        // for codex / cursor / generic agents.
         for cmd in cmds {
-            self.send_cmd(cmd);
+            let rewritten = match cmd {
+                IpcCommand::Spawn {
+                    session_key,
+                    session_id,
+                    kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                    cwd,
+                    initial_prompt: Some(prompt),
+                } => {
+                    if let Some(terminal_id) =
+                        self.sidebar.find_agent_terminal(&session_key, &agent_id)
+                    {
+                        use crate::realm::components::footer::{Notice, NoticeSeverity};
+                        self.status.notice = Some(Notice::new(
+                            format!("→ injecting into existing {agent_id}"),
+                            NoticeSeverity::Hint,
+                        ));
+                        IpcCommand::InjectPrompt {
+                            terminal_id,
+                            prompt,
+                        }
+                    } else {
+                        IpcCommand::Spawn {
+                            session_key,
+                            session_id,
+                            kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                            cwd,
+                            initial_prompt: Some(prompt),
+                        }
+                    }
+                }
+                other => other,
+            };
+            self.send_cmd(rewritten);
         }
         // Drain any Confirm-modal requests the sidebar queued during
         // this dispatch (currently just Shift-M "Merge PR #N?").
@@ -2451,6 +2489,29 @@ impl<T: TerminalAdapter> Model<T> {
                 format!("merged {pr_label}"),
                 NoticeSeverity::Info,
             ));
+            // Queue a "remove merged workspace?" prompt. Reuses the
+            // existing RemoveOutOfScope confirm flow (Kill on Yes,
+            // keep on No) — same UX, just triggered after a merge
+            // instead of an out-of-scope detection. Active-terminal
+            // count from sidebar lookup so the message reads truthfully.
+            let already_active = self
+                .active_removal_prompt
+                .as_ref()
+                .map(|k| k == workspace_key)
+                .unwrap_or(false);
+            let already_queued = self
+                .pending_removal_prompts
+                .iter()
+                .any(|(k, _, _, _)| k == workspace_key);
+            if !already_active && !already_queued {
+                self.pending_removal_prompts.push_back((
+                    workspace_key.clone(),
+                    pr_label.clone(),
+                    Some(format!("PR {pr_label} merged — remove workspace?")),
+                    0,
+                ));
+                self.maybe_mount_next_removal_prompt();
+            }
             self.send_cmd(IpcCommand::Refresh);
             self.redraw = true;
             return;

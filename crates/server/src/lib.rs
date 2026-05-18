@@ -407,6 +407,14 @@ impl Server {
                         pilot_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
                         }
+                        pilot_ipc::Command::InjectPrompt { terminal_id, prompt } => {
+                            spawn_handler::handle_inject_prompt(
+                                &self.config,
+                                terminal_id,
+                                &prompt,
+                            )
+                            .await;
+                        }
                         pilot_ipc::Command::Resize { terminal_id, cols, rows } => {
                             spawn_handler::handle_resize(&self.config, terminal_id, cols, rows).await;
                         }
