@@ -2556,7 +2556,7 @@ fn pill_for_tag(tag: pilot_core::StatusTag) -> Option<StatusPill> {
 /// Compact relative time for the right-side trailer. `now` < 1m → "now",
 /// < 1h → `Xm`, < 24h → `Xh`, < 30d → `Xd`, else `Xmo`. Always 2-3
 /// cells so the column lines up.
-fn relative_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+pub(crate) fn relative_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
     let delta = now.signed_duration_since(then);
     let secs = delta.num_seconds().max(0);
     if secs < 60 {

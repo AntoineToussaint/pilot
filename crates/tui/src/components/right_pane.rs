@@ -848,6 +848,21 @@ impl RightPane {
                 kind_style,
             ));
             header_spans.push(Span::styled(activity.author.clone(), header_style));
+            // Relative timestamp ("5m", "2h", "3d") in dim so the
+            // eye treats it as metadata, not content. Sits right
+            // after the author so it's part of the byline, not
+            // floating at the row's edge where the cursor caret
+            // would compete. Reuses the same `relative_time`
+            // formatter the sidebar uses for the row's right-edge
+            // timestamp — single source of truth.
+            let ts = crate::components::sidebar::relative_time(
+                activity.created_at,
+                chrono::Utc::now(),
+            );
+            header_spans.push(Span::styled(
+                format!("  {ts}"),
+                Style::default().fg(theme.text_dim),
+            ));
             if !is_expanded {
                 let teaser = teaser_text(&activity.body, TEASER_CELLS);
                 if !teaser.is_empty() {
