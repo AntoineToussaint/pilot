@@ -1460,14 +1460,35 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
-            // Ctrl-Shift-S: toggle pilot's mouse capture. When OFF
-            // the host terminal regains native text selection so the
-            // user can trackpad-select inside claude / shell
-            // scrollback and Cmd-C the result. Available from any
-            // pane (including Terminals) so users in claude can
-            // escape to a copy gesture without breaking flow.
-            Key::Char('S')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            // Toggle pilot's mouse capture so the host terminal
+            // (Ghostty / iTerm2) regains native text selection. When
+            // OFF the user can trackpad-select inside claude / shell
+            // scrollback and Cmd-C normally; toggle back on for
+            // splitter drag etc. Bound to multiple chords because
+            // terminals report Ctrl-Shift-S inconsistently and
+            // Ctrl-S itself is XOFF flow control:
+            //   - F8         — function key, never conflicts with TTY
+            //   - Alt-s      — Option-s on Mac (Alt-s elsewhere)
+            //   - Ctrl-Alt-s — extra fallback for non-mac users
+            // Available from any pane (including Terminals) so users
+            // in claude can escape to a copy gesture without breaking
+            // flow.
+            Key::Function(8) => {
+                self.q_latch.disarm();
+                self.toggle_mouse_capture();
+                return;
+            }
+            Key::Char('s')
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.q_latch.disarm();
+                self.toggle_mouse_capture();
+                return;
+            }
+            Key::Char('s' | 'S')
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.q_latch.disarm();
                 self.toggle_mouse_capture();

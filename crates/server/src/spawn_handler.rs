@@ -344,7 +344,20 @@ pub async fn handle_spawn(
                 let drop = buf.len() - STATE_BUF_CAP;
                 buf.drain(..drop);
             }
-            let Some(new_state) = agent.detect_state(buf) else {
+            // Search only the recent tail. The 32 KiB outer buffer
+            // exists so spread-out tickers + small chunks accumulate
+            // enough context, but once a prompt scrolls past this
+            // tail it should STOP matching — otherwise the user's
+            // "I answered the prompt and moved on" never reflects:
+            // the old `❯ 1.` text stays in `buf`, every chunk
+            // re-detects Asking, hysteresis refreshes forever, and
+            // the "needs input" label sticks. 4 KiB is enough to
+            // capture a single prompt's render + a screen of context,
+            // small enough that next-screen content evicts the old.
+            const DETECT_WINDOW: usize = 4 * 1024;
+            let tail_start = buf.len().saturating_sub(DETECT_WINDOW);
+            let detect_window = &buf[tail_start..];
+            let Some(new_state) = agent.detect_state(detect_window) else {
                 return;
             };
             // Trace-level so it doesn't drown the log under normal
