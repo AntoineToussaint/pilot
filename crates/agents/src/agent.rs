@@ -197,20 +197,33 @@ pub mod builtins {
         /// cached state would stay Asking forever.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = strip_ansi_lossy(recent_output);
-            // Choice arrow + numbered option — Claude's permission /
-            // tool-approval / multi-choice UI always renders the
-            // selected row as `❯ 1.` (or `❯ 1)`). That exact
-            // glyph+digit+punct sequence doesn't appear in chat
-            // output, so no pairing required. Single highest-
-            // confidence signal for "claude is waiting for a choice."
-            if super::detect::contains_any(
-                &s,
-                &["❯ 1.", "❯ 1)", "> 1.", "> 1)"],
-            ) {
+
+            // Pilot wraps every agent in tmux. The tmux client paints
+            // the screen by absolute cursor position, so the bytes
+            // pilot sees arrive in TEMPORAL order: a single visual
+            // line `❯ 1. Yes` can land in the buffer as
+            // `<cursor-move>❯<cursor-move> <cursor-move>1.<…>Yes` and
+            // strip_ansi removes the CSI runs but NOT the absolute
+            // positioning gap that may be filled with other content.
+            // So strict substring matching for `❯ 1.` fails even when
+            // the prompt is visually on screen.
+            //
+            // Fix: pair on tolerant signals. The arrow `❯` AND the
+            // numbered-yes shape (`1. Yes` or `1) Yes`) together is
+            // strong evidence of a chooser, regardless of whether
+            // they're adjacent. Same for the textarea footer.
+            let has_arrow = s.contains('❯') || s.contains("> 1.") || s.contains("> 1)");
+            let has_numbered_yes = s.contains("1. Yes")
+                || s.contains("1) Yes")
+                || s.contains("1.Yes")
+                || s.contains("1)Yes");
+            if has_arrow && has_numbered_yes {
                 return Some(AgentState::Asking);
             }
-            // Footer marker — Claude renders this while editing a
-            // prompt in the textarea.
+
+            // Footer marker — Claude renders the textarea hint while
+            // editing a prompt. Paired so a chat message that quotes
+            // "Esc to cancel" doesn't false-trigger.
             if super::detect::contains_paired(
                 &s,
                 &["Esc to cancel"],
@@ -218,14 +231,17 @@ pub mod builtins {
             ) {
                 return Some(AgentState::Asking);
             }
-            // Paired fallback for older / non-arrow prompt shapes
-            // and for `(y/n)` bare prompts that happen to land here.
+
+            // Paired fallback for bare yes/no prompts (no arrow UI) +
+            // older prompt shapes. Question phrases ANY-ed with choice
+            // markers — both must be present in the buffer.
             if super::detect::contains_paired(
                 &s,
-                &["1. Yes", "(y/n)", "[y/n]"],
+                &["1. Yes", "1) Yes", "(y/n)", "[y/n]"],
                 &[
                     "Do you want",
                     "Allow Claude",
+                    "Allow Bash",
                     "Approve",
                     "Continue?",
                     "Proceed?",

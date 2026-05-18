@@ -347,6 +347,18 @@ pub async fn handle_spawn(
             let Some(new_state) = agent.detect_state(buf) else {
                 return;
             };
+            // Trace-level so it doesn't drown the log under normal
+            // load (claude emits 100+ chunks/sec during streaming).
+            // Activate with `RUST_LOG=pilot_server=trace` when the
+            // user reports "the pill never showed" so we can confirm
+            // whether detect_state ever saw Asking on this terminal
+            // at all vs. saw it but downstream lost the event.
+            tracing::trace!(
+                terminal_id = ?id,
+                buf_len = buf.len(),
+                detected = ?new_state,
+                "detect_state ran",
+            );
             if new_state == pilot_ipc::AgentState::Asking {
                 *last_asking_at = Some(std::time::Instant::now());
             }

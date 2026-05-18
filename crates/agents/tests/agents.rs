@@ -153,6 +153,27 @@ fn claude_detects_choice_arrow() {
 }
 
 #[test]
+fn claude_detects_choice_arrow_with_tmux_repaint_fragmentation() {
+    // Regression: tmux paints the screen by absolute cursor position
+    // so `❯ 1. Yes` arrives in the buffer with arbitrary content
+    // between the arrow and the numbered option. The old `❯ 1.`
+    // literal-substring matcher missed this; the new paired matcher
+    // (arrow + 1.Yes anywhere in buffer) catches it.
+    let agent = Claude;
+    // Simulate a real tmux-fragmented buffer: arrow appears, then a
+    // status-bar ticker chunk, then the numbered options.
+    let buf = "❯ \n\
+               Tokens: 1.2k  elapsed: 4s\n\
+               1. Yes\n\
+               2. No\n";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::Asking),
+        "arrow + 1. Yes anywhere in buffer must fire Asking, even when not adjacent",
+    );
+}
+
+#[test]
 fn claude_detects_choice_arrow_ascii_fallback() {
     // Some terminals / tmux configs render the arrow as `> ` when
     // the UTF-8 glyph isn't available. Cover both shapes.
