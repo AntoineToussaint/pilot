@@ -79,10 +79,19 @@ pub struct LinearClient {
 
 impl LinearClient {
     /// Build a client from the `LINEAR_API_KEY` env var. Fails if the
-    /// env var isn't set.
+    /// env var isn't set. Kept for back-compat; new call sites should
+    /// prefer `from_credential` so future providers (Keychain, Vault,
+    /// OAuth refresh) transparently apply.
     pub fn from_env() -> Result<Self, LinearError> {
         let key = std::env::var("LINEAR_API_KEY").map_err(|_| LinearError::MissingKey)?;
         Ok(Self::with_key(key))
+    }
+
+    /// Build a client from a resolved `pilot_auth::Credential`. Matches
+    /// the gh-provider shape so server-side polling can drive both
+    /// providers through the same credential chain.
+    pub fn from_credential(cred: pilot_auth::Credential) -> Self {
+        Self::with_key(cred.into_token())
     }
 
     /// Build a client with an explicit API key.
