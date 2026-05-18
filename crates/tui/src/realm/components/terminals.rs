@@ -132,6 +132,18 @@ impl Terminals {
         self.inner.scroll_active(delta)
     }
 
+    /// Forward `extract_text` — read the focused terminal's grid
+    /// between two absolute frame-space coordinates and return the
+    /// plain text. Used by the mouse-up selection-copy path.
+    pub fn extract_text(
+        &mut self,
+        rect: tuirealm::ratatui::layout::Rect,
+        start: (u16, u16),
+        end: (u16, u16),
+    ) -> String {
+        self.inner.extract_text(rect, start, end)
+    }
+
     /// Human-readable scrollbar diagnostic for the focused
     /// terminal. Used by the orchestrator's scroll-event handler
     /// to surface viewport state in the footer.

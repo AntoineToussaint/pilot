@@ -630,6 +630,92 @@ impl TerminalStack {
     /// caller can surface a clear notice — pilot's scroll bug
     /// turned out to be "total == len, no scrollback to scroll
     /// into" silently looking identical to "delta is broken."
+    /// Read the text content of the focused terminal's grid between
+    /// two cell coordinates expressed in absolute viewport (frame)
+    /// space. `rect` is the terminal pane's rect — used to translate
+    /// the absolute `(col, row)` pair into cell offsets within the
+    /// grid. Returns plain text joined with newlines between rows.
+    /// Empty when nothing's focused or the range is degenerate.
+    ///
+    /// MVP: row-major rectangular selection. A "true" selection
+    /// would follow text flow (line-wrap awareness) but rectangular
+    /// matches what most terminals do under Option-drag and is
+    /// enough to copy a paragraph of claude output.
+    pub fn extract_text(
+        &mut self,
+        rect: tuirealm::ratatui::layout::Rect,
+        start: (u16, u16),
+        end: (u16, u16),
+    ) -> String {
+        let Some(id) = self.focused_terminal_id() else {
+            return String::new();
+        };
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return String::new();
+        };
+        // Normalize: drag can start lower-right and end upper-left.
+        let (sx, ex) = if start.0 <= end.0 {
+            (start.0, end.0)
+        } else {
+            (end.0, start.0)
+        };
+        let (sy, ey) = if start.1 <= end.1 {
+            (start.1, end.1)
+        } else {
+            (end.1, start.1)
+        };
+        // Translate to grid-cell coords (zero-based inside `rect`).
+        let col_start = sx.saturating_sub(rect.x);
+        let col_end = ex.saturating_sub(rect.x);
+        let row_start = sy.saturating_sub(rect.y);
+        let row_end = ey.saturating_sub(rect.y);
+        let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
+            return String::new();
+        };
+        let Ok(mut row_iter) = slot.vt.row_iter.update(&snapshot) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        let mut y: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if y > row_end {
+                break;
+            }
+            if y >= row_start {
+                let mut line = String::new();
+                if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
+                    let mut x: u16 = 0;
+                    while let Some(cell) = cell_iter.next() {
+                        if x > col_end {
+                            break;
+                        }
+                        if x >= col_start {
+                            let graphemes = cell.graphemes().unwrap_or_default();
+                            if graphemes.is_empty() {
+                                line.push(' ');
+                            } else {
+                                for g in graphemes {
+                                    line.push(g);
+                                }
+                            }
+                        }
+                        x += 1;
+                    }
+                }
+                // Trim trailing spaces so the copy doesn't include
+                // the row's blank tail — terminals fill rows with
+                // spaces but the user expects "just the text."
+                let line = line.trim_end().to_string();
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&line);
+            }
+            y += 1;
+        }
+        out
+    }
+
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
         if delta == 0 {
             return ScrollOutcome::NoTerminal;

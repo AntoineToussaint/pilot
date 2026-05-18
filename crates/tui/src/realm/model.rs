@@ -2020,12 +2020,22 @@ impl<T: TerminalAdapter> Model<T> {
                     // double-click events so synthesize from timing:
                     // a second left-click on the same cell within
                     // 400ms = double.
-                    // Selection start placeholder — pilot-side text
-                    // selection lives behind F8 / Alt-s for now
-                    // (toggle host-native mode). Proper pane-scoped
-                    // selection is a follow-up that needs libghostty
-                    // grid extraction + base64.
-                    let _ = button;
+                    // Pilot-side selection start: a left-click that
+                    // landed in the terminal pane AND the inner
+                    // program isn't tracking mouse → record start
+                    // cell for the drag-to-select copy gesture.
+                    // Selection state lives on the orchestrator; the
+                    // Up handler extracts text + OSC 52s to the
+                    // host clipboard.
+                    if focus == PaneFocus::Terminals
+                        && matches!(button, crossterm::event::MouseButton::Left)
+                        && !self.terminals.focused_terminal_tracks_mouse()
+                    {
+                        self.terminal_selection =
+                            Some(((m.column, m.row), (m.column, m.row)));
+                    } else {
+                        let _ = button;
+                    }
                     if focus == PaneFocus::Right {
                         const DOUBLE_CLICK_WINDOW: std::time::Duration =
                             std::time::Duration::from_millis(400);
@@ -2080,14 +2090,36 @@ impl<T: TerminalAdapter> Model<T> {
                     // the write until release.
                     self.layout.persist();
                 }
-                // Pilot-side selection is in progress — for now we
-                // just clear the pending state on release. Text
-                // extraction + OSC 52 land in a follow-up since
-                // hooking libghostty's grid + base64 is its own
-                // diff. Until then, F8 toggles to host-native
-                // selection (which spans pilot's UI but copies
-                // correctly).
-                self.terminal_selection = None;
+                // Pilot-side selection release: extract text from
+                // libghostty's grid between start and end cells,
+                // OSC 52 it to the host clipboard. The footer
+                // confirms how many lines made it across.
+                if let Some((start, end)) = self.terminal_selection.take() {
+                    // Single-click-with-no-drag is a normal click;
+                    // skip the copy gesture for it.
+                    let was_drag = start != end;
+                    if was_drag {
+                        let text = self.terminals.extract_text(
+                            right_bottom_rect,
+                            start,
+                            end,
+                        );
+                        if !text.trim().is_empty() {
+                            emit_clipboard_copy(&text);
+                            use crate::realm::components::footer::{Notice, NoticeSeverity};
+                            let lines = text.lines().count();
+                            self.status.notice = Some(Notice::new(
+                                format!(
+                                    "copied {} line{} to clipboard",
+                                    lines,
+                                    if lines == 1 { "" } else { "s" }
+                                ),
+                                NoticeSeverity::Hint,
+                            ));
+                        }
+                    }
+                    self.redraw = true;
+                }
                 if !was_drag
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
@@ -3104,4 +3136,66 @@ fn crossterm_to_realm(key: crossterm::event::KeyEvent) -> RealmKey {
         mods |= KeyModifiers::ALT;
     }
     RealmKey::new(code, mods)
+}
+
+/// Write OSC 52 clipboard-set to the host terminal's stdout. The host
+/// (Ghostty / iTerm2 / Kitty / WezTerm) lands the text on the system
+/// clipboard. Format: `ESC ] 52 ; c ; <base64> ESC \`. Wraps the
+/// pilot-side "copy from terminal selection" gesture — without OSC 52
+/// the extracted text would just live in memory.
+fn emit_clipboard_copy(text: &str) {
+    let encoded = base64_encode(text.as_bytes());
+    let sequence = format!("\x1b]52;c;{encoded}\x1b\\");
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(sequence.as_bytes());
+    let _ = std::io::stdout().flush();
+}
+
+/// Tiny RFC 4648 base64 encoder. Pilot doesn't have a `base64` dep
+/// and pulling one in for one OSC 52 call is overkill. ~25 lines,
+/// allocation-free aside from the output `String`.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        out.push(ALPHABET[(n & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let n = (bytes[i] as u32) << 16;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+#[cfg(test)]
+mod base64_tests {
+    use super::base64_encode;
+
+    #[test]
+    fn rfc4648_test_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
 }
