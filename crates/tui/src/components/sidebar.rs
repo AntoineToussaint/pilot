@@ -948,6 +948,15 @@ impl Sidebar {
         // right pane to match the action's actual context.
         let _ = primary;
 
+        // Read-all shortcut surfaces when the focused workspace has
+        // unread activity — the user asked for it back on the
+        // sidebar after we trimmed contextual hints. Cheap signal,
+        // matches the email-client "I" / "mark all as read" muscle
+        // memory.
+        if workspace.is_some_and(|w| w.unread_count() > 0) {
+            out.push(Binding { keys: "m", label: "read all" });
+        }
+
         // Session lifecycle. Whenever a workspace is selected we
         // advertise the spawn shortcuts AND `e` editor — those are
         // always relevant regardless of whether a session is already

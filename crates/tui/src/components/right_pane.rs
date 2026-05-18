@@ -706,18 +706,46 @@ impl RightPane {
                 theme.chrome
             };
 
-            // Header line: marker bar + "[kind] author" + optional
-            // teaser. The teaser is one flat line of plain text — the
-            // styled markdown lives in the expanded body — so the user
-            // sees the gist of every comment without it taking 6 rows.
+            // Read activities dim to text_dim across the whole row;
+            // unread keep full text + bold author. Single biggest
+            // visual differentiator — without it the 9-of-11-new
+            // header counter doesn't match the actual rows. The
+            // cursor still wins over read/unread coloring so the
+            // user can see which row j/k landed on.
+            let read_dim = !is_unread && !(is_cursor && focused);
             let header_style = if is_cursor && focused {
                 theme.row_focused()
             } else if is_cursor {
                 theme.row_unfocused().add_modifier(Modifier::BOLD)
-            } else {
+            } else if is_unread {
                 Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_dim)
             };
-            let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(6);
+            let kind_style = if read_dim {
+                Style::default().fg(theme.text_dim)
+            } else {
+                Style::default().fg(theme.text_dim)
+            };
+            let teaser_style = if read_dim {
+                Style::default().fg(theme.chrome)
+            } else {
+                Style::default().fg(theme.text_dim)
+            };
+            let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(8);
+            // Unread bullet — bright dot in front of every unread
+            // row so the eye picks them out instantly. Read rows
+            // get matching whitespace so columns still align.
+            if is_unread {
+                header_spans.push(Span::styled(
+                    "● ",
+                    Style::default()
+                        .fg(theme.warn)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                header_spans.push(Span::raw("  "));
+            }
             // Cursor caret on the focused row, plain bar otherwise.
             // Reuses the same glyph the sidebar uses so navigation
             // feels consistent across panes.
@@ -735,7 +763,7 @@ impl RightPane {
             // batch even when the cursor sits elsewhere.
             if self.selected_activities.contains(&i) {
                 header_spans.push(Span::styled(
-                    "● ",
+                    "✓ ",
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
@@ -743,7 +771,7 @@ impl RightPane {
             }
             header_spans.push(Span::styled(
                 format!("{kind_icon}  {kind_label}  "),
-                Style::default().fg(theme.text_dim),
+                kind_style,
             ));
             header_spans.push(Span::styled(activity.author.clone(), header_style));
             if !is_expanded {
@@ -753,7 +781,7 @@ impl RightPane {
                         "  ›  ",
                         Style::default().fg(theme.chrome),
                     ));
-                    header_spans.push(Span::styled(teaser, Style::default().fg(theme.text_dim)));
+                    header_spans.push(Span::styled(teaser, teaser_style));
                 }
             }
             cards.push(Line::from(header_spans));
@@ -814,10 +842,87 @@ impl RightPane {
 /// Flatten a comment body into a single-line teaser. Strips Markdown
 /// noise (HTML comments, leading hashes/quotes/bullets), collapses
 /// whitespace, and clips to `max_cells` cells with `…`. Used in the
+/// Strip inline markdown / HTML noise from `s` so the activity
+/// teaser doesn't end up showing literal `<sub><sub>![Badge](url)`
+/// soup. Targets four shapes:
+///
+/// - `<sub>` / `</sub>` (GitHub renders these as smaller text; in the
+///   teaser they're pure clutter)
+/// - `![alt text](url)` image references → `alt text`
+/// - `[link text](url)` links → `link text`
+/// - `<!-- comments -->` (already done by `strip_html_comments`
+///   upstream, but pass-through safe).
+///
+/// Doesn't try to be a full markdown parser — these four are the
+/// ones that show up in PR descriptions enough to ruin teasers.
+fn strip_inline_markdown_noise(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // `<sub>` / `</sub>` tags — common in PR descriptions for
+        // smaller-text disclaimers. We don't render the size change
+        // in plain text so the tags are noise.
+        let rest = &s[i..];
+        if let Some(stripped) = rest.strip_prefix("<sub>")
+            .or_else(|| rest.strip_prefix("</sub>"))
+            .or_else(|| rest.strip_prefix("<sup>"))
+            .or_else(|| rest.strip_prefix("</sup>"))
+        {
+            i = s.len() - stripped.len();
+            continue;
+        }
+        // `![alt](url)` image refs → keep just alt.
+        if rest.starts_with("![") {
+            if let Some((alt, after)) = parse_alt_then_paren_url(&rest[2..]) {
+                if !alt.trim().is_empty() {
+                    out.push('[');
+                    out.push_str(&alt);
+                    out.push(']');
+                }
+                i = s.len() - after.len();
+                continue;
+            }
+        }
+        // `[text](url)` link → keep just text.
+        if rest.starts_with('[') {
+            if let Some((text, after)) = parse_alt_then_paren_url(&rest[1..]) {
+                out.push_str(&text);
+                i = s.len() - after.len();
+                continue;
+            }
+        }
+        // Default: passthrough one char.
+        let ch = bytes[i] as char;
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// Helper for `strip_inline_markdown_noise`: parse `alt](url)` and
+/// return `(alt, remaining_after_)`. Returns None if the shape isn't
+/// a proper `]( … )` pair — caller passes through the original `[`.
+fn parse_alt_then_paren_url(after_open: &str) -> Option<(String, &str)> {
+    let close_bracket = after_open.find(']')?;
+    let alt = &after_open[..close_bracket];
+    let after_bracket = &after_open[close_bracket + 1..];
+    let after_paren_open = after_bracket.strip_prefix('(')?;
+    let close_paren = after_paren_open.find(')')?;
+    let after = &after_paren_open[close_paren + 1..];
+    Some((alt.to_string(), after))
+}
+
 /// collapsed activity card so the user gets the gist without reading
 /// six wrapped lines.
 fn teaser_text(body: &str, max_cells: usize) -> String {
     let cleaned = crate::components::comment_render::strip_html_comments(body);
+    // Inline markdown / HTML soup that wrecks teasers (looks like
+    // `<sub><sub>![P1 Badge](https://img.shields.io/...)</sub></sub>`
+    // in GitHub PR descriptions). Collapse them to just the alt /
+    // link text before line-splitting so we don't pick an empty
+    // first line just because it was all badges.
+    let cleaned = strip_inline_markdown_noise(&cleaned);
     // Take the first non-empty content line. Strip common Markdown
     // block markers so e.g. `### Title` reads as `Title`.
     let raw = cleaned
@@ -1392,6 +1497,45 @@ mod should_arm_mark_timer_tests {
         // crash or spuriously arm.
         let w = ws_with_activity(2, 0);
         assert!(!should_arm_mark_timer(true, Some(&w), 100));
+    }
+}
+
+#[cfg(test)]
+mod teaser_noise_tests {
+    use super::strip_inline_markdown_noise;
+
+    #[test]
+    fn strips_sub_tags() {
+        assert_eq!(
+            strip_inline_markdown_noise("hello <sub>world</sub>!"),
+            "hello world!"
+        );
+    }
+
+    #[test]
+    fn collapses_image_to_alt() {
+        // GitHub PR descriptions love shields.io badges. We don't
+        // render images; keep the alt label so the teaser is at
+        // least informative.
+        assert_eq!(
+            strip_inline_markdown_noise("![P1 Badge](https://img.shields.io/badge/P1-orange)"),
+            "[P1 Badge]"
+        );
+    }
+
+    #[test]
+    fn collapses_link_to_text() {
+        assert_eq!(
+            strip_inline_markdown_noise("see [the docs](https://example.com)"),
+            "see the docs"
+        );
+    }
+
+    #[test]
+    fn handles_the_real_world_pr_badge_soup() {
+        let input = "<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange)</sub></sub>";
+        let out = strip_inline_markdown_noise(input);
+        assert_eq!(out, "[P1 Badge]");
     }
 }
 
