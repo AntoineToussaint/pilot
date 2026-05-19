@@ -981,103 +981,7 @@ impl<T: TerminalAdapter> Model<T> {
                     self.send_cmd(cmd);
                 }
             }
-            Msg::ChoicePicked(picks) => {
-                // Adopt picker (Id::AdoptTarget) — pick → send the
-                // `Command::AdoptSessions` mapping source→target.
-                // Empty pick (Esc → no Msg, but cover the defensive
-                // case) drops the stash without firing.
-                if matches!(self.modal_stack.last(), Some(Id::AdoptTarget)) {
-                    let target = picks
-                        .first()
-                        .and_then(|i| self.adopt_choices.get(*i).cloned());
-                    self.adopt_choices.clear();
-                    self.pop_modal();
-                    let source = self.pending_adopt_source.take();
-                    if let (Some(source_key), Some(target_key)) = (source, target) {
-                        use crate::realm::components::footer::{
-                            Notice, NoticeSeverity,
-                        };
-                        self.send_cmd(IpcCommand::AdoptSessions {
-                            source_workspace_key: source_key.clone(),
-                            target_workspace_key: target_key.clone(),
-                        });
-                        self.status.notice = Some(Notice::new(
-                            format!(
-                                "adopted sessions: {source_key} → {target_key}"
-                            ),
-                            NoticeSeverity::Info,
-                        ));
-                        self.redraw = true;
-                    }
-                }
-                // Editor picker (Id::Editor) — pick → launch (or
-                // defer behind a session-spawn when the workspace
-                // has no worktree yet).
-                else if matches!(self.modal_stack.last(), Some(Id::Editor)) {
-                    let editor = picks
-                        .first()
-                        .and_then(|i| self.setup.editor_choices.get(*i).cloned());
-                    self.setup.editor_choices.clear();
-                    self.pop_modal();
-                    let Some(editor) = editor else { return };
-                    // Was this open-editor deferred behind a worktree
-                    // creation? If so, queue + spawn shell.
-                    if let Some(workspace_key) =
-                        self.setup.pending_editor_workspace.take()
-                    {
-                        self.setup.pending_editor_launch =
-                            Some((workspace_key.clone(), editor.clone()));
-                        self.send_cmd(IpcCommand::Spawn {
-                            session_key: workspace_key.clone(),
-                            session_id: None,
-                            kind: pilot_ipc::TerminalKind::Shell,
-                            cwd: None,
-                            initial_prompt: None,
-                        });
-                        use crate::realm::components::footer::{
-                            Notice, NoticeSeverity,
-                        };
-                        self.status.notice = Some(Notice::new(
-                            format!(
-                                "Provisioning worktree for {workspace_key} — opening in {} when ready…",
-                                editor.display
-                            ),
-                            NoticeSeverity::Info,
-                        ));
-                        self.redraw = true;
-                        return;
-                    }
-                    // Worktree already on disk — launch directly.
-                    let worktree = self
-                        .sidebar
-                        .selected_workspace()
-                        .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()));
-                    if let Some(worktree) = worktree {
-                        self.launch_editor(&editor, &worktree);
-                    }
-                }
-                // Settings palette is a non-runner Choice modal — if
-                // the user just picked an action, route into a
-                // partial wizard flow before falling through.
-                else if !self.setup.settings_actions.is_empty()
-                    && matches!(self.modal_stack.last(), Some(Id::Setup))
-                    && self.setup.runner.is_none()
-                {
-                    let action = picks
-                        .first()
-                        .and_then(|i| self.setup.settings_actions.get(*i).cloned());
-                    self.setup.settings_actions.clear();
-                    self.pop_modal();
-                    if let Some(action) = action {
-                        self.dispatch_settings_action(action);
-                    }
-                } else if let Some(mut runner) = self.setup.runner.take() {
-                    let step = runner.step_choice_picked(picks);
-                    self.handle_runner_step(runner, step);
-                } else {
-                    self.pop_modal();
-                }
-            }
+            Msg::ChoicePicked(picks) => self.handle_choice_picked(picks),
             Msg::ChoiceRefresh => {
                 if let Some(mut runner) = self.setup.runner.take() {
                     let step = runner.step_choice_refresh();
@@ -1101,139 +1005,10 @@ impl<T: TerminalAdapter> Model<T> {
                     self.pop_modal();
                 }
             }
-            Msg::ModalDismissed => {
-                if let Some(mut runner) = self.setup.runner.take() {
-                    let step = runner.step_dismissed();
-                    self.handle_runner_step(runner, step);
-                } else {
-                    // Dispatch by which modal was on top BEFORE the
-                    // pop so we route the "no" decision correctly.
-                    let top = self.modal_stack.last().cloned();
-                    self.pop_modal();
-                    match top {
-                        Some(Id::RemoveOutOfScope) => {
-                            self.active_removal_prompt = None;
-                        }
-                        Some(Id::MergeConfirm) => {
-                            // Esc on the merge modal = "no, keep
-                            // them separate." Tell the daemon to drop
-                            // the stall so future polls don't
-                            // re-prompt.
-                            if let Some((issue_key, pr_key)) =
-                                self.active_merge_prompt.take()
-                            {
-                                self.send_cmd(IpcCommand::ConfirmMerge {
-                                    issue_workspace_key: issue_key,
-                                    pr_workspace_key: pr_key,
-                                    accept: false,
-                                });
-                            }
-                        }
-                        Some(Id::MergePrConfirm) => {
-                            // Esc = cancel; just discard the pending
-                            // target. No command goes to the daemon.
-                            self.active_merge_pr_prompt = None;
-                        }
-                        _ => {}
-                    }
-                    // Always try to surface a queued prompt after a
-                    // modal dismisses — not just when the dismissed
-                    // modal itself was a prompt. Otherwise a user who
-                    // has Help / Settings open when the daemon emits
-                    // a prompt would have it stuck in the queue.
-                    self.maybe_mount_next_removal_prompt();
-                    self.maybe_mount_next_merge_prompt();
-                }
-            }
-            Msg::Confirmed(yes) => {
-                let top = self.modal_stack.last().cloned();
-                self.pop_modal();
-                match top {
-                    Some(Id::RemoveOutOfScope) => {
-                        let target = self.active_removal_prompt.take();
-                        if yes
-                            && let Some(workspace_key) = target
-                        {
-                            // Kill terminals + delete workspace.
-                            let session_key: pilot_core::SessionKey =
-                                (&workspace_key).into();
-                            self.send_cmd(IpcCommand::Kill { session_key });
-                        }
-                    }
-                    Some(Id::MergeConfirm) => {
-                        if let Some((issue_key, pr_key)) =
-                            self.active_merge_prompt.take()
-                        {
-                            self.send_cmd(IpcCommand::ConfirmMerge {
-                                issue_workspace_key: issue_key,
-                                pr_workspace_key: pr_key,
-                                accept: yes,
-                            });
-                        }
-                    }
-                    Some(Id::MergePrConfirm) => {
-                        let target = self.active_merge_pr_prompt.take();
-                        if yes && let Some(workspace_key) = target {
-                            self.send_cmd(IpcCommand::MergePr { workspace_key });
-                        }
-                    }
-                    _ => {}
-                }
-                self.maybe_mount_next_removal_prompt();
-                self.maybe_mount_next_merge_prompt();
-            }
-            Msg::TextareaSubmitted(body) => {
-                // Reply submit: build a PostReply for the workspace
-                // we mounted the textarea against and send it to the
-                // daemon. Empty bodies dismiss without posting.
-                self.pop_modal();
-                let target = self.pending_reply.take();
-                if let Some(session_key) = target
-                    && !body.trim().is_empty()
-                {
-                    self.send_cmd(IpcCommand::PostReply {
-                        session_key,
-                        body,
-                    });
-                    // Footer hint so the user knows it submitted —
-                    // poll-tick brings the new comment back into
-                    // the activity feed within a few seconds (we
-                    // also kick a Refresh below so it doesn't wait
-                    // for the 60s loop).
-                    use crate::realm::components::footer::{Notice, NoticeSeverity};
-                    self.status.notice = Some(Notice::new(
-                        "Reply submitted — fetching…",
-                        NoticeSeverity::Info,
-                    ));
-                    self.send_cmd(IpcCommand::Refresh);
-                }
-            }
-            Msg::InputSubmitted(text) => {
-                // Dispatch by which Input modal is currently on top.
-                // Today: NewWorkspace → CreateWorkspace. Future input
-                // prompts (rename, snooze duration, …) get their own
-                // arm here.
-                let top = self.modal_stack.last().cloned();
-                self.pop_modal();
-                match top {
-                    Some(Id::NewWorkspace) => {
-                        let name = text.trim().to_string();
-                        if !name.is_empty() {
-                            tracing::info!(
-                                workspace_name = %name,
-                                "creating new pre-PR workspace"
-                            );
-                            let _ = self
-                                .client
-                                .send(IpcCommand::CreateWorkspace { name });
-                        }
-                    }
-                    _ => {
-                        // Unknown input source — silently drop. The
-                        // pop above already cleared the modal.
-                    }
-                }
-            }
+            Msg::ModalDismissed => self.handle_modal_dismissed(),
+            Msg::Confirmed(yes) => self.handle_confirmed(yes),
+            Msg::TextareaSubmitted(body) => self.handle_textarea_submitted(body),
+            Msg::InputSubmitted(text) => self.handle_input_submitted(text),
             // Polling outcomes — surface as footer notices, never
             // as full-screen modals. Permanent + auth errors are
             // sticky; retryable ones (which shouldn't reach here)
@@ -1263,6 +1038,231 @@ impl<T: TerminalAdapter> Model<T> {
                 );
             }
         }
+    }
+
+    /// Reply textarea submit. Build a `PostReply` for the
+    /// workspace that mounted the textarea and send it to the
+    /// daemon. Empty bodies dismiss without posting; the footer
+    /// "submitted — fetching" notice + an immediate `Refresh`
+    /// keep the user from waiting on the 60s poll loop.
+    fn handle_textarea_submitted(&mut self, body: String) {
+        self.pop_modal();
+        let target = self.pending_reply.take();
+        if let Some(session_key) = target
+            && !body.trim().is_empty()
+        {
+            self.send_cmd(IpcCommand::PostReply { session_key, body });
+            use crate::realm::components::footer::{Notice, NoticeSeverity};
+            self.status.notice = Some(Notice::new(
+                "Reply submitted — fetching…",
+                NoticeSeverity::Info,
+            ));
+            self.send_cmd(IpcCommand::Refresh);
+        }
+    }
+
+    /// Input modal submit (single-line text). Dispatch by which
+    /// Input modal is currently on top. Today only `NewWorkspace`
+    /// (→ `CreateWorkspace`); future prompts (rename, snooze
+    /// duration, …) get their own arm here.
+    fn handle_input_submitted(&mut self, text: String) {
+        let top = self.modal_stack.last().cloned();
+        self.pop_modal();
+        match top {
+            Some(Id::NewWorkspace) => {
+                let name = text.trim().to_string();
+                if !name.is_empty() {
+                    tracing::info!(
+                        workspace_name = %name,
+                        "creating new pre-PR workspace"
+                    );
+                    let _ = self.client.send(IpcCommand::CreateWorkspace { name });
+                }
+            }
+            _ => {
+                // Unknown input source — silently drop. The pop
+                // above already cleared the modal.
+            }
+        }
+    }
+
+    /// Route a Choice modal pick to the right handler. Five
+    /// distinct flows share the same `Msg::ChoicePicked` envelope
+    /// (Adopt target, Editor picker, Settings palette, runner-
+    /// driven flows, plain pop-on-pick) — this fn fans out by
+    /// inspecting the top modal id + setup state.
+    fn handle_choice_picked(&mut self, picks: Vec<usize>) {
+        // Adopt picker (Id::AdoptTarget) — pick → send the
+        // `Command::AdoptSessions` mapping source→target. Empty
+        // pick (Esc → no Msg, but cover the defensive case) drops
+        // the stash without firing.
+        if matches!(self.modal_stack.last(), Some(Id::AdoptTarget)) {
+            let target = picks
+                .first()
+                .and_then(|i| self.adopt_choices.get(*i).cloned());
+            self.adopt_choices.clear();
+            self.pop_modal();
+            let source = self.pending_adopt_source.take();
+            if let (Some(source_key), Some(target_key)) = (source, target) {
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                self.send_cmd(IpcCommand::AdoptSessions {
+                    source_workspace_key: source_key.clone(),
+                    target_workspace_key: target_key.clone(),
+                });
+                self.status.notice = Some(Notice::new(
+                    format!("adopted sessions: {source_key} → {target_key}"),
+                    NoticeSeverity::Info,
+                ));
+                self.redraw = true;
+            }
+            return;
+        }
+        // Editor picker (Id::Editor) — pick → launch (or defer
+        // behind a session-spawn when the workspace has no
+        // worktree yet).
+        if matches!(self.modal_stack.last(), Some(Id::Editor)) {
+            let editor = picks
+                .first()
+                .and_then(|i| self.setup.editor_choices.get(*i).cloned());
+            self.setup.editor_choices.clear();
+            self.pop_modal();
+            let Some(editor) = editor else { return };
+            if let Some(workspace_key) = self.setup.pending_editor_workspace.take() {
+                self.setup.pending_editor_launch =
+                    Some((workspace_key.clone(), editor.clone()));
+                self.send_cmd(IpcCommand::Spawn {
+                    session_key: workspace_key.clone(),
+                    session_id: None,
+                    kind: pilot_ipc::TerminalKind::Shell,
+                    cwd: None,
+                    initial_prompt: None,
+                });
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                self.status.notice = Some(Notice::new(
+                    format!(
+                        "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+                        editor.display
+                    ),
+                    NoticeSeverity::Info,
+                ));
+                self.redraw = true;
+                return;
+            }
+            // Worktree already on disk — launch directly.
+            let worktree = self
+                .sidebar
+                .selected_workspace()
+                .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()));
+            if let Some(worktree) = worktree {
+                self.launch_editor(&editor, &worktree);
+            }
+            return;
+        }
+        // Settings palette is a non-runner Choice modal — if the
+        // user just picked an action, route into a partial wizard
+        // flow before falling through.
+        if !self.setup.settings_actions.is_empty()
+            && matches!(self.modal_stack.last(), Some(Id::Setup))
+            && self.setup.runner.is_none()
+        {
+            let action = picks
+                .first()
+                .and_then(|i| self.setup.settings_actions.get(*i).cloned());
+            self.setup.settings_actions.clear();
+            self.pop_modal();
+            if let Some(action) = action {
+                self.dispatch_settings_action(action);
+            }
+            return;
+        }
+        if let Some(mut runner) = self.setup.runner.take() {
+            let step = runner.step_choice_picked(picks);
+            self.handle_runner_step(runner, step);
+        } else {
+            self.pop_modal();
+        }
+    }
+
+    /// `Esc` / mount-stack pop. Setup wizard takes priority; the
+    /// non-runner case routes by which prompt was on top so the
+    /// daemon learns the "no" decision (merge stalls would otherwise
+    /// re-prompt on the next poll).
+    fn handle_modal_dismissed(&mut self) {
+        if let Some(mut runner) = self.setup.runner.take() {
+            let step = runner.step_dismissed();
+            self.handle_runner_step(runner, step);
+            return;
+        }
+        // Dispatch by which modal was on top BEFORE the pop so we
+        // route the "no" decision correctly.
+        let top = self.modal_stack.last().cloned();
+        self.pop_modal();
+        match top {
+            Some(Id::RemoveOutOfScope) => {
+                self.active_removal_prompt = None;
+            }
+            Some(Id::MergeConfirm) => {
+                // Esc on the merge modal = "no, keep them
+                // separate." Tell the daemon to drop the stall so
+                // future polls don't re-prompt.
+                if let Some((issue_key, pr_key)) = self.active_merge_prompt.take() {
+                    self.send_cmd(IpcCommand::ConfirmMerge {
+                        issue_workspace_key: issue_key,
+                        pr_workspace_key: pr_key,
+                        accept: false,
+                    });
+                }
+            }
+            Some(Id::MergePrConfirm) => {
+                // Esc = cancel; just discard the pending target.
+                // No command goes to the daemon.
+                self.active_merge_pr_prompt = None;
+            }
+            _ => {}
+        }
+        // Always try to surface a queued prompt after a modal
+        // dismisses — not just when the dismissed modal itself was
+        // a prompt. Otherwise a user who has Help / Settings open
+        // when the daemon emits a prompt would have it stuck in
+        // the queue.
+        self.maybe_mount_next_removal_prompt();
+        self.maybe_mount_next_merge_prompt();
+    }
+
+    /// `y` / `n` answer on a ConfirmModal. Routes by which modal
+    /// id was on top; each branch maps `yes` to a side-effect
+    /// (kill workspace, post merge-confirm to daemon, etc.).
+    fn handle_confirmed(&mut self, yes: bool) {
+        let top = self.modal_stack.last().cloned();
+        self.pop_modal();
+        match top {
+            Some(Id::RemoveOutOfScope) => {
+                let target = self.active_removal_prompt.take();
+                if yes && let Some(workspace_key) = target {
+                    // Kill terminals + delete workspace.
+                    let session_key: pilot_core::SessionKey = (&workspace_key).into();
+                    self.send_cmd(IpcCommand::Kill { session_key });
+                }
+            }
+            Some(Id::MergeConfirm) => {
+                if let Some((issue_key, pr_key)) = self.active_merge_prompt.take() {
+                    self.send_cmd(IpcCommand::ConfirmMerge {
+                        issue_workspace_key: issue_key,
+                        pr_workspace_key: pr_key,
+                        accept: yes,
+                    });
+                }
+            }
+            Some(Id::MergePrConfirm) => {
+                let target = self.active_merge_pr_prompt.take();
+                if yes && let Some(workspace_key) = target {
+                    self.send_cmd(IpcCommand::MergePr { workspace_key });
+                }
+            }
+            _ => {}
+        }
+        self.maybe_mount_next_removal_prompt();
+        self.maybe_mount_next_merge_prompt();
     }
 
     /// Apply a [`crate::setup_flow::RunnerStep`] returned by the
