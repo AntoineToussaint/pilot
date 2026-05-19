@@ -295,6 +295,11 @@ stack on top of `worktree.scripts`. Useful for per-repo cleanup
 (`cargo clean`, prune target/), setup, or any project-specific
 tool you want callable inside every worktree.
 
+A ready-to-use Rust workspace cleanup script lives at
+`scripts/examples/rust-cleanup.sh` in this repo. Copy it somewhere
+on your machine and reference it from `repos.<owner/name>.scripts`
+to get `./_pilot/scripts/cleanup` inside every worktree.
+
 State (workspace activity, read/unread, snooze, terminal scrollback
 ring) persists in `~/.pilot/v2/state.db` via SQLite.
 
