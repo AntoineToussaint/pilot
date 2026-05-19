@@ -921,43 +921,31 @@ impl RightPane {
             }
             cards.push(Line::from(header_spans));
 
-            // Body lines only render when the user has expanded this
-            // specific card. Otherwise the teaser on the header line
-            // is the whole comment.
-            if !is_expanded {
-                continue;
+            // Expanded cards render their body inline. Collapsed
+            // cards stop at the header (the one-line teaser there
+            // IS the body). Either way we record the hit-test
+            // range AFTER all spans for this card are pushed, in
+            // ONE place — no scattered mutation.
+            if is_expanded {
+                let body_lines = crate::components::comment_render::render_body(
+                    &activity.body,
+                    body_width,
+                    usize::MAX,
+                );
+                for line in body_lines {
+                    let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+                    spans.push(Span::styled(
+                        "│ ",
+                        Style::default().fg(bar_color),
+                    ));
+                    spans.push(Span::raw(" ".repeat((BODY_INDENT - 2) as usize)));
+                    spans.extend(line.spans);
+                    cards.push(Line::from(spans));
+                }
             }
-            // Expanding is a "I want to read this whole comment" signal,
-            // so the truncation cap doesn't apply — pass usize::MAX and
-            // let the Paragraph clip if a single comment is genuinely
-            // taller than the viewport. The collapsed view stays at
-            // BODY_LINES_PER_CARD because that's the per-card budget
-            // the layout is sized for.
-            let max_lines = if is_expanded {
-                usize::MAX
-            } else {
-                BODY_LINES_PER_CARD
-            };
-            let body_lines = crate::components::comment_render::render_body(
-                &activity.body,
-                body_width,
-                max_lines,
-            );
-            for line in body_lines {
-                let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
-                spans.push(Span::styled(
-                    "│ ",
-                    Style::default().fg(bar_color),
-                ));
-                // Body indent past the bar — `BODY_INDENT - 2` because
-                // the bar + space already consumed 2 cells.
-                spans.push(Span::raw(" ".repeat((BODY_INDENT - 2) as usize)));
-                spans.extend(line.spans);
-                cards.push(Line::from(spans));
-            }
-            // Record the row span this card occupies (header through
-            // last body line, inclusive). Visible-area coordinates so
-            // the orchestrator's mouse handler can match directly.
+            // Single hit-test push per card — collapsed cards get a
+            // single-row range, expanded cards get header+body. This
+            // is what the click handler matches against.
             let card_end = cards.len().saturating_sub(1) as u16;
             let abs_start = inner.y.saturating_add(card_start);
             let abs_end = inner.y.saturating_add(card_end);
