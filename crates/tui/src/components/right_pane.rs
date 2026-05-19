@@ -24,7 +24,7 @@
 
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pilot_core::{ActivityKind, Workspace};
+use pilot_core::Workspace;
 use pilot_ipc::{Command, Event};
 use ratatui::Frame;
 use ratatui::prelude::*;
@@ -41,6 +41,168 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightSection {
     Activity,
+}
+
+/// Pure per-card state computed once at the top of the activity
+/// render loop. Holds only the booleans the header / body renderers
+/// need; passing the workspace + cursor + sets around as positional
+/// args was the source of the click-hit-test bug (one branch
+/// recorded the hit, the `continue` branch didn't).
+#[derive(Debug, Clone, Copy)]
+struct CardState {
+    is_cursor: bool,
+    is_unread: bool,
+    is_expanded: bool,
+    is_selected: bool,
+    focused: bool,
+}
+
+impl CardState {
+    /// "Should this row dim to text_dim across the byline?" — read
+    /// rows do, unless the focused cursor is sitting on them.
+    fn dim_byline(&self) -> bool {
+        !self.is_unread && !(self.is_cursor && self.focused)
+    }
+
+    /// Marker-bar color: focused cursor > unread > chrome.
+    fn bar_color(&self, theme: &crate::theme::Theme) -> ratatui::style::Color {
+        if self.is_cursor && self.focused {
+            theme.accent
+        } else if self.is_unread {
+            theme.warn
+        } else {
+            theme.chrome
+        }
+    }
+}
+
+/// Build the header line for a single activity card. Pure: data in,
+/// `Line` out, no state mutation. Separated from the render loop so
+/// the hit-test push can be a single unconditional statement and
+/// each visual element gets its own helper.
+fn render_card_header(
+    state: &CardState,
+    activity: &pilot_core::Activity,
+    theme: &crate::theme::Theme,
+    now: chrono::DateTime<chrono::Utc>,
+    teaser_cells: usize,
+) -> Line<'static> {
+    use pilot_core::ActivityKind;
+    let (kind_icon, kind_label) = match activity.kind {
+        ActivityKind::Comment => (crate::components::icons::COMMENT, "Message"),
+        ActivityKind::Review => (crate::components::icons::REVIEW, "Review"),
+        ActivityKind::StatusChange => (crate::components::icons::STATUS_CHANGE, "Status"),
+        ActivityKind::CiUpdate => (crate::components::icons::CI, "CI"),
+    };
+
+    let header_style = if state.is_cursor && state.focused {
+        theme.row_focused()
+    } else if state.is_unread {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+    let kind_style = Style::default().fg(theme.text_dim);
+    let teaser_style = if state.dim_byline() {
+        Style::default().fg(theme.chrome)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(10);
+
+    // Unread bullet — reserves the slot so toggling unread doesn't
+    // shift columns.
+    spans.push(if state.is_unread {
+        Span::styled(
+            "● ",
+            Style::default()
+                .fg(theme.warn)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("  ")
+    });
+
+    // Cursor caret OR plain bar.
+    let bar_glyph = if state.is_cursor && state.focused {
+        if state.is_expanded { "▾ " } else { "▸ " }
+    } else {
+        "│ "
+    };
+    spans.push(Span::styled(
+        bar_glyph,
+        Style::default()
+            .fg(state.bar_color(theme))
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    // Multi-select ✓ — also reserves its slot to avoid jitter.
+    spans.push(if state.is_selected {
+        Span::styled(
+            "✓ ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("  ")
+    });
+
+    spans.push(Span::styled(
+        format!("{kind_icon}  {kind_label}  "),
+        kind_style,
+    ));
+    spans.push(Span::styled(activity.author.clone(), header_style));
+
+    let ts = crate::components::sidebar::relative_time(activity.created_at, now);
+    spans.push(Span::styled(
+        format!("  {ts}"),
+        Style::default().fg(theme.text_dim),
+    ));
+
+    // Inline teaser only when the card is collapsed — expanded
+    // cards show the full body on subsequent lines.
+    if !state.is_expanded {
+        let teaser = teaser_text(&activity.body, teaser_cells);
+        if !teaser.is_empty() {
+            spans.push(Span::styled(
+                "  ›  ",
+                Style::default().fg(theme.chrome),
+            ));
+            spans.push(Span::styled(teaser, teaser_style));
+        }
+    }
+
+    Line::from(spans)
+}
+
+/// Build the body lines for an expanded card. The markdown→ratatui
+/// rendering lives in `comment_render::render_body`; this helper
+/// just wraps each body line with the indented marker-bar prefix.
+fn render_card_body(
+    activity: &pilot_core::Activity,
+    theme: &crate::theme::Theme,
+    state: &CardState,
+    body_width: u16,
+    body_indent: u16,
+) -> Vec<Line<'static>> {
+    let bar_color = state.bar_color(theme);
+    let body_lines = crate::components::comment_render::render_body(
+        &activity.body,
+        body_width,
+        usize::MAX,
+    );
+    body_lines
+        .into_iter()
+        .map(|line| {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+            spans.push(Span::styled("│ ", Style::default().fg(bar_color)));
+            spans.push(Span::raw(" ".repeat((body_indent - 2) as usize)));
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 pub struct RightPane {
@@ -766,7 +928,6 @@ impl RightPane {
         //
         // The leading `│` is the unread/cursor indicator (1 colored
         // cell, no full-row bg flood — yazi's marker_symbol pattern).
-        const BODY_LINES_PER_CARD: usize = 12;
         // Indent of body content past the marker bar. 1 cell for the
         // bar itself + 3 spaces of breathing room.
         const BODY_INDENT: u16 = 4;
@@ -778,10 +939,8 @@ impl RightPane {
         let body_width = inner.width.saturating_sub(BODY_INDENT);
         let mut cards: Vec<Line<'static>> = Vec::new();
         let mut rendered_activities: usize = 0;
-        // Track the y-row each card occupies so a mouse click can map
-        // back to its index. Each iteration records the row range
-        // BEFORE pushing the next batch of lines.
         self.click_hits.activity_cards.clear();
+        let now = chrono::Utc::now();
         for (i, activity) in workspace
             .activity
             .iter()
@@ -793,159 +952,19 @@ impl RightPane {
             }
             rendered_activities += 1;
             let card_start = cards.len() as u16;
-
-            let is_cursor = i == self.comment_cursor;
-            let is_unread = workspace.is_activity_unread(i);
-            let is_expanded = self.expanded_activities.contains(&i);
-            let (kind_icon, kind_label) = match activity.kind {
-                ActivityKind::Comment => (crate::components::icons::COMMENT, "Message"),
-                ActivityKind::Review => (crate::components::icons::REVIEW, "Review"),
-                ActivityKind::StatusChange => (
-                    crate::components::icons::STATUS_CHANGE,
-                    "Status",
-                ),
-                ActivityKind::CiUpdate => (crate::components::icons::CI, "CI"),
+            let state = CardState {
+                is_cursor: i == self.comment_cursor,
+                is_unread: workspace.is_activity_unread(i),
+                is_expanded: self.expanded_activities.contains(&i),
+                is_selected: self.selected_activities.contains(&i),
+                focused,
             };
-            // Marker bar color encodes both unread + cursor state.
-            // Cursor on a focused pane → strong accent; unread → warn;
-            // otherwise the bar is invisible (chrome) so read items
-            // visually retreat.
-            let bar_color = if is_cursor && focused {
-                theme.accent
-            } else if is_unread {
-                theme.warn
-            } else {
-                theme.chrome
-            };
-
-            // Read activities dim to text_dim across the whole row;
-            // unread keep full text + bold author. Single biggest
-            // visual differentiator — without it the 9-of-11-new
-            // header counter doesn't match the actual rows.
-            //
-            // Cursor highlight ONLY when the pane is focused. The
-            // earlier `is_cursor && !focused → bold` branch made the
-            // first activity row look picked-out even when the user
-            // was in a terminal, which read as a stuck-selection bug
-            // ("why is this row bold?"). When unfocused the cursor's
-            // existence is irrelevant; row styling is just unread/read.
-            let read_dim = !is_unread && !(is_cursor && focused);
-            let header_style = if is_cursor && focused {
-                theme.row_focused()
-            } else if is_unread {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.text_dim)
-            };
-            let kind_style = if read_dim {
-                Style::default().fg(theme.text_dim)
-            } else {
-                Style::default().fg(theme.text_dim)
-            };
-            let teaser_style = if read_dim {
-                Style::default().fg(theme.chrome)
-            } else {
-                Style::default().fg(theme.text_dim)
-            };
-            let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(8);
-            // Unread bullet — bright dot in front of every unread
-            // row so the eye picks them out instantly. Read rows
-            // get matching whitespace so columns still align.
-            if is_unread {
-                header_spans.push(Span::styled(
-                    "● ",
-                    Style::default()
-                        .fg(theme.warn)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                header_spans.push(Span::raw("  "));
+            cards.push(render_card_header(&state, activity, theme, now, TEASER_CELLS));
+            if state.is_expanded {
+                cards.extend(render_card_body(activity, theme, &state, body_width, BODY_INDENT));
             }
-            // Cursor caret on the focused row, plain bar otherwise.
-            // Reuses the same glyph the sidebar uses so navigation
-            // feels consistent across panes.
-            let bar_glyph = if is_cursor && focused {
-                if is_expanded { "▾ " } else { "▸ " }
-            } else {
-                "│ "
-            };
-            header_spans.push(Span::styled(
-                bar_glyph,
-                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
-            ));
-            // Multi-select indicator — reserves the cell pair
-            // unconditionally so a click that toggles selection
-            // doesn't shift the rest of the row left/right by 2
-            // cells. Bright ✓ when selected, two row-styled spaces
-            // otherwise. The `f` batch + click-to-select gestures
-            // both flip the same `selected_activities` set.
-            if self.selected_activities.contains(&i) {
-                header_spans.push(Span::styled(
-                    "✓ ",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                header_spans.push(Span::raw("  "));
-            }
-            header_spans.push(Span::styled(
-                format!("{kind_icon}  {kind_label}  "),
-                kind_style,
-            ));
-            header_spans.push(Span::styled(activity.author.clone(), header_style));
-            // Relative timestamp ("5m", "2h", "3d") in dim so the
-            // eye treats it as metadata, not content. Sits right
-            // after the author so it's part of the byline, not
-            // floating at the row's edge where the cursor caret
-            // would compete. Reuses the same `relative_time`
-            // formatter the sidebar uses for the row's right-edge
-            // timestamp — single source of truth.
-            let ts = crate::components::sidebar::relative_time(
-                activity.created_at,
-                chrono::Utc::now(),
-            );
-            header_spans.push(Span::styled(
-                format!("  {ts}"),
-                Style::default().fg(theme.text_dim),
-            ));
-            if !is_expanded {
-                let teaser = teaser_text(&activity.body, TEASER_CELLS);
-                if !teaser.is_empty() {
-                    header_spans.push(Span::styled(
-                        "  ›  ",
-                        Style::default().fg(theme.chrome),
-                    ));
-                    header_spans.push(Span::styled(teaser, teaser_style));
-                }
-            }
-            cards.push(Line::from(header_spans));
-
-            // Expanded cards render their body inline. Collapsed
-            // cards stop at the header (the one-line teaser there
-            // IS the body). Either way we record the hit-test
-            // range AFTER all spans for this card are pushed, in
-            // ONE place — no scattered mutation.
-            if is_expanded {
-                let body_lines = crate::components::comment_render::render_body(
-                    &activity.body,
-                    body_width,
-                    usize::MAX,
-                );
-                for line in body_lines {
-                    let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
-                    spans.push(Span::styled(
-                        "│ ",
-                        Style::default().fg(bar_color),
-                    ));
-                    spans.push(Span::raw(" ".repeat((BODY_INDENT - 2) as usize)));
-                    spans.extend(line.spans);
-                    cards.push(Line::from(spans));
-                }
-            }
-            // Single hit-test push per card — collapsed cards get a
-            // single-row range, expanded cards get header+body. This
-            // is what the click handler matches against.
+            // One hit-test push per card. Collapsed → single row;
+            // expanded → header + body lines.
             let card_end = cards.len().saturating_sub(1) as u16;
             let abs_start = inner.y.saturating_add(card_start);
             let abs_end = inner.y.saturating_add(card_end);
@@ -1694,6 +1713,35 @@ mod teaser_noise_tests {
         let input = "<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange)</sub></sub>";
         let out = strip_inline_markdown_noise(input);
         assert_eq!(out, "[P1 Badge]");
+    }
+}
+
+#[cfg(test)]
+mod card_state_tests {
+    use super::CardState;
+
+    fn base() -> CardState {
+        CardState {
+            is_cursor: false,
+            is_unread: false,
+            is_expanded: false,
+            is_selected: false,
+            focused: false,
+        }
+    }
+
+    #[test]
+    fn dim_byline_only_when_read_and_not_focused_cursor() {
+        // Read + not focused → dim (the byline retreats so unread
+        // pops).
+        assert!(base().dim_byline());
+        // Unread → never dim regardless of cursor / focus.
+        assert!(!CardState { is_unread: true, ..base() }.dim_byline());
+        // Focused cursor → never dim, even on a read row.
+        assert!(!CardState { is_cursor: true, focused: true, ..base() }.dim_byline());
+        // Cursor without focus doesn't count — the user can't see
+        // it, so the row should still dim.
+        assert!(CardState { is_cursor: true, focused: false, ..base() }.dim_byline());
     }
 }
 
