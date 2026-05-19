@@ -20,6 +20,7 @@ pub mod setup;
 pub mod setup_flow;
 pub mod test_mode;
 pub mod theme;
+pub mod util;
 
 pub use pane::{Binding, DetachSpec, PaneId, PaneOutcome};
 pub use theme::Theme;
