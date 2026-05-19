@@ -611,6 +611,17 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Drain a handler's returned IPC commands into `send_cmd`.
+    /// Used at the `update()` call sites so handlers can be
+    /// unit-tested in isolation: tests construct a Model, call
+    /// `handle_X`, and assert on the returned `Vec<IpcCommand>`
+    /// without ever needing a real IPC client.
+    fn dispatch_cmds(&self, cmds: Vec<IpcCommand>) {
+        for cmd in cmds {
+            self.send_cmd(cmd);
+        }
+    }
+
     /// Override the initial sidebar / right-top split percentages
     /// from `~/.pilot/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
@@ -981,7 +992,10 @@ impl<T: TerminalAdapter> Model<T> {
                     self.send_cmd(cmd);
                 }
             }
-            Msg::ChoicePicked(picks) => self.handle_choice_picked(picks),
+            Msg::ChoicePicked(picks) => {
+                let cmds = self.handle_choice_picked(picks);
+                self.dispatch_cmds(cmds);
+            }
             Msg::ChoiceRefresh => {
                 if let Some(mut runner) = self.setup.runner.take() {
                     let step = runner.step_choice_refresh();
@@ -1005,10 +1019,22 @@ impl<T: TerminalAdapter> Model<T> {
                     self.pop_modal();
                 }
             }
-            Msg::ModalDismissed => self.handle_modal_dismissed(),
-            Msg::Confirmed(yes) => self.handle_confirmed(yes),
-            Msg::TextareaSubmitted(body) => self.handle_textarea_submitted(body),
-            Msg::InputSubmitted(text) => self.handle_input_submitted(text),
+            Msg::ModalDismissed => {
+                let cmds = self.handle_modal_dismissed();
+                self.dispatch_cmds(cmds);
+            }
+            Msg::Confirmed(yes) => {
+                let cmds = self.handle_confirmed(yes);
+                self.dispatch_cmds(cmds);
+            }
+            Msg::TextareaSubmitted(body) => {
+                let cmds = self.handle_textarea_submitted(body);
+                self.dispatch_cmds(cmds);
+            }
+            Msg::InputSubmitted(text) => {
+                let cmds = self.handle_input_submitted(text);
+                self.dispatch_cmds(cmds);
+            }
             // Polling outcomes — surface as footer notices, never
             // as full-screen modals. Permanent + auth errors are
             // sticky; retryable ones (which shouldn't reach here)
@@ -1041,33 +1067,44 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Reply textarea submit. Build a `PostReply` for the
-    /// workspace that mounted the textarea and send it to the
-    /// daemon. Empty bodies dismiss without posting; the footer
-    /// "submitted — fetching" notice + an immediate `Refresh`
-    /// keep the user from waiting on the 60s poll loop.
-    fn handle_textarea_submitted(&mut self, body: String) {
+    /// workspace that mounted the textarea. Empty bodies dismiss
+    /// without posting; the footer "submitted — fetching" notice +
+    /// an immediate `Refresh` keep the user from waiting on the
+    /// 60s poll loop.
+    ///
+    /// **Effects**: returns IPC commands as a `Vec` (not sent
+    /// inline) so unit tests can drive this handler with fixture
+    /// state and assert on the returned commands without a real
+    /// IPC client. Notice + modal-stack stay as direct mutations
+    /// (tests inspect `Model` state after the call).
+    pub fn handle_textarea_submitted(&mut self, body: String) -> Vec<IpcCommand> {
         self.pop_modal();
+        let mut cmds = Vec::new();
         let target = self.pending_reply.take();
         if let Some(session_key) = target
             && !body.trim().is_empty()
         {
-            self.send_cmd(IpcCommand::PostReply { session_key, body });
+            cmds.push(IpcCommand::PostReply { session_key, body });
             use crate::realm::components::footer::{Notice, NoticeSeverity};
             self.status.notice = Some(Notice::new(
                 "Reply submitted — fetching…",
                 NoticeSeverity::Info,
             ));
-            self.send_cmd(IpcCommand::Refresh);
+            cmds.push(IpcCommand::Refresh);
         }
+        cmds
     }
 
     /// Input modal submit (single-line text). Dispatch by which
     /// Input modal is currently on top. Today only `NewWorkspace`
     /// (→ `CreateWorkspace`); future prompts (rename, snooze
     /// duration, …) get their own arm here.
-    fn handle_input_submitted(&mut self, text: String) {
+    ///
+    /// **Effects**: returns commands as a `Vec` for testability.
+    pub fn handle_input_submitted(&mut self, text: String) -> Vec<IpcCommand> {
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
+        let mut cmds = Vec::new();
         match top {
             Some(Id::NewWorkspace) => {
                 let name = text.trim().to_string();
@@ -1076,7 +1113,7 @@ impl<T: TerminalAdapter> Model<T> {
                         workspace_name = %name,
                         "creating new pre-PR workspace"
                     );
-                    let _ = self.client.send(IpcCommand::CreateWorkspace { name });
+                    cmds.push(IpcCommand::CreateWorkspace { name });
                 }
             }
             _ => {
@@ -1084,6 +1121,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // above already cleared the modal.
             }
         }
+        cmds
     }
 
     /// Route a Choice modal pick to the right handler. Five
@@ -1091,7 +1129,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// (Adopt target, Editor picker, Settings palette, runner-
     /// driven flows, plain pop-on-pick) — this fn fans out by
     /// inspecting the top modal id + setup state.
-    fn handle_choice_picked(&mut self, picks: Vec<usize>) {
+    ///
+    /// **Effects**: returns commands as a `Vec` for testability.
+    /// The Editor / Settings / runner branches may still emit
+    /// commands internally via helper methods (`launch_editor`,
+    /// `dispatch_settings_action`, `handle_runner_step`); only
+    /// the directly-visible IPC commands land in the Vec.
+    pub fn handle_choice_picked(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
+        let mut cmds = Vec::new();
         // Adopt picker (Id::AdoptTarget) — pick → send the
         // `Command::AdoptSessions` mapping source→target. Empty
         // pick (Esc → no Msg, but cover the defensive case) drops
@@ -1105,7 +1150,7 @@ impl<T: TerminalAdapter> Model<T> {
             let source = self.pending_adopt_source.take();
             if let (Some(source_key), Some(target_key)) = (source, target) {
                 use crate::realm::components::footer::{Notice, NoticeSeverity};
-                self.send_cmd(IpcCommand::AdoptSessions {
+                cmds.push(IpcCommand::AdoptSessions {
                     source_workspace_key: source_key.clone(),
                     target_workspace_key: target_key.clone(),
                 });
@@ -1115,7 +1160,7 @@ impl<T: TerminalAdapter> Model<T> {
                 ));
                 self.redraw = true;
             }
-            return;
+            return cmds;
         }
         // Editor picker (Id::Editor) — pick → launch (or defer
         // behind a session-spawn when the workspace has no
@@ -1126,11 +1171,11 @@ impl<T: TerminalAdapter> Model<T> {
                 .and_then(|i| self.setup.editor_choices.get(*i).cloned());
             self.setup.editor_choices.clear();
             self.pop_modal();
-            let Some(editor) = editor else { return };
+            let Some(editor) = editor else { return cmds };
             if let Some(workspace_key) = self.setup.pending_editor_workspace.take() {
                 self.setup.pending_editor_launch =
                     Some((workspace_key.clone(), editor.clone()));
-                self.send_cmd(IpcCommand::Spawn {
+                cmds.push(IpcCommand::Spawn {
                     session_key: workspace_key.clone(),
                     session_id: None,
                     kind: pilot_ipc::TerminalKind::Shell,
@@ -1146,7 +1191,7 @@ impl<T: TerminalAdapter> Model<T> {
                     NoticeSeverity::Info,
                 ));
                 self.redraw = true;
-                return;
+                return cmds;
             }
             // Worktree already on disk — launch directly.
             let worktree = self
@@ -1156,7 +1201,7 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(worktree) = worktree {
                 self.launch_editor(&editor, &worktree);
             }
-            return;
+            return cmds;
         }
         // Settings palette is a non-runner Choice modal — if the
         // user just picked an action, route into a partial wizard
@@ -1173,7 +1218,7 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(action) = action {
                 self.dispatch_settings_action(action);
             }
-            return;
+            return cmds;
         }
         if let Some(mut runner) = self.setup.runner.take() {
             let step = runner.step_choice_picked(picks);
@@ -1181,22 +1226,29 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             self.pop_modal();
         }
+        cmds
     }
 
     /// `Esc` / mount-stack pop. Setup wizard takes priority; the
     /// non-runner case routes by which prompt was on top so the
     /// daemon learns the "no" decision (merge stalls would otherwise
     /// re-prompt on the next poll).
-    fn handle_modal_dismissed(&mut self) {
+    ///
+    /// **Effects**: returns commands as a `Vec` for testability.
+    /// Note: the setup-runner branch may still send commands
+    /// internally via `handle_runner_step`; tests that drive the
+    /// wizard path need to mock at a different layer.
+    pub fn handle_modal_dismissed(&mut self) -> Vec<IpcCommand> {
         if let Some(mut runner) = self.setup.runner.take() {
             let step = runner.step_dismissed();
             self.handle_runner_step(runner, step);
-            return;
+            return Vec::new();
         }
         // Dispatch by which modal was on top BEFORE the pop so we
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
+        let mut cmds = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
                 self.active_removal_prompt = None;
@@ -1206,7 +1258,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // separate." Tell the daemon to drop the stall so
                 // future polls don't re-prompt.
                 if let Some((issue_key, pr_key)) = self.active_merge_prompt.take() {
-                    self.send_cmd(IpcCommand::ConfirmMerge {
+                    cmds.push(IpcCommand::ConfirmMerge {
                         issue_workspace_key: issue_key,
                         pr_workspace_key: pr_key,
                         accept: false,
@@ -1227,26 +1279,30 @@ impl<T: TerminalAdapter> Model<T> {
         // the queue.
         self.maybe_mount_next_removal_prompt();
         self.maybe_mount_next_merge_prompt();
+        cmds
     }
 
     /// `y` / `n` answer on a ConfirmModal. Routes by which modal
     /// id was on top; each branch maps `yes` to a side-effect
     /// (kill workspace, post merge-confirm to daemon, etc.).
-    fn handle_confirmed(&mut self, yes: bool) {
+    ///
+    /// **Effects**: returns commands as a `Vec` for testability.
+    pub fn handle_confirmed(&mut self, yes: bool) -> Vec<IpcCommand> {
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
+        let mut cmds = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
                 let target = self.active_removal_prompt.take();
                 if yes && let Some(workspace_key) = target {
                     // Kill terminals + delete workspace.
                     let session_key: pilot_core::SessionKey = (&workspace_key).into();
-                    self.send_cmd(IpcCommand::Kill { session_key });
+                    cmds.push(IpcCommand::Kill { session_key });
                 }
             }
             Some(Id::MergeConfirm) => {
                 if let Some((issue_key, pr_key)) = self.active_merge_prompt.take() {
-                    self.send_cmd(IpcCommand::ConfirmMerge {
+                    cmds.push(IpcCommand::ConfirmMerge {
                         issue_workspace_key: issue_key,
                         pr_workspace_key: pr_key,
                         accept: yes,
@@ -1256,13 +1312,14 @@ impl<T: TerminalAdapter> Model<T> {
             Some(Id::MergePrConfirm) => {
                 let target = self.active_merge_pr_prompt.take();
                 if yes && let Some(workspace_key) = target {
-                    self.send_cmd(IpcCommand::MergePr { workspace_key });
+                    cmds.push(IpcCommand::MergePr { workspace_key });
                 }
             }
             _ => {}
         }
         self.maybe_mount_next_removal_prompt();
         self.maybe_mount_next_merge_prompt();
+        cmds
     }
 
     /// Apply a [`crate::setup_flow::RunnerStep`] returned by the
@@ -3210,6 +3267,221 @@ fn base64_encode(bytes: &[u8]) -> String {
         out.push('=');
     }
     out
+}
+
+#[cfg(test)]
+mod effects_tests {
+    //! Handler effect-contract tests.
+    //!
+    //! These exercise the `handle_X(&mut self, ...) -> Vec<IpcCommand>`
+    //! contract on the orchestrator's biggest message handlers
+    //! (textarea submit, input submit, confirm y/n, modal dismiss,
+    //! choice pick). Each test:
+    //!
+    //!   1. constructs a `Model` with `new_for_test`;
+    //!   2. seeds the internal state the handler expects to read
+    //!      (`pending_reply`, `active_merge_prompt`, modal stack, …);
+    //!   3. calls `handle_X(...)`;
+    //!   4. asserts on the returned `Vec<IpcCommand>` directly —
+    //!      no need to drive a real IPC client.
+    //!
+    //! Inline `mod tests` (not `tests/`) so the test can poke
+    //! private fields. Effect contracts that drift would be a
+    //! silent regression otherwise — these tests freeze them.
+    use super::*;
+    use pilot_core::{SessionKey, WorkspaceKey};
+    use pilot_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Reply submission with a non-empty body + a pending reply
+    /// target produces `PostReply` followed by `Refresh` (in that
+    /// order — the Refresh kicks an immediate poll instead of
+    /// waiting on the 60s loop).
+    #[test]
+    fn textarea_submitted_with_pending_reply_returns_postreply_then_refresh() {
+        let mut m = build_model();
+        let key = SessionKey::from("github:o/r#1");
+        m.pending_reply = Some(key.clone());
+        let cmds = m.handle_textarea_submitted("hello".into());
+        assert_eq!(cmds.len(), 2);
+        match &cmds[0] {
+            IpcCommand::PostReply { session_key, body } => {
+                assert_eq!(session_key, &key);
+                assert_eq!(body, "hello");
+            }
+            other => panic!("expected PostReply, got {other:?}"),
+        }
+        assert!(matches!(cmds[1], IpcCommand::Refresh));
+    }
+
+    /// Empty body short-circuits — no command produced, the
+    /// modal is still popped (internal state), and the pending
+    /// reply target is cleared. The whitespace case is handled
+    /// the same way.
+    #[test]
+    fn textarea_submitted_with_empty_body_returns_no_commands() {
+        let mut m = build_model();
+        m.pending_reply = Some(SessionKey::from("github:o/r#1"));
+        let cmds = m.handle_textarea_submitted("   ".into());
+        assert!(cmds.is_empty());
+        assert!(m.pending_reply.is_none());
+    }
+
+    /// No pending reply target → no command, even with a body.
+    /// Defensive case (shouldn't reach this handler without a
+    /// pending reply, but the contract handles it).
+    #[test]
+    fn textarea_submitted_with_no_target_returns_no_commands() {
+        let mut m = build_model();
+        let cmds = m.handle_textarea_submitted("hello".into());
+        assert!(cmds.is_empty());
+    }
+
+    /// NewWorkspace input with a non-empty trimmed name produces
+    /// `CreateWorkspace { name }`.
+    #[test]
+    fn input_submitted_for_new_workspace_returns_create_workspace() {
+        let mut m = build_model();
+        m.modal_stack.push(Id::NewWorkspace);
+        let cmds = m.handle_input_submitted("  my-feature  ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::CreateWorkspace { name } => assert_eq!(name, "my-feature"),
+            other => panic!("expected CreateWorkspace, got {other:?}"),
+        }
+    }
+
+    /// Empty / whitespace-only input is dropped silently.
+    #[test]
+    fn input_submitted_with_empty_text_returns_no_commands() {
+        let mut m = build_model();
+        m.modal_stack.push(Id::NewWorkspace);
+        let cmds = m.handle_input_submitted("   ".into());
+        assert!(cmds.is_empty());
+    }
+
+    /// `y` on a RemoveOutOfScope confirm produces a `Kill` for
+    /// the workspace + clears the prompt slot.
+    #[test]
+    fn confirmed_yes_on_remove_out_of_scope_returns_kill() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        m.active_removal_prompt = Some(ws_key.clone());
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::Kill { session_key } => {
+                assert_eq!(session_key, &SessionKey::from(&ws_key));
+            }
+            other => panic!("expected Kill, got {other:?}"),
+        }
+    }
+
+    /// `n` on RemoveOutOfScope clears the slot without producing
+    /// a Kill — user said no, daemon doesn't need to hear about it.
+    #[test]
+    fn confirmed_no_on_remove_out_of_scope_returns_no_commands() {
+        let mut m = build_model();
+        m.active_removal_prompt = Some(WorkspaceKey::new("github:o/r#1"));
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(false);
+        assert!(cmds.is_empty());
+    }
+
+    /// `y` on MergeConfirm → `ConfirmMerge { accept: true }`.
+    /// `n` on the same → `ConfirmMerge { accept: false }`. Both
+    /// produce a command (the daemon needs to know either way so
+    /// it stops re-prompting).
+    #[test]
+    fn confirmed_routes_merge_confirm_yes_and_no_to_daemon() {
+        for (input, expected_accept) in [(true, true), (false, false)] {
+            let mut m = build_model();
+            let issue = WorkspaceKey::new("github:o/r#1");
+            let pr = WorkspaceKey::new("github:o/r#2");
+            m.active_merge_prompt = Some((issue.clone(), pr.clone()));
+            m.modal_stack.push(Id::MergeConfirm);
+            let cmds = m.handle_confirmed(input);
+            assert_eq!(cmds.len(), 1, "input={input}");
+            match &cmds[0] {
+                IpcCommand::ConfirmMerge {
+                    issue_workspace_key,
+                    pr_workspace_key,
+                    accept,
+                } => {
+                    assert_eq!(issue_workspace_key, &issue);
+                    assert_eq!(pr_workspace_key, &pr);
+                    assert_eq!(*accept, expected_accept, "input={input}");
+                }
+                other => panic!("expected ConfirmMerge, got {other:?}"),
+            }
+        }
+    }
+
+    /// Esc on a MergeConfirm modal acts the same as `n` — the
+    /// daemon needs the explicit "no" so it drops the stall and
+    /// doesn't re-prompt on the next poll.
+    #[test]
+    fn modal_dismissed_on_merge_confirm_sends_accept_false() {
+        let mut m = build_model();
+        m.active_merge_prompt = Some((
+            WorkspaceKey::new("github:o/r#1"),
+            WorkspaceKey::new("github:o/r#2"),
+        ));
+        m.modal_stack.push(Id::MergeConfirm);
+        let cmds = m.handle_modal_dismissed();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::ConfirmMerge { accept, .. } => assert!(!*accept),
+            other => panic!("expected ConfirmMerge, got {other:?}"),
+        }
+    }
+
+    /// Esc on a RemoveOutOfScope modal clears the slot but
+    /// produces no command — there's nothing to tell the daemon;
+    /// the workspace stays out of scope on its end too.
+    #[test]
+    fn modal_dismissed_on_remove_out_of_scope_clears_slot_silently() {
+        let mut m = build_model();
+        m.active_removal_prompt = Some(WorkspaceKey::new("github:o/r#1"));
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_modal_dismissed();
+        assert!(cmds.is_empty());
+        assert!(m.active_removal_prompt.is_none());
+    }
+
+    /// Adopt picker: source + target workspace keys flow into an
+    /// `AdoptSessions` command. The picks index resolves into the
+    /// `adopt_choices` slot we set up.
+    #[test]
+    fn choice_picked_for_adopt_target_returns_adopt_sessions() {
+        let mut m = build_model();
+        let source = WorkspaceKey::new("github:o/r#1");
+        let target = WorkspaceKey::new("github:o/r#2");
+        m.pending_adopt_source = Some(source.clone());
+        m.adopt_choices = vec![target.clone()];
+        m.modal_stack.push(Id::AdoptTarget);
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::AdoptSessions {
+                source_workspace_key,
+                target_workspace_key,
+            } => {
+                assert_eq!(source_workspace_key, &source);
+                assert_eq!(target_workspace_key, &target);
+            }
+            other => panic!("expected AdoptSessions, got {other:?}"),
+        }
+        // Side state: the adoption slot + choice list both clear.
+        assert!(m.pending_adopt_source.is_none());
+        assert!(m.adopt_choices.is_empty());
+    }
 }
 
 #[cfg(test)]
