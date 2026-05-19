@@ -73,6 +73,21 @@ pub fn worktrees_root() -> PathBuf {
     state_root().join("worktrees")
 }
 
+/// Sandbox workspaces — repo-less scratch directories the user
+/// creates via `Shift-N`. Lives next to the worktree base under
+/// `<home>/v2/sandboxes/<slug>/`. Survives across pilot restarts
+/// and is preserved on `Shift-X` archive (the workspace record
+/// goes; the directory stays for the user to clean up manually if
+/// it contains real work).
+pub fn sandboxes_root() -> PathBuf {
+    state_root().join("sandboxes")
+}
+
+/// Directory for a single named sandbox.
+pub fn sandbox_dir(name: &str) -> PathBuf {
+    sandboxes_root().join(name)
+}
+
 /// User-editable config file. `<home>/config.yaml`. Lives at the
 /// profile root (not the versioned subdir) so a schema bump
 /// doesn't orphan the user's customizations.

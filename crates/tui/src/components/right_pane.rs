@@ -396,6 +396,14 @@ impl RightPane {
     /// All targets are populated during render via `click_hits`; this
     /// function does pure lookup, no re-layout.
     pub fn handle_mouse_click(&mut self, _col: u16, row: u16) -> bool {
+        tracing::debug!(
+            click_row = row,
+            body_header_row = ?self.click_hits.body_header_row,
+            activity_header_row = ?self.click_hits.activity_header_row,
+            num_cards = self.click_hits.activity_cards.len(),
+            cards = ?self.click_hits.activity_cards,
+            "right_pane.handle_mouse_click",
+        );
         if Some(row) == self.click_hits.body_header_row {
             self.task_body_collapsed = !self.task_body_collapsed;
             return true;
