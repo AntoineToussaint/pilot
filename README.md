@@ -55,17 +55,31 @@ make dev-fresh    # wipe ~/.pilot-dev first
 tmux socket — so the two instances share zero state.
 
 **What `make setup` does:**
-- Downloads zig 0.15.2 into `vendor/zig/<host>/`. That's the only
-  out-of-band dep — `libghostty-rs` is vendored under
-  `crates/libghostty-vt*/`, so a fresh clone builds standalone.
+- Downloads zig 0.15.2 into `vendor/zig/<host>/`. The Rust bindings
+  are vendored under `crates/libghostty-vt*/`, but the underlying
+  ghostty Zig sources are fetched at build time from
+  github.com/ghostty-org/ghostty (pinned commit).
 - Verifies `cargo` and `gh` are on PATH.
 
 **Prerequisites:** Rust 1.85+, a C compiler (for bundled SQLite),
-and the GitHub CLI for credentials (`gh auth login`).
+the GitHub CLI for credentials (`gh auth login`), and network
+access to github.com on first build (subsequent builds use the
+cached `target/.../ghostty-src/`).
 
 If you `cargo build` directly (no Makefile / `run.sh`), put
 **zig 0.15.2** on PATH first — newer zig trips ghostty's
 `requireZig` check.
+
+**Network hiccups during the first build?** GitHub clones over
+HTTP/2 occasionally cancel mid-stream. The build script retries
+3× automatically; if all three fail, clone the ghostty source by
+hand and point at it:
+
+```sh
+git clone --filter=blob:none https://github.com/ghostty-org/ghostty.git /tmp/ghostty-src
+cd /tmp/ghostty-src && git checkout a1e75daef8b64426dbca551c6e41b1fbc2b7ae24
+GHOSTTY_SOURCE_DIR=/tmp/ghostty-src cargo build
+```
 
 ## Install (release)
 

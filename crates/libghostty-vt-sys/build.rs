@@ -114,35 +114,76 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
         return src_dir;
     }
 
-    // Clean and clone fresh.
-    if src_dir.exists() {
-        std::fs::remove_dir_all(&src_dir)
-            .unwrap_or_else(|e| panic!("failed to remove {}: {e}", src_dir.display()));
+    // Up to 3 attempts. Transient HTTP/2 stream cancellations from
+    // GitHub mid-clone are surprisingly common on flaky networks
+    // and used to brick fresh builds with a single panic. Each
+    // retry cleans the partial src_dir first so the next clone
+    // starts from a known-empty target.
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_error: Option<String> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        if src_dir.exists() {
+            std::fs::remove_dir_all(&src_dir)
+                .unwrap_or_else(|e| panic!("failed to remove {}: {e}", src_dir.display()));
+        }
+        if attempt > 1 {
+            eprintln!(
+                "Fetching ghostty {GHOSTTY_COMMIT} (attempt {attempt}/{MAX_ATTEMPTS}) ..."
+            );
+        } else {
+            eprintln!("Fetching ghostty {GHOSTTY_COMMIT} ...");
+        }
+        let mut clone = Command::new("git");
+        clone
+            .arg("clone")
+            .arg("--filter=blob:none")
+            .arg("--no-checkout")
+            .arg(GHOSTTY_REPO)
+            .arg(&src_dir);
+        if let Err(e) = try_run(clone, "git clone ghostty") {
+            last_error = Some(e);
+            continue;
+        }
+        let mut checkout = Command::new("git");
+        checkout
+            .arg("checkout")
+            .arg(GHOSTTY_COMMIT)
+            .current_dir(&src_dir);
+        if let Err(e) = try_run(checkout, "git checkout ghostty commit") {
+            last_error = Some(e);
+            continue;
+        }
+        std::fs::write(&stamp, GHOSTTY_COMMIT)
+            .unwrap_or_else(|e| panic!("failed to write stamp: {e}"));
+        return src_dir;
     }
-
-    eprintln!("Fetching ghostty {GHOSTTY_COMMIT} ...");
-
-    let mut clone = Command::new("git");
-    clone
-        .arg("clone")
-        .arg("--filter=blob:none")
-        .arg("--no-checkout")
-        .arg(GHOSTTY_REPO)
-        .arg(&src_dir);
-    run(clone, "git clone ghostty");
-
-    let mut checkout = Command::new("git");
-    checkout
-        .arg("checkout")
-        .arg(GHOSTTY_COMMIT)
-        .current_dir(&src_dir);
-    run(checkout, "git checkout ghostty commit");
-
-    std::fs::write(&stamp, GHOSTTY_COMMIT).unwrap_or_else(|e| panic!("failed to write stamp: {e}"));
-
-    src_dir
+    let last = last_error.unwrap_or_else(|| "unknown error".to_string());
+    panic!(
+        "Failed to fetch ghostty source after {MAX_ATTEMPTS} attempts: {last}\n\
+         \n\
+         Workarounds:\n\
+         - Re-run the build; the next attempt usually succeeds.\n\
+         - Clone ghostty manually then set GHOSTTY_SOURCE_DIR:\n\
+             git clone --filter=blob:none {GHOSTTY_REPO} /tmp/ghostty-src\n\
+             cd /tmp/ghostty-src && git checkout {GHOSTTY_COMMIT}\n\
+             GHOSTTY_SOURCE_DIR=/tmp/ghostty-src cargo build\n\
+         - Check network connectivity to github.com.",
+    );
 }
 
+/// Run a command, returning its non-zero exit / spawn error as a
+/// string instead of panicking. Used by the fetch retry loop.
+fn try_run(mut command: Command, context: &str) -> Result<(), String> {
+    let status = command
+        .status()
+        .map_err(|e| format!("failed to execute {context}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{context} failed with status {status}"));
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn run(mut command: Command, context: &str) {
     let status = command
         .status()
