@@ -269,6 +269,13 @@ repos:
         link_at: _imports/data
       - source: ~/code/vendored/foo
         link_at: _imports/foo
+    scripts:
+      - name: cleanup
+        source: ~/dev/scripts/rust-cleanup.sh
+      - name: setup
+        content: |
+          #!/usr/bin/env bash
+          cargo fetch
 ```
 
 `env` is injected into every shell / agent PTY pilot spawns inside
@@ -278,6 +285,15 @@ after `git worktree add` and stack on top of the global
 `worktree.mounts` list. `placement: inside` (default) puts the
 link inside the worktree; `placement: above` puts it in the
 worktree's parent dir.
+
+`scripts` materializes executable files under
+`<worktree>/_pilot/scripts/<name>` after checkout. Pick one of
+`content` (inline body, shebang auto-injected if missing) or
+`source` (path to an existing script, symlinked through so edits
+on the source flow through without re-running the spawn). Both
+stack on top of `worktree.scripts`. Useful for per-repo cleanup
+(`cargo clean`, prune target/), setup, or any project-specific
+tool you want callable inside every worktree.
 
 State (workspace activity, read/unread, snooze, terminal scrollback
 ring) persists in `~/.pilot/v2/state.db` via SQLite.

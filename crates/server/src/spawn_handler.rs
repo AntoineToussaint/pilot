@@ -733,6 +733,21 @@ async fn provision_worktree(
     {
         tracing::warn!("apply_mounts for {repo_key} failed: {e}");
     }
+
+    // Scripts: same stacking as mounts (global + per-repo). Best-
+    // effort — a single bad ScriptSpec (e.g. missing source, name
+    // collision) logs a warning but doesn't fail the whole spawn.
+    // The script that DID validate gets materialized; the one that
+    // failed surfaces in /tmp/pilot.log.
+    let mut scripts = config_scripts_to_git(&cfg.worktree.scripts);
+    if let Some(repo_cfg) = cfg.repos.get(&repo_key) {
+        scripts.extend(config_scripts_to_git(&repo_cfg.scripts));
+    }
+    if !scripts.is_empty()
+        && let Err(e) = mgr.apply_scripts(&worktree, &scripts).await
+    {
+        tracing::warn!("apply_scripts for {repo_key} failed: {e}");
+    }
     let _ = worktree; // silence dead-binding warning from the
                      // signature change; the worktree value is what
                      // apply_mounts mutated and we're done with it.
@@ -752,6 +767,40 @@ fn config_mounts_to_git(specs: &[pilot_config::MountSpec]) -> Vec<pilot_git_ops:
                 pilot_config::PlacementSpec::Inside => pilot_git_ops::Placement::Inside,
                 pilot_config::PlacementSpec::Above => pilot_git_ops::Placement::Above,
             },
+        })
+        .collect()
+}
+
+/// Convert per-config `ScriptSpec` → git-ops `Script`, expanding
+/// `~/` in source paths. Specs with neither `content` nor `source`
+/// set, or with both set, are skipped with a warning — we don't
+/// want a bad entry in YAML to abort every script's install.
+fn config_scripts_to_git(specs: &[pilot_config::ScriptSpec]) -> Vec<pilot_git_ops::Script> {
+    specs
+        .iter()
+        .filter_map(|s| match (&s.content, &s.source) {
+            (Some(body), None) => Some(pilot_git_ops::Script {
+                name: s.name.clone(),
+                body: pilot_git_ops::ScriptBody::Inline(body.clone()),
+            }),
+            (None, Some(path)) => Some(pilot_git_ops::Script {
+                name: s.name.clone(),
+                body: pilot_git_ops::ScriptBody::Linked(expand_tilde(path)),
+            }),
+            (Some(_), Some(_)) => {
+                tracing::warn!(
+                    script = %s.name,
+                    "script spec has both `content` and `source` — skipping (set exactly one)"
+                );
+                None
+            }
+            (None, None) => {
+                tracing::warn!(
+                    script = %s.name,
+                    "script spec has neither `content` nor `source` — skipping"
+                );
+                None
+            }
         })
         .collect()
 }

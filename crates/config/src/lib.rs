@@ -419,6 +419,10 @@ pub struct WorktreeConfig {
     /// Paths to symlink into / above each worktree. See
     /// `pilot_git_ops::Mount` for semantics.
     pub mounts: Vec<MountSpec>,
+    /// Executable scripts to materialize inside each worktree at
+    /// `_pilot/scripts/<name>`. Either inline `content` or a path
+    /// `source` to symlink. See `pilot_git_ops::Script`.
+    pub scripts: Vec<ScriptSpec>,
 }
 
 /// Per-repo overrides keyed by `owner/name` (the same string GitHub's
@@ -434,6 +438,13 @@ pub struct WorktreeConfig {
 ///     mounts:
 ///       - source: ~/shared/tensor-data
 ///         link_at: _imports/data
+///     scripts:
+///       - name: cleanup
+///         source: ~/dev/scripts/rust-cleanup.sh
+///       - name: setup
+///         content: |
+///           #!/usr/bin/env bash
+///           cargo fetch
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -447,6 +458,10 @@ pub struct RepoConfig {
     /// Stacked on top of global `worktree.mounts`. Useful for
     /// sharing common code (`_imports/...`) without committing it.
     pub mounts: Vec<MountSpec>,
+    /// Executable scripts to materialize inside this repo's
+    /// worktrees. Stacked on top of `worktree.scripts`. Each entry
+    /// lands at `_pilot/scripts/<name>` chmod +x.
+    pub scripts: Vec<ScriptSpec>,
 }
 
 /// Serializable form of `pilot_git_ops::Mount`. Kept separate so
@@ -461,6 +476,38 @@ pub struct MountSpec {
     /// `"inside"` (default) or `"above"`.
     #[serde(default)]
     pub placement: PlacementSpec,
+}
+
+/// Serializable form of `pilot_git_ops::Script`. Either `content`
+/// (inline body, written to the file) or `source` (path to symlink)
+/// must be set — never both, never neither. The daemon validates
+/// this on the way in.
+///
+/// ```yaml
+/// scripts:
+///   - name: cleanup
+///     source: ~/dev/scripts/rust-cleanup.sh
+///   - name: setup
+///     content: |
+///       #!/usr/bin/env bash
+///       cargo fetch
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptSpec {
+    /// Filename inside `_pilot/scripts/`. Must not contain `/`,
+    /// `\`, `..`, or start with `.` (rejected at apply time).
+    pub name: String,
+    /// Inline body. Written verbatim into the file. Mutually
+    /// exclusive with `source`. A `#!/usr/bin/env bash` shebang
+    /// is prepended if missing so the file is directly executable.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Path to an existing script on disk. Symlinked into the
+    /// worktree (so edits to the source file flow through without
+    /// re-running `apply_scripts`). Mutually exclusive with
+    /// `content`. Leading `~/` is expanded by the daemon.
+    #[serde(default)]
+    pub source: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]

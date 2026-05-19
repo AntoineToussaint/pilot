@@ -43,6 +43,32 @@ pub struct Mount {
     pub placement: Placement,
 }
 
+/// An executable script to materialize inside the worktree at
+/// `_pilot/scripts/<name>`. The user can then run it as
+/// `./_pilot/scripts/<name>` from a shell pilot spawns in the
+/// worktree, or wire `_pilot/scripts` onto `PATH` to call by name.
+///
+/// Two source kinds — pick one per script:
+/// - `Inline(body)` — the body is written verbatim. A `#!/usr/bin/env bash`
+///   shebang is prepended if the body doesn't already start with one,
+///   so the file is directly executable.
+/// - `Linked(path)` — the path is symlinked into the worktree. Edits
+///   to the source file flow through without re-running
+///   `apply_scripts`. The source path must exist at apply time.
+#[derive(Debug, Clone)]
+pub struct Script {
+    /// Filename inside `_pilot/scripts/`. See `validate_script_name`
+    /// for the accept rules.
+    pub name: String,
+    pub body: ScriptBody,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScriptBody {
+    Inline(String),
+    Linked(PathBuf),
+}
+
 /// Manages git worktrees under a base directory.
 ///
 /// Layout:
@@ -366,6 +392,44 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Materialize a list of [`Script`]s under `<worktree>/_pilot/scripts/`.
+    /// Each entry becomes either a symlink (`ScriptBody::Linked`) or
+    /// a freshly-written file (`ScriptBody::Inline`); both end up
+    /// chmod 0o755 so the user can invoke them directly.
+    ///
+    /// Idempotent for inline scripts (re-run with matching content
+    /// is a no-op; differing content rewrites). For linked scripts
+    /// re-applying a matching symlink is a no-op; a conflicting one
+    /// errors — same contract as [`apply_mounts`].
+    ///
+    /// Returns the first failure (rest are skipped). Best-effort
+    /// retry is the caller's job.
+    pub async fn apply_scripts(
+        &self,
+        worktree: &Worktree,
+        scripts: &[Script],
+    ) -> Result<(), GitError> {
+        if scripts.is_empty() {
+            return Ok(());
+        }
+        let scripts_dir = worktree.path.join("_pilot").join("scripts");
+        tokio::fs::create_dir_all(&scripts_dir).await?;
+
+        for script in scripts {
+            validate_script_name(&script.name)?;
+            let target = scripts_dir.join(&script.name);
+            match &script.body {
+                ScriptBody::Linked(source) => {
+                    apply_linked_script(&target, source).await?;
+                }
+                ScriptBody::Inline(body) => {
+                    apply_inline_script(&target, body).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// List all active worktrees.
     pub async fn list(&self) -> Result<Vec<Worktree>, GitError> {
         let wt_dir = self.base_dir.join("worktrees");
@@ -490,6 +554,143 @@ async fn run_git(args: &[&str]) -> Result<String, GitError> {
         );
         Err(GitError::Command(stderr))
     }
+}
+
+/// Reject script names that would escape `_pilot/scripts/`, name a
+/// hidden file, or run on Windows where the path separator differs.
+/// Called by `apply_scripts` before any I/O so a bad name doesn't
+/// leave a partial install behind.
+fn validate_script_name(name: &str) -> Result<(), GitError> {
+    if name.is_empty() {
+        return Err(GitError::Command(
+            "script name must not be empty".into(),
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(GitError::Command(format!(
+            "script name {name:?} must not contain path separators"
+        )));
+    }
+    if name == "." || name == ".." {
+        return Err(GitError::Command(format!(
+            "script name {name:?} is reserved"
+        )));
+    }
+    if name.starts_with('.') {
+        return Err(GitError::Command(format!(
+            "script name {name:?} must not start with '.'"
+        )));
+    }
+    Ok(())
+}
+
+/// Set the executable bit on `path`. Unix-only (the project is
+/// Unix-first; a Windows port would replace this with a no-op or a
+/// `.cmd` shim).
+#[cfg(unix)]
+fn chmod_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)
+}
+
+#[cfg(not(unix))]
+fn chmod_executable(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "script materialization requires Unix permissions",
+    ))
+}
+
+/// Materialize a `Linked` script — symlink `target` → `source`.
+/// Same idempotency / conflict rules as `apply_mounts`: identical
+/// symlink is a no-op; different target errors. Source file must
+/// exist at apply time.
+async fn apply_linked_script(target: &Path, source: &Path) -> Result<(), GitError> {
+    if !source.exists() {
+        return Err(GitError::Command(format!(
+            "script source does not exist: {}",
+            source.display()
+        )));
+    }
+    if target.exists() || target.is_symlink() {
+        match tokio::fs::read_link(target).await {
+            Ok(existing) if existing == source => return Ok(()),
+            Ok(other) => {
+                return Err(GitError::Command(format!(
+                    "script {} already exists but points to {} (expected {})",
+                    target.display(),
+                    other.display(),
+                    source.display()
+                )));
+            }
+            Err(_) => {
+                return Err(GitError::Command(format!(
+                    "script target {} exists and is not a symlink",
+                    target.display()
+                )));
+            }
+        }
+    }
+    let source_owned = source.to_path_buf();
+    let target_owned = target.to_path_buf();
+    let source_for_err = source_owned.clone();
+    let target_for_err = target_owned.clone();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&source_owned, &target_owned)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::other("scripts require Unix symlinks"))
+        }
+    })
+    .await
+    .map_err(|e| GitError::Command(format!("symlink task: {e}")))?
+    .map_err(|e| {
+        GitError::Command(format!(
+            "symlink {} -> {}: {e}",
+            target_for_err.display(),
+            source_for_err.display()
+        ))
+    })
+}
+
+/// Materialize an `Inline` script — write `body` to `target` with
+/// chmod 0o755. Prepends `#!/usr/bin/env bash` if the body doesn't
+/// already start with a shebang so the file is directly executable.
+///
+/// Idempotent: if the file exists and content matches (after
+/// shebang injection), no I/O happens beyond the read. If content
+/// differs the file is rewritten — body changes propagate without
+/// the caller having to detect them.
+async fn apply_inline_script(target: &Path, body: &str) -> Result<(), GitError> {
+    let final_body = if body.starts_with("#!") {
+        body.to_string()
+    } else {
+        format!("#!/usr/bin/env bash\n{body}")
+    };
+    // Check if existing content matches — skip write to preserve
+    // mtime (build systems sometimes key off it).
+    if let Ok(existing) = tokio::fs::read_to_string(target).await
+        && existing == final_body
+    {
+        // Still re-chmod in case the bit got cleared. Cheap.
+        let p = target.to_path_buf();
+        tokio::task::spawn_blocking(move || chmod_executable(&p))
+            .await
+            .map_err(|e| GitError::Command(format!("chmod task: {e}")))?
+            .map_err(GitError::Io)?;
+        return Ok(());
+    }
+    tokio::fs::write(target, &final_body).await?;
+    let p = target.to_path_buf();
+    tokio::task::spawn_blocking(move || chmod_executable(&p))
+        .await
+        .map_err(|e| GitError::Command(format!("chmod task: {e}")))?
+        .map_err(GitError::Io)?;
+    Ok(())
 }
 
 async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {

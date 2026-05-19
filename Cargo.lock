@@ -1816,8 +1816,6 @@ dependencies = [
  "pilot-core",
  "pilot-ipc",
  "serde",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
