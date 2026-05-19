@@ -30,6 +30,7 @@ pilot-store      = { workspace = true }
 pilot-gh         = { workspace = true }
 pilot-linear     = { path = "../linear-provider" }
 pilot-tui-term   = { workspace = true }
+pilot-tui-core   = { workspace = true }
 tuirealm         = { workspace = true }
 libghostty-vt    = { workspace = true }
 pilot-ipc     = { workspace = true }

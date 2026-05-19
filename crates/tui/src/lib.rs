@@ -7,20 +7,23 @@
 //! activity-feed renderers, status pills) live under
 //! `crate::components`.
 
-pub mod agent_attention;
 pub mod components;
-pub mod confirm_latch;
-pub mod editors;
-pub mod intent;
 pub mod pane;
 pub mod pilot_theme;
-pub mod platform;
 pub mod realm;
 pub mod setup;
 pub mod setup_flow;
 pub mod test_mode;
 pub mod theme;
-pub mod util;
+
+// ── re-exported from pilot-tui-core ─────────────────────────────
+// These modules used to live here; they were extracted into
+// `pilot-tui-core` so edits to (say) `intent.rs` don't trigger a
+// pilot-tui rebuild. Re-exported at the same paths so existing
+// `pilot_tui::intent::Foo` / `crate::intent::Foo` keeps resolving.
+pub use pilot_tui_core::{
+    agent_attention, confirm_latch, editors, intent, platform, prompts, util,
+};
 
 pub use pane::{Binding, DetachSpec, PaneId, PaneOutcome};
 pub use theme::Theme;

@@ -1,0 +1,42 @@
+[package]
+name = "pilot-tui-core"
+description = "Pure logic shared by pilot-tui — no ratatui."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[lib]
+name = "pilot_tui_core"
+path = "src/lib.rs"
+
+# This crate is intentionally ratatui-free. It holds the pure-logic
+# modules that the TUI client builds on but that don't need a render
+# context: latches, intent state machines, agent-attention tracking,
+# editor discovery, platform shims, setup helpers, test-mode harness.
+#
+# Keeping these in their own crate means edits to (say) `intent.rs`
+# only rebuild `pilot-tui-core` + the things that depend on it,
+# instead of forcing a full pilot-tui recompile (~21k LoC).
+
+[dependencies]
+pilot-core  = { workspace = true }
+pilot-auth  = { workspace = true }
+pilot-store = { workspace = true }
+pilot-ipc   = { workspace = true }
+
+tokio     = { workspace = true }
+chrono    = { workspace = true }
+serde     = { workspace = true }
+tracing   = { workspace = true }
+thiserror = { workspace = true }
+libc      = "0.2"
+which     = "6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

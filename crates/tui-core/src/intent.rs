@@ -191,12 +191,12 @@ pub fn resolve_work(
             // so the inner Option always unwraps. `expect` over
             // `unwrap` so a future refactor that breaks the
             // invariant fails loud instead of silently.
-            crate::components::sidebar::build_fix_conflict_prompt(ws)
+            crate::prompts::build_fix_conflict_prompt(ws)
                 .expect("FixConflict classification implies build_fix_conflict_prompt returns Some")
                 .1
         }
         WorkPriority::FixCi => {
-            crate::components::sidebar::build_fix_ci_prompt(ws)
+            crate::prompts::build_fix_ci_prompt(ws)
                 .expect("FixCi classification implies build_fix_ci_prompt returns Some")
                 .1
         }

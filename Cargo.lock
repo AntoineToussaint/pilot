@@ -2011,6 +2011,7 @@ dependencies = [
  "pilot-linear",
  "pilot-server",
  "pilot-store",
+ "pilot-tui-core",
  "pilot-tui-term",
  "ratatui",
  "serde",
@@ -2023,6 +2024,24 @@ dependencies = [
  "tracing-subscriber",
  "tuirealm",
  "uuid",
+ "which",
+]
+
+[[package]]
+name = "pilot-tui-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "pilot-auth",
+ "pilot-core",
+ "pilot-ipc",
+ "pilot-store",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "which",
 ]
 
