@@ -8,6 +8,7 @@
 //! `crate::components`.
 
 pub mod components;
+pub mod latch_set;
 pub mod pane;
 pub mod pilot_theme;
 pub mod realm;

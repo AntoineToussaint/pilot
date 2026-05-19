@@ -36,8 +36,9 @@ pub struct WorkspaceRowCtx<'a> {
     /// render pass. Every row's pr-number cell pads to this width
     /// so the role / asking columns line up across rows.
     pub max_pr_num_width: usize,
-    /// `kill_latch.armed() == Some(this_key)` etc — precomputed so
-    /// the row builder doesn't need to know about latches.
+    /// `LatchSet::armed(...) == Some(this_key)` for each trigger,
+    /// precomputed by the sidebar's render fn so the row builder
+    /// doesn't need to know about which keys arm which latches.
     pub kill_armed: bool,
     pub long_snooze_armed: bool,
     /// Any agent in this workspace is in `AgentState::Asking`.

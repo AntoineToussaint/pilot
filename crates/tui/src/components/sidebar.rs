@@ -25,12 +25,21 @@
 //!   across refreshes — the same row stays under the cursor even
 //!   when another workspace gets inserted above it.
 //! - `mailbox`: which view we're showing (Inbox vs Snoozed).
-//! - `kill_latch` / `merge_latch` / `long_snooze_latch`: two-press
-//!   guards for `Shift-X` / `Shift-M` / `Shift-Z`. Each is a
-//!   `ConfirmLatch<SessionKey>` (see `crate::confirm_latch`).
+//! - `latches`: two-press confirm guards for `Shift-X` (kill) and
+//!   `Shift-Z` (long snooze). Held as a `LatchSet<SessionKey>` so
+//!   "any non-matching key disarms" is one call. See
+//!   [`crate::latch_set::LatchSet`].
 
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Trigger for the kill-workspace confirm latch (`Shift-X`).
+/// First press arms, second press fires — see `LatchSet`.
+const TRIGGER_KILL: crate::latch_set::KeyTrigger =
+    crate::latch_set::KeyTrigger::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
+/// Trigger for the long-snooze confirm latch (`Shift-Z`).
+const TRIGGER_LONG_SNOOZE: crate::latch_set::KeyTrigger =
+    crate::latch_set::KeyTrigger::new(KeyCode::Char('Z'), KeyModifiers::SHIFT);
 use pilot_core::{SessionId, SessionKey, Workspace};
 use pilot_ipc::{Command, Event, TerminalId, TerminalKind};
 use ratatui::Frame;
@@ -137,19 +146,18 @@ pub struct Sidebar {
     /// inline `[merge?]` latch — the modal is clearer and doesn't
     /// leave the sidebar row in a half-armed state across redraws.
     pending_merge_requests: Vec<pilot_core::WorkspaceKey>,
-    /// Two-press confirm latch for `Shift-Z` (1-year snooze).
-    long_snooze_latch: crate::confirm_latch::ConfirmLatch<SessionKey>,
+    /// Two-press confirm latches keyed by trigger. Registers
+    /// entries for `Shift-X` (kill) + `Shift-Z` (long snooze).
+    /// Disarms every non-matching entry on each keypress, so
+    /// pressing `j` between `Shift-X` arm and re-press cancels.
+    /// See [`crate::latch_set::LatchSet`].
+    latches: crate::latch_set::LatchSet<SessionKey>,
     /// `z` snooze duration. Configurable via
     /// `~/.pilot/config.yaml::ui.short_snooze` (default 4h).
     short_snooze: std::time::Duration,
     /// `Shift-Z` long-snooze duration. Configurable via
     /// `ui.long_snooze` (default 1 year).
     long_snooze: std::time::Duration,
-    /// Two-press confirm latch for `Shift-X` (kill workspace).
-    /// First press arms; second press fires. Generic
-    /// `ConfirmLatch<SessionKey>` shared with the merge / long-
-    /// snooze latches above.
-    kill_latch: crate::confirm_latch::ConfirmLatch<SessionKey>,
     /// Per-key agent id map. Defaults to `c => "claude", x => "codex",
     /// u => "cursor"`. AppRoot can override via `with_agent_shortcuts`
     /// for users with Aider / custom CLIs configured.
@@ -224,9 +232,14 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             mailbox: Mailbox::Inbox,
-            kill_latch: crate::confirm_latch::ConfirmLatch::new(),
             pending_merge_requests: Vec::new(),
-            long_snooze_latch: crate::confirm_latch::ConfirmLatch::new(),
+            latches: {
+                let mut s: crate::latch_set::LatchSet<SessionKey> =
+                    crate::latch_set::LatchSet::new();
+                s.register(TRIGGER_KILL);
+                s.register(TRIGGER_LONG_SNOOZE);
+                s
+            },
             short_snooze: pilot_config::UiDefaults::default().short_snooze,
             long_snooze: pilot_config::UiDefaults::default().long_snooze,
             agent_shortcuts,
@@ -630,7 +643,7 @@ impl Sidebar {
     }
 
     pub fn kill_armed(&self) -> Option<&SessionKey> {
-        self.kill_latch.armed()
+        self.latches.armed(TRIGGER_KILL)
     }
 
     /// Total unread activity items across all VISIBLE workspaces. Used
@@ -803,66 +816,14 @@ impl Sidebar {
     }
 
     fn recompute_visible_inner(&mut self, preserve_header_park: bool) {
-        let now = chrono::Utc::now();
-        let mailbox = self.mailbox;
-        let show_inactive_in_inbox = self.show_inactive_in_inbox;
-
-        // Filter to the current mailbox via the pure
-        // `mailbox_membership` predicate. The decision matrix
-        // (`workspace × mailbox → bool`) is cell-tested in isolation
-        // so the snoozed/merged/empty edge cases can't drift between
-        // the docstring's intent and the code.
-        let filtered: Vec<(&SessionKey, &Workspace)> = self
-            .workspaces
-            .iter()
-            .filter(|(_, w)| {
-                mailbox_membership(w, mailbox, now, show_inactive_in_inbox)
-            })
-            .collect();
-
-        // Group workspaces by repo. Workspaces with no primary task
-        // or no repo string land under a synthetic group so they're
-        // still visible. Sandbox workspaces (key prefix `sandbox-`)
-        // get their own group so the user can scan past them
-        // without mixing them into real-repo lists. Within each
-        // group sort by updated_at desc so the most-recently-touched
-        // row floats to the top.
-        const NO_REPO: &str = "(no repo)";
-        const SANDBOX: &str = "(sandbox)";
-        let repo_of = |k: &SessionKey, w: &Workspace| -> String {
-            if k.as_str().starts_with("sandbox-") {
-                return SANDBOX.to_string();
-            }
-            w.primary_task()
-                .and_then(|t| t.repo.clone())
-                .unwrap_or_else(|| NO_REPO.to_string())
-        };
-        let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
-        for (k, w) in &filtered {
-            by_repo.entry(repo_of(k, w)).or_default().push((k, w));
-        }
-        for rows in by_repo.values_mut() {
-            rows.sort_by(|(ka, a), (kb, b)| {
-                let a_ts = a.primary_task().map(|t| t.updated_at).unwrap_or(a.created_at);
-                let b_ts = b.primary_task().map(|t| t.updated_at).unwrap_or(b.created_at);
-                b_ts.cmp(&a_ts).then_with(|| ka.as_str().cmp(kb.as_str()))
-            });
-        }
-
-        // Empty-subscribed repos: render a header even when no
-        // workspace has been polled in yet. Only relevant for the
-        // Inbox mailbox — Inactive (merged/closed) and Snoozed are
-        // alternate views over the workspace set, not subscriptions.
-        let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
-        if mailbox == Mailbox::Inbox {
-            all_repos.extend(self.subscribed_repos.iter().cloned());
-        }
-
+        // Snapshot cursor anchors before the rebuild so we can
+        // restore the user's focused row when the new visible list
+        // is in place. Two anchors: (a) parked-on-header preserves
+        // the header name; (b) parked-on-workspace/session preserves
+        // (workspace_key, session_id?) — fallbacks handle the case
+        // where the prior row vanished.
         let prior_key = self.selected_session_key().cloned();
         let prior_session = self.selected_session_id();
-        // Snapshot prior repo header (if cursor was parked on one)
-        // so events arriving while we're on a header don't jump
-        // the cursor away.
         let prior_header = if preserve_header_park {
             match self.visible.get(self.cursor) {
                 Some(VisibleRow::RepoHeader(name)) => Some(name.clone()),
@@ -871,42 +832,25 @@ impl Sidebar {
         } else {
             None
         };
-        let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + all_repos.len() + 4);
-        let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
-        for repo in &all_repos {
-            visible.push(VisibleRow::RepoHeader(repo.clone()));
-            let mut summary = RepoSummary::default();
-            if let Some(rows) = by_repo.get(repo) {
-                summary.active = rows.len();
-                for (_, w) in rows {
-                    if workspace_needs_attention(w, &self.attention, &self.agents_asking) {
-                        summary.attention += 1;
-                    }
-                }
-                // Skip the workspace/session rows if the repo is
-                // collapsed. Header is still emitted above so the
-                // user can re-expand.
-                if !self.collapsed_repos.contains(repo) {
-                    for (k, w) in rows {
-                        visible.push(VisibleRow::Workspace((*k).clone()));
-                        if w.session_count() >= 2 {
-                            let mut sessions: Vec<&pilot_core::WorkspaceSession> =
-                                w.sessions.iter().collect();
-                            sessions.sort_by_key(|s| s.created_at);
-                            for s in sessions {
-                                visible.push(VisibleRow::Session {
-                                    workspace: (*k).clone(),
-                                    session_id: s.id,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            summaries.insert(repo.clone(), summary);
-        }
-        self.visible = visible;
-        self.repo_summaries = summaries;
+
+        // Rebuild via the pure `compute_visible` builder. Every
+        // grouping / classification rule (sandbox bucket, empty
+        // subscribed-repo headers, sorted-by-updated-at) is unit-
+        // tested over there in isolation.
+        let outcome = crate::components::visible_rows::compute_visible(
+            crate::components::visible_rows::ComputeInputs {
+                workspaces: &self.workspaces,
+                mailbox: self.mailbox,
+                show_inactive_in_inbox: self.show_inactive_in_inbox,
+                subscribed_repos: &self.subscribed_repos,
+                collapsed_repos: &self.collapsed_repos,
+                attention: &self.attention,
+                agents_asking: &self.agents_asking,
+                now: chrono::Utc::now(),
+            },
+        );
+        self.visible = outcome.visible;
+        self.repo_summaries = outcome.summaries;
 
         // Preserve cursor on a repo header across reorderings — j/k
         // can land on headers (collapse target), and snapshots
@@ -1102,20 +1046,10 @@ impl Sidebar {
         // Each two-press latch disarms when its trigger key isn't
         // the next press. Single source of truth for the "first
         // press arms, second press fires, anything else disarms"
-        // contract is `crate::confirm_latch::ConfirmLatch`.
-        let is_shift_x =
-            key.code == KeyCode::Char('X') && key.modifiers.contains(KeyModifiers::SHIFT);
-        if !is_shift_x {
-            self.kill_latch.disarm();
-        }
-        let is_shift_m =
-            key.code == KeyCode::Char('M') && key.modifiers.contains(KeyModifiers::SHIFT);
-        let _ = is_shift_m; // merge_latch retired; modal owns the confirm now.
-        let is_shift_z =
-            key.code == KeyCode::Char('Z') && key.modifiers.contains(KeyModifiers::SHIFT);
-        if !is_shift_z {
-            self.long_snooze_latch.disarm();
-        }
+        // contract is owned by `LatchSet`. One call disarms every
+        // registered latch whose trigger doesn't match this key —
+        // no per-action `if !is_shift_X { latch.disarm() }` line.
+        self.latches.disarm_others(key.code, key.modifiers);
 
         match (key.code, key.modifiers) {
             // ── Navigation ────────────────────────────────────────────
@@ -1308,7 +1242,7 @@ impl Sidebar {
                 let Some(session_key) = self.selected_session_key().cloned() else {
                     return PaneOutcome::Consumed;
                 };
-                if !self.long_snooze_latch.arm_or_fire(session_key.clone()) {
+                if !self.latches.arm_or_fire(TRIGGER_LONG_SNOOZE, session_key.clone()) {
                     return PaneOutcome::Consumed;
                 }
                 let workspace = self.selected_workspace();
@@ -1343,7 +1277,7 @@ impl Sidebar {
                 let Some(session_key) = self.selected_session_key().cloned() else {
                     return PaneOutcome::Consumed;
                 };
-                if !self.kill_latch.arm_or_fire(session_key.clone()) {
+                if !self.latches.arm_or_fire(TRIGGER_KILL, session_key.clone()) {
                     return PaneOutcome::Consumed;
                 }
                 let intent = crate::intent::resolve_kill(self.selected_workspace());
@@ -1735,8 +1669,8 @@ impl Sidebar {
                         focused,
                         is_cursor: i == self.cursor,
                         max_pr_num_width,
-                        kill_armed: self.kill_latch.armed() == Some(key),
-                        long_snooze_armed: self.long_snooze_latch.armed() == Some(key),
+                        kill_armed: self.latches.armed(TRIGGER_KILL) == Some(key),
+                        long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
                         asking: workspace.is_some_and(|w| {
                             crate::agent_attention::workspace_is_asking(
                                 w,
@@ -2026,7 +1960,7 @@ fn attention_gate(signal: AttentionSignal, cfg: &pilot_config::AttentionConfig) 
     }
 }
 
-fn workspace_needs_attention(
+pub(crate) fn workspace_needs_attention(
     w: &Workspace,
     cfg: &pilot_config::AttentionConfig,
     agents_asking: &std::collections::HashSet<SessionKey>,
