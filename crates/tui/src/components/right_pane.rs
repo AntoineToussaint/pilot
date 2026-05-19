@@ -29,7 +29,6 @@ use pilot_ipc::{Command, Event};
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
-use std::collections::HashSet;
 
 /// Which collapsible section inside the right pane is currently
 /// "selected" — i.e., what `Enter`/`Space` will toggle.
@@ -210,8 +209,12 @@ pub struct RightPane {
     workspace: Option<Workspace>,
     /// Scroll offset into the comment list (top-of-viewport index).
     comment_scroll: usize,
-    /// Highlighted comment index, for `Space`-to-select UX later.
-    comment_cursor: usize,
+    /// Headless navigation state for the activity feed: cursor +
+    /// expanded set + selected set. Pulled into its own struct so
+    /// the navigation logic (j/k, toggle expand, multi-select) is
+    /// unit-testable without rendering a `Frame`. See
+    /// [`crate::components::activity_feed::ActivityFeed`].
+    feed: crate::components::activity_feed::ActivityFeed,
     /// How many activity cards rendered in the last frame. Updated
     /// during `render`; consumed by `clamp_scroll_to_cursor` to
     /// keep the focused row on-screen as j/k walk through long
@@ -235,17 +238,6 @@ pub struct RightPane {
     /// "arm-on-event, fire-on-elapsed" contract is one place.
     mark_timer: crate::confirm_latch::TimerLatch,
     last_marked_read: Option<usize>,
-    /// Per-activity expand state. Default-empty: every comment renders
-    /// as one header row to keep the feed scannable. The user expands
-    /// individual rows with `→`/`l` and collapses with `←`/`h`. Keyed
-    /// by index because activity ordering is stable within a workspace
-    /// (newest-first); cleared on workspace change.
-    expanded_activities: HashSet<usize>,
-    /// Activity rows the user has multi-selected with `v`. `f` reads
-    /// this set to build the "address these comments" prompt. Cleared
-    /// on workspace change. Empty set = `f` falls back to the row
-    /// under the cursor.
-    selected_activities: HashSet<usize>,
     /// Agent the `f` (fix) shortcut spawns. Configurable via YAML
     /// (`setup.default_agent`); defaults to `"claude"`.
     default_agent: String,
@@ -323,7 +315,7 @@ impl RightPane {
             id,
             workspace: None,
             comment_scroll: 0,
-            comment_cursor: 0,
+            feed: crate::components::activity_feed::ActivityFeed::new(),
             last_visible_cards: 1,
             // Empty workspace → collapsed; cleared on first non-empty
             // workspace landing in `set_workspace`.
@@ -331,8 +323,6 @@ impl RightPane {
             activity_collapse_user_set: false,
             mark_timer: crate::confirm_latch::TimerLatch::new(),
             last_marked_read: None,
-            expanded_activities: HashSet::new(),
-            selected_activities: HashSet::new(),
             default_agent: "claude".to_string(),
             task_body_collapsed: true,
             task_body_max_rows: pilot_config::UiDefaults::default().task_body_max_rows,
@@ -384,19 +374,19 @@ impl RightPane {
     /// during the previous render — conservative default of 1
     /// avoids a stranded cursor before the first frame.
     fn clamp_scroll_to_cursor(&mut self) {
-        if self.comment_cursor < self.comment_scroll {
-            self.comment_scroll = self.comment_cursor;
-        } else if self.comment_cursor
+        if self.feed.cursor < self.comment_scroll {
+            self.comment_scroll = self.feed.cursor;
+        } else if self.feed.cursor
             >= self.comment_scroll + self.last_visible_cards
         {
-            self.comment_scroll = self.comment_cursor + 1 - self.last_visible_cards;
+            self.comment_scroll = self.feed.cursor + 1 - self.last_visible_cards;
         }
     }
 
     /// changes in a way that might affect the answer (j/k/g/G,
     /// set_workspace, focus enter). Idempotent on re-arm.
     fn rearm_mark_timer(&mut self, focused: bool) {
-        if should_arm_mark_timer(focused, self.workspace.as_ref(), self.comment_cursor) {
+        if should_arm_mark_timer(focused, self.workspace.as_ref(), self.feed.cursor) {
             self.mark_timer.arm();
         } else {
             self.mark_timer.disarm();
@@ -408,7 +398,7 @@ impl RightPane {
     /// via `Command::MarkActivityRead`.
     fn fire_auto_mark(&mut self) -> Option<(pilot_core::SessionKey, usize)> {
         let workspace = self.workspace.as_mut()?;
-        let i = self.comment_cursor;
+        let i = self.feed.cursor;
         let total = workspace.activity.len();
         let was_unread = workspace.is_activity_unread(i);
         if !was_unread {
@@ -517,7 +507,7 @@ impl RightPane {
         self.workspace = workspace;
         if !same {
             self.comment_scroll = 0;
-            self.comment_cursor = 0;
+            self.feed.cursor = 0;
             // New workspace selection — drop the user's collapse
             // override so we re-apply the empty-aware default. Without
             // this, toggling once would stick across every workspace.
@@ -530,8 +520,9 @@ impl RightPane {
             self.last_marked_read = None;
             // Indices are workspace-relative; an "expanded row 3" on
             // PR A points at a wholly different comment on PR B.
-            self.expanded_activities.clear();
-            self.selected_activities.clear();
+            // `on_workspace_change` resets cursor + expanded + selected
+            // atomically — see `ActivityFeed`.
+            self.feed.on_workspace_change();
         }
         self.auto_collapse_for_workspace();
         // Arm the auto-mark timer if the new workspace has an unread
@@ -582,25 +573,19 @@ impl RightPane {
             .find(|(_, range)| range.contains(&row))
         {
             let target = *idx;
-            self.comment_cursor = target;
+            self.feed.cursor = target;
             // Single click on a card → move cursor + toggle the
             // multi-select set. Expand/collapse is double-click
             // (handled separately) so the user can pick rows without
             // having to read every body. Matches the mailer pattern.
             // Queue a notice so the user gets explicit feedback —
             // the ✓ marker alone was too subtle for some.
-            let now_selected = if self.selected_activities.contains(&target) {
-                self.selected_activities.remove(&target);
-                false
-            } else {
-                self.selected_activities.insert(target);
-                true
-            };
+            let now_selected = self.feed.toggle_select(target);
             self.pending_selection_notice = Some(if now_selected {
                 format!(
                     "selected activity #{} ({}/{})",
                     target + 1,
-                    self.selected_activities.len(),
+                    self.feed.selected().len(),
                     self.workspace
                         .as_ref()
                         .map(|w| w.activity.len())
@@ -609,7 +594,7 @@ impl RightPane {
             } else {
                 format!(
                     "deselected — {} still selected",
-                    self.selected_activities.len(),
+                    self.feed.selected().len(),
                 )
             });
             self.rearm_mark_timer(true);
@@ -637,12 +622,8 @@ impl RightPane {
             .find(|(_, range)| range.contains(&row))
         {
             let target = *idx;
-            self.comment_cursor = target;
-            if self.expanded_activities.contains(&target) {
-                self.expanded_activities.remove(&target);
-            } else {
-                self.expanded_activities.insert(target);
-            }
+            self.feed.cursor = target;
+            self.feed.toggle_expand(target);
             self.rearm_mark_timer(true);
             return true;
         }
@@ -677,10 +658,10 @@ impl RightPane {
         self.comment_scroll = new;
         // Keep the cursor inside the visible window so j/k feel
         // continuous from where the user just scrolled to.
-        if self.comment_cursor < self.comment_scroll {
-            self.comment_cursor = self.comment_scroll;
-        } else if self.comment_cursor >= self.comment_scroll + visible {
-            self.comment_cursor = self.comment_scroll + visible - 1;
+        if self.feed.cursor < self.comment_scroll {
+            self.feed.cursor = self.comment_scroll;
+        } else if self.feed.cursor >= self.comment_scroll + visible {
+            self.feed.cursor = self.comment_scroll + visible - 1;
         }
         self.rearm_mark_timer(true);
         true
@@ -691,7 +672,7 @@ impl RightPane {
     }
 
     pub fn comment_cursor(&self) -> usize {
-        self.comment_cursor
+        self.feed.cursor
     }
 
     /// Test accessor — top-of-viewport index into the activity
@@ -953,10 +934,10 @@ impl RightPane {
             rendered_activities += 1;
             let card_start = cards.len() as u16;
             let state = CardState {
-                is_cursor: i == self.comment_cursor,
+                is_cursor: i == self.feed.cursor,
                 is_unread: workspace.is_activity_unread(i),
-                is_expanded: self.expanded_activities.contains(&i),
-                is_selected: self.selected_activities.contains(&i),
+                is_expanded: self.feed.is_expanded(i),
+                is_selected: self.feed.is_selected(i),
                 focused,
             };
             cards.push(render_card_header(&state, activity, theme, now, TEASER_CELLS));
@@ -1155,7 +1136,7 @@ impl RightPane {
         let workspace = self.workspace.as_ref();
         let has_workspace = workspace.is_some();
         let has_activity = workspace.map(|w| !w.activity.is_empty()).unwrap_or(false);
-        let selected: Vec<usize> = self.selected_activities.iter().copied().collect();
+        let selected: Vec<usize> = self.feed.selected().iter().copied().collect();
         let has_selection = !selected.is_empty();
         let has_body = workspace
             .and_then(|w| w.primary_task())
@@ -1268,51 +1249,51 @@ impl RightPane {
                 if workspace.activity.is_empty() {
                     return PaneOutcome::Consumed;
                 }
-                if self.comment_cursor < last {
-                    self.comment_cursor += 1;
+                if self.feed.cursor < last {
+                    self.feed.cursor += 1;
                 }
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
             (KeyCode::Up, _) => {
-                self.comment_cursor = self.comment_cursor.saturating_sub(1);
+                self.feed.cursor = self.feed.cursor.saturating_sub(1);
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
             (KeyCode::PageDown, _) => {
                 if !workspace.activity.is_empty() {
                     let jump = self.last_visible_cards;
-                    self.comment_cursor = (self.comment_cursor + jump).min(last);
+                    self.feed.cursor = (self.feed.cursor + jump).min(last);
                     self.clamp_scroll_to_cursor();
                 }
                 PaneOutcome::Consumed
             }
             (KeyCode::PageUp, _) => {
                 let jump = self.last_visible_cards;
-                self.comment_cursor = self.comment_cursor.saturating_sub(jump);
+                self.feed.cursor = self.feed.cursor.saturating_sub(jump);
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
             // `→`/`l` expand the focused comment, `←`/`h` collapse it.
-            // Per-row state lives in `expanded_activities` so other
-            // rows stay condensed while one is being read.
+            // Per-row state lives in `self.feed` (see ActivityFeed)
+            // so other rows stay condensed while one is being read.
             (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
                 if !workspace.activity.is_empty() {
-                    self.expanded_activities.insert(self.comment_cursor);
+                    self.feed.set_expanded(self.feed.cursor, true);
                 }
                 PaneOutcome::Consumed
             }
             (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                self.expanded_activities.remove(&self.comment_cursor);
+                self.feed.set_expanded(self.feed.cursor, false);
                 PaneOutcome::Consumed
             }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
-                self.comment_cursor = 0;
+                self.feed.cursor = 0;
                 self.comment_scroll = 0;
                 PaneOutcome::Consumed
             }
             (KeyCode::Char('G'), m) if m.contains(KeyModifiers::SHIFT) => {
-                self.comment_cursor = last;
+                self.feed.cursor = last;
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
@@ -1322,9 +1303,8 @@ impl RightPane {
             // pre-built "address these comments" prompt.
             (KeyCode::Char('v'), KeyModifiers::NONE) => {
                 if !workspace.activity.is_empty() {
-                    if !self.selected_activities.remove(&self.comment_cursor) {
-                        self.selected_activities.insert(self.comment_cursor);
-                    }
+                    let c = self.feed.cursor;
+                    self.feed.toggle_select(c);
                 }
                 PaneOutcome::Consumed
             }
@@ -1345,7 +1325,7 @@ impl RightPane {
             // resolver hands back.
             (KeyCode::Char('w'), KeyModifiers::NONE) => {
                 let mut selected: Vec<usize> =
-                    self.selected_activities.iter().copied().collect();
+                    self.feed.selected().iter().copied().collect();
                 selected.sort();
                 let intent = crate::intent::resolve_work(
                     Some(workspace),
@@ -1365,7 +1345,7 @@ impl RightPane {
                         cwd: None,
                         initial_prompt: prompt,
                     });
-                    self.selected_activities.clear();
+                    self.feed.clear_selection();
                 }
                 PaneOutcome::Consumed
             }
@@ -1376,13 +1356,13 @@ impl RightPane {
             // for the user who wants to clear without the timer.
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
                 if !workspace.activity.is_empty()
-                    && workspace.is_activity_unread(self.comment_cursor)
+                    && workspace.is_activity_unread(self.feed.cursor)
                 {
                     cmds.push(Command::MarkActivityRead {
                         session_key: workspace.key.clone().into(),
-                        index: self.comment_cursor,
+                        index: self.feed.cursor,
                     });
-                    self.last_marked_read = Some(self.comment_cursor);
+                    self.last_marked_read = Some(self.feed.cursor);
                 }
                 PaneOutcome::Consumed
             }
@@ -1414,7 +1394,7 @@ impl RightPane {
             let new_len = workspace.activity.len();
             let last = new_len.saturating_sub(1);
             self.workspace = Some((**workspace).clone());
-            self.comment_cursor = self.comment_cursor.min(last);
+            self.feed.cursor = self.feed.cursor.min(last);
             if self.comment_scroll > last {
                 self.comment_scroll = last;
             }
@@ -1423,7 +1403,7 @@ impl RightPane {
             // the count changes — preserving it would un-expand row N
             // while expanding the row that took its place.
             if prev_len != new_len {
-                self.expanded_activities.clear();
+                self.feed.clear_expanded();
             }
         }
     }
@@ -1785,14 +1765,14 @@ mod click_dispatch_tests {
         // Card index 3 occupies rows 12..=14.
         pane.click_hits.activity_cards.push((3, 12..=14));
         assert!(pane.handle_mouse_click(0, 13));
-        assert_eq!(pane.comment_cursor, 3);
+        assert_eq!(pane.feed.cursor, 3);
         // Single click toggles SELECTION (not expand — that's
         // double-click).
-        assert!(pane.selected_activities.contains(&3));
-        assert!(!pane.expanded_activities.contains(&3));
+        assert!(pane.feed.is_selected(3));
+        assert!(!pane.feed.is_expanded(3));
         // Second click toggles selection off.
         assert!(pane.handle_mouse_click(0, 13));
-        assert!(!pane.selected_activities.contains(&3));
+        assert!(!pane.feed.is_selected(3));
     }
 
     #[test]
@@ -1800,11 +1780,11 @@ mod click_dispatch_tests {
         let mut pane = RightPane::new(PaneId::new(0));
         pane.click_hits.activity_cards.push((3, 12..=14));
         assert!(pane.handle_mouse_double_click(0, 13));
-        assert_eq!(pane.comment_cursor, 3);
-        assert!(pane.expanded_activities.contains(&3));
+        assert_eq!(pane.feed.cursor, 3);
+        assert!(pane.feed.is_expanded(3));
         // Double-click again collapses.
         assert!(pane.handle_mouse_double_click(0, 13));
-        assert!(!pane.expanded_activities.contains(&3));
+        assert!(!pane.feed.is_expanded(3));
     }
 }
 

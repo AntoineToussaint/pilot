@@ -2,6 +2,7 @@
 //! TerminalStack), the activity-feed renderer, status icons, task
 //! labels. Realm modal/component ports live under `crate::realm`.
 
+pub mod activity_feed;
 pub mod comment_render;
 pub mod icons;
 pub mod right_pane;
