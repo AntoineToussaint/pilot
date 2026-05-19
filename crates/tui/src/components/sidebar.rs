@@ -822,17 +822,24 @@ impl Sidebar {
 
         // Group workspaces by repo. Workspaces with no primary task
         // or no repo string land under a synthetic group so they're
-        // still visible. Within each group sort by updated_at desc
-        // so the most-recently-touched row floats to the top.
+        // still visible. Sandbox workspaces (key prefix `sandbox-`)
+        // get their own group so the user can scan past them
+        // without mixing them into real-repo lists. Within each
+        // group sort by updated_at desc so the most-recently-touched
+        // row floats to the top.
         const NO_REPO: &str = "(no repo)";
-        let repo_of = |w: &Workspace| -> String {
+        const SANDBOX: &str = "(sandbox)";
+        let repo_of = |k: &SessionKey, w: &Workspace| -> String {
+            if k.as_str().starts_with("sandbox-") {
+                return SANDBOX.to_string();
+            }
             w.primary_task()
                 .and_then(|t| t.repo.clone())
                 .unwrap_or_else(|| NO_REPO.to_string())
         };
         let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
         for (k, w) in &filtered {
-            by_repo.entry(repo_of(w)).or_default().push((k, w));
+            by_repo.entry(repo_of(k, w)).or_default().push((k, w));
         }
         for rows in by_repo.values_mut() {
             rows.sort_by(|(ka, a), (kb, b)| {
@@ -1037,6 +1044,7 @@ impl Sidebar {
             out.push(Binding { keys: "Shift-X", label: kill_label });
         }
         out.push(Binding { keys: "n", label: "new workspace" });
+        out.push(Binding { keys: "Shift-N", label: "new sandbox" });
 
         out
     }
@@ -1632,6 +1640,26 @@ impl Sidebar {
         };
 
         let row_budget = inner_width as usize;
+        // Pre-pass: compute the widest `#NNN` across visible workspace
+        // rows so every row pads to the same column. Without this,
+        // `#7204 R` and `#31 R` had different role-letter positions
+        // and the whole column visibly jittered. Minimum 3 ("#NN")
+        // so very-short numbers still leave space for a separator.
+        let max_pr_num_width = self
+            .visible
+            .iter()
+            .filter_map(|row| match row {
+                VisibleRow::Workspace(k) => self
+                    .workspaces
+                    .get(k)
+                    .and_then(|w| w.primary_task())
+                    .and_then(crate::components::task_label::pr_number)
+                    .map(|n| format!("#{n}").chars().count()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(3)
+            .max(3);
         let lines: Vec<Line> = self
             .visible
             .iter()
@@ -1760,6 +1788,14 @@ impl Sidebar {
                     }
 
                     if let Some(n) = pr_num {
+                        // Pad to 5 cells (#NNNN + 1 space) so role
+                        // letters / titles line up across rows
+                        // regardless of number width. `#7204` (5
+                        // cells) vs `#31` (3 cells) used to shift
+                        // the role marker by 2 cells. Most PR
+                        // numbers fit in 4 digits; longer numbers
+                        // (5+ digit GH org repos) get the natural
+                        // overflow.
                         let label = format!("#{n}");
                         let style = if is_cursor {
                             row_style
@@ -1773,6 +1809,21 @@ impl Sidebar {
                             &mut used,
                             &mut spans,
                         );
+                        // Pad to the widest `#NNN` we saw in this
+                        // render pass (computed once at the top of
+                        // render via the pre-pass). Same column
+                        // position for role-letter / title across
+                        // every row regardless of how many digits
+                        // any specific PR has.
+                        let label_w = visual_width(&label);
+                        if label_w < max_pr_num_width {
+                            let pad = max_pr_num_width - label_w;
+                            push(
+                                Span::styled(" ".repeat(pad), row_style),
+                                &mut used,
+                                &mut spans,
+                            );
+                        }
                         // Role marker suffix: `#7204R` reads as "PR
                         // 7204, your role: Reviewer". Dim/colored char
                         // immediately after the number — keeps the

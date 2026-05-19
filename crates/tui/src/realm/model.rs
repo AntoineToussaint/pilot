@@ -1549,6 +1549,26 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
+            // `Shift-N` from the sidebar: create-or-focus the
+            // shared Sandbox workspace. Idempotent — the daemon's
+            // handler just re-broadcasts when the sandbox already
+            // exists. No name prompt (single sandbox per profile);
+            // future named sub-sandboxes would surface as sessions
+            // inside the shared workspace.
+            Key::Char('N')
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.focus == PaneFocus::Sidebar =>
+            {
+                self.q_latch.disarm();
+                let _ = self.client.send(IpcCommand::CreateSandbox {
+                    name: String::new(),
+                });
+                self.preselect = Some(Preselect {
+                    workspace_key: pilot_core::SessionKey::from("sandbox"),
+                    session_id_raw: None,
+                });
+                return;
+            }
             // `,` opens the Settings palette — small picker with
             // "Add a repo (github)" / "Edit agents" / etc. Familiar
             // mnemonic from VS Code / Sublime ("Cmd-," for

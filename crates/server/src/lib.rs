@@ -526,6 +526,15 @@ impl Server {
                         pilot_ipc::Command::CreateWorkspace { name } => {
                             polling::create_empty_workspace(&self.config, &name);
                         }
+                        pilot_ipc::Command::CreateSandbox { name } => {
+                            // Single shared sandbox per profile. The
+                            // wire-side `name` is currently ignored —
+                            // the workspace always lands at key
+                            // `sandbox`. Future: support named
+                            // sub-sandboxes under the same root.
+                            let _ = name;
+                            polling::ensure_sandbox_workspace(&self.config);
+                        }
                         pilot_ipc::Command::Snooze { session_key, until } => {
                             let key = pilot_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),

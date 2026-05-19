@@ -316,6 +316,15 @@ pub enum Command {
     CreateWorkspace {
         name: String,
     },
+    /// Create a repo-less "sandbox" workspace for ad-hoc work that
+    /// isn't tied to a PR / issue / repo. Daemon mkdirs
+    /// `~/.pilot/v2/sandboxes/<slug>/` and saves a Workspace with
+    /// key `sandbox-<slug>`. Sessions spawned against the sandbox
+    /// use that directory as their worktree. Bound to `Shift-N`
+    /// in the default keymap.
+    CreateSandbox {
+        name: String,
+    },
     /// Update the per-session tile/tab layout (`SessionLayout`).
     /// Persisted so the user's split arrangement survives restart.
     /// `layout_json` carries the serialized `pilot_core::SessionLayout`

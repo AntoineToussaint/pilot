@@ -518,6 +518,11 @@ pub async fn handle_spawn(
             // finishes drawing.
             const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+            tracing::info!(
+                terminal_id = ?id,
+                paste_len = paste.len(),
+                "initial_prompt: waiting for first output before injecting",
+            );
             let notified = first_output.notified();
             let got_output = tokio::time::timeout(HARD_DEADLINE, notified).await.is_ok();
             if !got_output {
@@ -527,8 +532,18 @@ pub async fn handle_spawn(
                      writing anyway (cold start / agent hung?)",
                     HARD_DEADLINE,
                 );
+            } else {
+                tracing::info!(
+                    terminal_id = ?id,
+                    "initial_prompt: first output seen — settling then writing",
+                );
             }
             tokio::time::sleep(SETTLE).await;
+            tracing::info!(
+                terminal_id = ?id,
+                paste_len = paste.len(),
+                "initial_prompt: writing paste to backend",
+            );
             if let Err(e) = backend.write(&backend_key, &paste).await {
                 tracing::warn!(
                     terminal_id = ?id,
@@ -572,6 +587,23 @@ async fn resolve_or_create_session(
     kind: &TerminalKind,
 ) -> Result<(PathBuf, SessionId), crate::ServerError> {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
+
+    // Sandbox workspaces (key prefix `sandbox-`) live in a
+    // dedicated per-workspace directory at `paths::sandbox_dir(key)`.
+    // No worktree provisioning — the dir is just a plain mkdir from
+    // `create_sandbox_workspace`. Sessions all share that directory.
+    if workspace_key.as_str().starts_with("sandbox-") {
+        let path = pilot_core::paths::sandbox_dir(workspace_key.as_str());
+        // Best-effort mkdir in case the user removed the dir between
+        // sandbox creation and spawn. Failure logs but doesn't abort.
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            tracing::warn!(
+                sandbox = %path.display(),
+                "sandbox dir create_dir_all failed at spawn time: {e}",
+            );
+        }
+        return Ok((path, session_id.unwrap_or_else(SessionId::new)));
+    }
 
     // Spawn against a workspace that isn't (yet) persisted — common
     // in tests and in --test mode, and fine in general: nothing
