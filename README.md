@@ -12,8 +12,14 @@ Same UI, same key bindings, same inbox.
 
 ## Status
 
-Pre-1.0. Daily-driver-ish on macOS + Linux for the author. Expect
-sharp edges and frequent breaking changes until the first release.
+Pre-1.0, **early-adopter dev mode**. Daily-driver for the author on
+macOS; Linux runs the same code paths but gets less testing.
+Expect sharp edges, log spam in `/tmp/pilot.log`, and the
+occasional breaking change. Shareable with technical friends who
+are happy to file bugs.
+
+Run the side-by-side dev profile (`make dev`) if you want to try
+pilot without disturbing your main inbox.
 
 ## Quick start (dev)
 
@@ -35,6 +41,18 @@ make run-connect SOCKET=/tmp/pilot.sock
 
 ./run.sh --fresh               # the bash flavor — same effect
 ```
+
+**Side-by-side dev profile** — run a second pilot instance against
+its own state DB + tmux socket without disturbing your daily-driver
+copy (handy while iterating on pilot itself):
+
+```sh
+make dev          # PILOT_HOME=~/.pilot-dev pilot
+make dev-fresh    # wipe ~/.pilot-dev first
+```
+
+`PILOT_HOME` overrides every path pilot writes — state, worktrees,
+tmux socket — so the two instances share zero state.
 
 **What `make setup` does:**
 - Downloads zig 0.15.2 into `vendor/zig/<host>/`. That's the only
@@ -84,12 +102,14 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 
 | Key | Action |
 |---|---|
-| `Tab` | Cycle Sidebar → Activity → Terminals |
+| `Tab` | Cycle Sidebar → Activity → Terminals (also escapes Terminals on first press before any input) |
 | `?` | Help overlay |
 | `,` | Settings palette (add repo / edit roles / pick agents / …) |
 | `q q` | Quit (double-tap within 800ms) |
+| `!` | Jump to next workspace whose agent is waiting on input |
 | `Ctrl-Shift-D` | Detach focused pane into a new pilot window |
 | `Shift-arrows` | Resize splitters |
+| `F8` / `Alt-s` | Toggle pilot's mouse capture — flip OFF for host-native trackpad selection (whole-screen), flip back ON for pilot's pane-scoped selection / splitter drag |
 
 **Sidebar** (workspace list):
 
@@ -102,23 +122,33 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 | `c` | Spawn Claude Code |
 | `x` | Spawn Codex |
 | `u` | Spawn Cursor |
+| `w` | Work — spawns Claude with the right prompt for the row's state (fix CI / fix conflict / address comments / implement issue) |
+| `f` | Narrower work shortcut — only fires on CI-failing rows |
 | `m` | Mark **all** of this workspace's activity as read (bulk) |
 | `n` | New pre-PR workspace |
 | `e` | Open the worktree in your editor (Zed / VS Code / Cursor / …) |
 | `g` | Manual refresh — re-poll providers right now |
 | `/` | Search |
-| `Shift-X X` | Kill workspace (two-press) |
+| `Shift-M` | Merge PR (opens a Confirm modal; arrows / Tab navigate Yes/No) |
+| `Shift-X` | Archive workspace (Confirm modal; kills running sessions if any) |
 
 **Activity** (right pane):
 
 | Key | Action |
 |---|---|
-| `j/k` | Navigate the activity feed (scroll follows the cursor) |
+| `j/k` / `↑/↓` | Navigate the activity feed (scroll follows the cursor) |
+| Mouse wheel | Scroll the activity list (8 rows/notch) |
 | `PageUp/PageDown` | Jump by a screenful |
 | `g/G` | Top / bottom |
 | `h/l` (or `←/→`) | Collapse / expand the focused comment |
+| `v` | Toggle multi-select on the focused row (`w` / reply target the set) |
+| Click row | Toggle multi-select + move cursor (footer hint confirms count) |
+| Double-click row | Toggle expand/collapse on that card |
+| Click `▶/▼ Description` | Toggle the description section |
+| Click `▸/▾ Activity` | Toggle the activity section |
 | `m` | Mark the focused comment as read |
 | `z` | Undo the most recent auto-mark-read |
+| `b` | Toggle the Description section |
 | `Enter/Space/o` | Collapse / expand the whole Activity section |
 
 **Cross-pane** (works from Sidebar OR Activity):
@@ -128,9 +158,16 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 | `r` | Reply (open the textarea targeted at the selected workspace) |
 
 **Terminals:** all keys forward to the PTY. `Ctrl-c` is SIGINT.
-`]]` (two presses) returns to the sidebar. Mouse wheel scrolls the
-inner program if it has mouse-tracking on (Claude Code, vim, less,
-…) or scrolls libghostty's scrollback otherwise.
+`]]` (two presses) returns to the sidebar. `Tab` cycles focus when
+you haven't typed anything yet in the current visit (so a fresh
+visit doesn't trap you); after the first keystroke `Tab` routes
+to the PTY for autocomplete. Mouse wheel scrolls tmux's scrollback
+or forwards to the inner program if it has mouse-tracking on
+(Claude Code, vim, less). Left-click + drag does pane-scoped text
+selection — release copies to the clipboard via OSC 52 (footer
+shows `copied N lines`). For the host's native selection (spans
+across pilot's UI but works in every terminal), press `F8` to
+flip mouse capture off, drag, then `F8` to flip back.
 
 **Pickers** (Settings palette, scope/agent/repo pickers — any
 `Choice` modal):
