@@ -2064,6 +2064,14 @@ impl<T: TerminalAdapter> Model<T> {
                         if handled {
                             self.redraw = true;
                         }
+                        // Surface the selection toggle in the footer
+                        // — the ✓ glyph alone was too subtle for
+                        // users coming from mouse-heavy IDEs.
+                        if let Some(msg) = self.right.drain_selection_notice() {
+                            use crate::realm::components::footer::{Notice, NoticeSeverity};
+                            self.status.notice =
+                                Some(Notice::new(msg, NoticeSeverity::Hint));
+                        }
                     }
                 }
             }

@@ -103,6 +103,11 @@ pub struct RightPane {
     /// pane can be mapped back to (activity_index | section_header)
     /// without a re-layout. Refreshed on every render.
     click_hits: ClickHits,
+    /// Notice text queued by `handle_mouse_click` when a click
+    /// toggles an activity row's selection. The orchestrator drains
+    /// this after dispatching the click and surfaces it as a
+    /// footer Hint — pure `✓` visual was too subtle on its own.
+    pending_selection_notice: Option<String>,
 }
 
 /// Click-target geometry captured during render. Three regions are
@@ -171,6 +176,7 @@ impl RightPane {
             task_body_max_rows: pilot_config::UiDefaults::default().task_body_max_rows,
             auto_mark_delay: pilot_config::UiDefaults::default().auto_mark_delay,
             click_hits: ClickHits::default(),
+            pending_selection_notice: None,
         }
     }
 
@@ -411,15 +417,42 @@ impl RightPane {
             // multi-select set. Expand/collapse is double-click
             // (handled separately) so the user can pick rows without
             // having to read every body. Matches the mailer pattern.
-            if self.selected_activities.contains(&target) {
+            // Queue a notice so the user gets explicit feedback —
+            // the ✓ marker alone was too subtle for some.
+            let now_selected = if self.selected_activities.contains(&target) {
                 self.selected_activities.remove(&target);
+                false
             } else {
                 self.selected_activities.insert(target);
-            }
+                true
+            };
+            self.pending_selection_notice = Some(if now_selected {
+                format!(
+                    "selected activity #{} ({}/{})",
+                    target + 1,
+                    self.selected_activities.len(),
+                    self.workspace
+                        .as_ref()
+                        .map(|w| w.activity.len())
+                        .unwrap_or(0),
+                )
+            } else {
+                format!(
+                    "deselected — {} still selected",
+                    self.selected_activities.len(),
+                )
+            });
             self.rearm_mark_timer(true);
             return true;
         }
         false
+    }
+
+    /// Drain the queued selection notice (if any). Orchestrator
+    /// calls this after handling a click and forwards the string
+    /// to its footer Notice.
+    pub fn drain_selection_notice(&mut self) -> Option<String> {
+        self.pending_selection_notice.take()
     }
 
     /// Double-click on an activity card → toggle its expanded state.
@@ -832,9 +865,12 @@ impl RightPane {
                 bar_glyph,
                 Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
             ));
-            // Multi-select indicator. Drawn before the kind glyph so
-            // the user can see at-a-glance which rows are in the `f`
-            // batch even when the cursor sits elsewhere.
+            // Multi-select indicator — reserves the cell pair
+            // unconditionally so a click that toggles selection
+            // doesn't shift the rest of the row left/right by 2
+            // cells. Bright ✓ when selected, two row-styled spaces
+            // otherwise. The `f` batch + click-to-select gestures
+            // both flip the same `selected_activities` set.
             if self.selected_activities.contains(&i) {
                 header_spans.push(Span::styled(
                     "✓ ",
@@ -842,6 +878,8 @@ impl RightPane {
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ));
+            } else {
+                header_spans.push(Span::raw("  "));
             }
             header_spans.push(Span::styled(
                 format!("{kind_icon}  {kind_label}  "),

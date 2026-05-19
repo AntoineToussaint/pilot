@@ -133,6 +133,12 @@ impl Right {
     pub fn scroll_activity(&mut self, delta: isize) -> bool {
         self.inner.scroll_activity(delta)
     }
+
+    /// Drain the queued click-to-select notice, if any. Forwarded
+    /// to the footer by the orchestrator's mouse-up handler.
+    pub fn drain_selection_notice(&mut self) -> Option<String> {
+        self.inner.drain_selection_notice()
+    }
 }
 
 impl Component for Right {
