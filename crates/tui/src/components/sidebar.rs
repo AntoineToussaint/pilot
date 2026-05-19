@@ -1660,6 +1660,12 @@ impl Sidebar {
             .max()
             .unwrap_or(3)
             .max(3);
+        // Column spec for workspace rows — built once per render
+        // (max_pr_num_width is fixed across rows in this pass).
+        // Each row's `render_table` call reuses this slice; the
+        // table primitive owns padding + cursor fill geometry.
+        let workspace_columns =
+            crate::components::workspace_row::build_columns(max_pr_num_width);
         let lines: Vec<Line> = self
             .visible
             .iter()
@@ -1719,396 +1725,35 @@ impl Sidebar {
                     Line::from(spans)
                 }
                 VisibleRow::Workspace(key) => {
+                    use crate::components::workspace_row::{WorkspaceRowCtx, build_row};
                     let workspace = self.workspaces.get(key);
-                    let task = workspace.and_then(|w| w.primary_task());
-                    let raw_title = task
-                        .map(|t| t.title.as_str())
-                        .unwrap_or_else(|| workspace.map(|w| w.name.as_str()).unwrap_or("?"));
-                    let is_cursor = i == self.cursor;
-                    // Cursor wins over per-element coloring — the
-                    // highlight needs to be unambiguous, even at the
-                    // cost of hiding the PR-number / kind colors.
-                    let row_style = if is_cursor && focused {
-                        theme.row_focused()
-                    } else if is_cursor {
-                        theme.row_unfocused()
-                    } else {
-                        Style::default()
-                    };
-                    let prefix = if is_cursor { "  ▸ " } else { "    " };
-                    let kill_mark = if self.kill_latch.armed() == Some(key) {
-                        " [kill?]"
-                    } else if self.long_snooze_latch.armed() == Some(key) {
-                        " [snooze 1y?]"
-                    } else {
-                        ""
-                    };
-
-                    // Decompose the title into [#NNN] [KIND] rest, and
-                    // pre-compute the visual width of each chunk so
-                    // truncation only ever clips the rest-of-title.
-                    let pr_num = task.and_then(crate::components::task_label::pr_number);
-                    let parsed = crate::components::task_label::parse_conventional_prefix(
-                        raw_title,
-                    );
-                    let (kind, body_title) = match parsed {
-                        Some((k, rest)) => (Some(k), rest),
-                        None => (None, raw_title),
-                    };
-
-                    let mut spans: Vec<Span> = Vec::with_capacity(8);
-                    spans.push(Span::styled(prefix, row_style));
-
-                    let mut used = visual_width(prefix);
-                    let push = |span: Span<'static>, used: &mut usize, spans: &mut Vec<Span<'static>>| {
-                        let w = visual_width(span.content.as_ref());
-                        *used = used.saturating_add(w);
-                        spans.push(span);
-                    };
-
-                    // Type marker (PR vs issue) — dim, in front of the
-                    // #number. Users were getting blindsided by the
-                    // workspace-merge collapse pulling an issue row
-                    // into a PR row; the marker makes it unambiguous
-                    // which kind of work each row represents.
-                    let type_label = workspace.and_then(workspace_type_label);
-                    if let Some(tag) = type_label {
-                        let style = if is_cursor {
-                            row_style
-                        } else {
-                            Style::default()
-                                .fg(theme.text_dim)
-                                .add_modifier(Modifier::BOLD)
-                        };
-                        push(
-                            Span::styled(format!("{tag} "), style),
-                            &mut used,
-                            &mut spans,
-                        );
-                    }
-
-                    if let Some(n) = pr_num {
-                        // Pad to 5 cells (#NNNN + 1 space) so role
-                        // letters / titles line up across rows
-                        // regardless of number width. `#7204` (5
-                        // cells) vs `#31` (3 cells) used to shift
-                        // the role marker by 2 cells. Most PR
-                        // numbers fit in 4 digits; longer numbers
-                        // (5+ digit GH org repos) get the natural
-                        // overflow.
-                        let label = format!("#{n}");
-                        let style = if is_cursor {
-                            row_style
-                        } else {
-                            Style::default()
-                                .fg(crate::components::task_label::pr_number_color(n))
-                                .add_modifier(Modifier::BOLD)
-                        };
-                        push(
-                            Span::styled(label.clone(), style),
-                            &mut used,
-                            &mut spans,
-                        );
-                        // Pad to the widest `#NNN` we saw in this
-                        // render pass (computed once at the top of
-                        // render via the pre-pass). Same column
-                        // position for role-letter / title across
-                        // every row regardless of how many digits
-                        // any specific PR has.
-                        let label_w = visual_width(&label);
-                        if label_w < max_pr_num_width {
-                            let pad = max_pr_num_width - label_w;
-                            push(
-                                Span::styled(" ".repeat(pad), row_style),
-                                &mut used,
-                                &mut spans,
-                            );
-                        }
-                        // Role marker suffix: `#7204R` reads as "PR
-                        // 7204, your role: Reviewer". Dim/colored char
-                        // immediately after the number — keeps the
-                        // visual weight on the PR# while still
-                        // signalling at-a-glance.
-                        if let Some(role) = task.map(|t| t.role) {
-                            let (letter, color) = role_badge(theme, role);
-                            let role_style = if is_cursor {
-                                row_style
-                            } else {
-                                Style::default().fg(color).add_modifier(Modifier::BOLD)
-                            };
-                            // Space separator before the role letter:
-                            // `#7204 R` reads cleaner than `#7204R`,
-                            // which scanned as one weird token. The
-                            // role letter still gets its own color so
-                            // it pops out of the dim PR number.
-                            push(
-                                Span::styled(" ", row_style),
-                                &mut used,
-                                &mut spans,
-                            );
-                            push(
-                                Span::styled(letter.to_string(), role_style),
-                                &mut used,
-                                &mut spans,
-                            );
-                        }
-                        // Unread dot moved to the right-side trailer
-                        // (see `unread_dot` below) so the title text
-                        // doesn't shift around between read / unread
-                        // states. Mid-row position was hard to scan
-                        // when half the column was taken up by an
-                        // intermittent glyph.
-                        // Inline needs-input marker — bright `?` when
-                        // any agent in this workspace is Asking, else
-                        // a row-styled space so the title column to
-                        // the right stays anchored. Reserving the
-                        // cell unconditionally is what kept the
-                        // [PR]/[I] / #NNN columns from jittering
-                        // between rows that have asking-state and
-                        // rows that don't.
-                        let asking = workspace.is_some_and(|w| {
+                    let ctx = WorkspaceRowCtx {
+                        workspace,
+                        task: workspace.and_then(|w| w.primary_task()),
+                        theme,
+                        now,
+                        focused,
+                        is_cursor: i == self.cursor,
+                        max_pr_num_width,
+                        kill_armed: self.kill_latch.armed() == Some(key),
+                        long_snooze_armed: self.long_snooze_latch.armed() == Some(key),
+                        asking: workspace.is_some_and(|w| {
                             crate::agent_attention::workspace_is_asking(
                                 w,
                                 &self.agents_asking,
                             )
-                        });
-                        if asking {
-                            let style = if is_cursor {
-                                row_style
-                            } else {
-                                Style::default()
-                                    .fg(theme.warn)
-                                    .add_modifier(Modifier::BOLD)
-                            };
-                            push(Span::styled(" ?", style), &mut used, &mut spans);
-                        } else {
-                            push(Span::styled("  ", row_style), &mut used, &mut spans);
-                        }
-                        push(Span::styled(" ", row_style), &mut used, &mut spans);
-                    }
-
-                    if let Some(k) = kind {
-                        let label = format!("[{}]", k.label());
-                        let style = if is_cursor {
-                            row_style
-                        } else {
-                            Style::default()
-                                .fg(crate::components::task_label::kind_color(k))
-                                .add_modifier(Modifier::BOLD)
-                        };
-                        push(Span::styled(label, style), &mut used, &mut spans);
-                        push(Span::styled(" ", row_style), &mut used, &mut spans);
-                    }
-
-                    // Right-side trailer (right-to-left order in the
-                    // visible output):
-                    //
-                    //     ...title...  [badges]   [status:6]  [time:4]
-                    //
-                    // **Time is always the rightmost column at a fixed
-                    // offset.** Status sits to its left at another
-                    // fixed offset. Badges (live runners) float between
-                    // the title and the fixed columns — when present,
-                    // the title shrinks, but status/time never move.
-                    // This keeps the eye scanning down a stable time
-                    // column even on rows with running shells/agents.
-                    let badges = self.runner_badges(key);
-                    let badges_len = if badges.is_empty() {
-                        0
-                    } else {
-                        // Pill width: ` X ` = 3, ` X×2 ` = 5 (×
-                        // separator + count digit). Multi-digit counts
-                        // (10+ shells) bump width by another cell —
-                        // accept the over-budget rather than truncate.
-                        let pills: usize = badges
-                            .iter()
-                            .map(|(_, n)| {
-                                if *n > 1 {
-                                    4 + n.to_string().chars().count()
-                                } else {
-                                    3
-                                }
-                            })
-                            .sum();
-                        let between = badges.len().saturating_sub(1);
-                        pills + between + 1 // +1 leading space before pills
+                        }),
+                        badges: self.runner_badges(key),
                     };
-                    // Unread pill — sits in the right-side trailer
-                    // (instead of mid-row between the role badge
-                    // and the title) so the title's left edge stays
-                    // stable across read / unread states. Format:
-                    // ` ●N ` for N unread (typical 1-9); ` ●N+`
-                    // when truncated to two digits + plus sign for
-                    // anything past 99. Keeping it always-3-chars-
-                    // visible-plus-leading-space stops trailer
-                    // alignment from jittering.
-                    let unread = workspace.map(|w| w.unread_count()).unwrap_or(0);
-                    let unread_text: Option<String> = if unread == 0 {
-                        None
-                    } else if unread < 10 {
-                        Some(format!(" ●{unread} "))
-                    } else if unread < 100 {
-                        Some(format!(" ●{unread}"))
-                    } else {
-                        Some(" ●99+".to_string())
-                    };
-                    let status = task.and_then(status_pill);
-                    let time_text = task.map(|t| relative_time(t.updated_at, now));
-                    let fixed_cols_len = if task.is_some() {
-                        STATUS_COL_W + 1 + TIME_COL_W
-                    } else {
-                        0
-                    };
-                    // Reserve fixed unread + badge columns even when empty
-                    // so the status / time columns to the right stay
-                    // anchored across rows. Without this, a row with no
-                    // unread + no badge pulls the status pill left while
-                    // its neighbors stay right — that's the alignment
-                    // jitter the user flagged.
-                    let _ = badges_len;
-                    let trailer_len =
-                        UNREAD_COL_W + BADGE_COL_W + fixed_cols_len;
-
-                    let title_budget = row_budget
-                        .saturating_sub(used)
-                        .saturating_sub(visual_width(kill_mark))
-                        .saturating_sub(trailer_len);
-                    let title_text = truncate_ellipsis(body_title, title_budget);
-                    let title_w = visual_width(&title_text);
-                    used = used.saturating_add(title_w);
-                    spans.push(Span::styled(title_text, row_style));
-                    if !kill_mark.is_empty() {
-                        used = used.saturating_add(visual_width(kill_mark));
-                        spans.push(Span::styled(kill_mark, Style::default().fg(theme.error)));
-                    }
-                    if trailer_len > 0 {
-                        // Pad between title and the trailer.
-                        let pad = row_budget.saturating_sub(used).saturating_sub(trailer_len);
-                        if pad > 0 {
-                            spans.push(Span::styled(" ".repeat(pad), row_style));
-                            used = used.saturating_add(pad);
-                        }
-                        // Unread column — fixed UNREAD_COL_W cells,
-                        // right-aligned, blank when no unread. Keeps
-                        // the badge / status / time columns to its
-                        // right anchored across rows.
-                        {
-                            let text = unread_text.as_deref().unwrap_or("");
-                            let text_w = visual_width(text);
-                            let pad = UNREAD_COL_W.saturating_sub(text_w);
-                            if pad > 0 {
-                                spans.push(Span::styled(" ".repeat(pad), row_style));
-                                used = used.saturating_add(pad);
-                            }
-                            if !text.is_empty() {
-                                let style = if is_cursor {
-                                    row_style
-                                } else {
-                                    Style::default()
-                                        .fg(theme.hover)
-                                        .add_modifier(Modifier::BOLD)
-                                };
-                                spans.push(Span::styled(text.to_string(), style));
-                                used = used.saturating_add(text_w.min(UNREAD_COL_W));
-                            }
-                        }
-                        // Badge column — TWO FIXED SLOTS so the C / S
-                        // letters always land at the same x position
-                        // across rows: agent on the left, shell on
-                        // the right. Layout (BADGE_COL_W = 7):
-                        //
-                        //   [agent_slot 3] [sep 1] [shell_slot 3]
-                        //
-                        // Each slot is either ` X ` (3-cell colored
-                        // pill) or `   ` (3 blank spaces). Multi-
-                        // instance (` C×2 `) widens the agent slot
-                        // by 2 — falls back to its base 3 cells if
-                        // multi isn't running; we accept brief
-                        // visual jitter for that uncommon case
-                        // rather than reserving 5 cells permanently.
-                        {
-                            let agent_badge = badges
-                                .iter()
-                                .find(|(letter, _)| *letter != 'S')
-                                .copied();
-                            let shell_badge = badges
-                                .iter()
-                                .find(|(letter, _)| *letter == 'S')
-                                .copied();
-                            let push_slot = |spans: &mut Vec<Span>,
-                                             used: &mut usize,
-                                             badge: Option<(char, usize)>| {
-                                match badge {
-                                    Some((letter, n)) => {
-                                        let label = if n > 1 {
-                                            format!(" {letter}×{n} ")
-                                        } else {
-                                            format!(" {letter} ")
-                                        };
-                                        let w = visual_width(&label);
-                                        spans.push(Span::styled(
-                                            label,
-                                            badge_pill_style(theme, letter),
-                                        ));
-                                        *used = used.saturating_add(w);
-                                    }
-                                    None => {
-                                        spans.push(Span::styled("   ", row_style));
-                                        *used = used.saturating_add(3);
-                                    }
-                                }
-                            };
-                            push_slot(&mut spans, &mut used, agent_badge);
-                            // Single-cell separator between the two
-                            // slots so the pills don't touch.
-                            spans.push(Span::styled(" ", row_style));
-                            used = used.saturating_add(1);
-                            push_slot(&mut spans, &mut used, shell_badge);
-                        }
-                        if fixed_cols_len > 0 {
-                            // Status column — single colored pill that
-                            // already includes its own padding so it
-                            // hits the fixed STATUS_COL_W exactly. When
-                            // there's no pill we render that many
-                            // row-styled spaces to keep alignment.
-                            if let Some(p) = status.as_ref() {
-                                spans.push(Span::styled(p.label, p.style));
-                                used = used.saturating_add(visual_width(p.label));
-                            } else {
-                                spans.push(Span::styled(" ".repeat(STATUS_COL_W), row_style));
-                                used = used.saturating_add(STATUS_COL_W);
-                            }
-                            // Single-cell gutter between status + time.
-                            spans.push(Span::styled(" ", row_style));
-                            used = used.saturating_add(1);
-                            // Time column — right-aligned in 4 cells.
-                            let t = time_text.unwrap_or_default();
-                            let t_w = visual_width(&t).min(TIME_COL_W);
-                            let t_pad = TIME_COL_W - t_w;
-                            if t_pad > 0 {
-                                spans.push(Span::styled(" ".repeat(t_pad), row_style));
-                                used = used.saturating_add(t_pad);
-                            }
-                            let time_style = if is_cursor {
-                                row_style
-                            } else {
-                                Style::default().fg(theme.text_dim)
-                            };
-                            spans.push(Span::styled(t, time_style));
-                            used = used.saturating_add(t_w);
-                        }
-                    }
-                    // Cursor highlight reads as a "filled" row only
-                    // when the bg colour extends past the last char to
-                    // the right edge of the pane. Without this padding
-                    // the highlight ends mid-row and looks broken.
-                    if is_cursor && used < row_budget {
-                        spans.push(Span::styled(
-                            " ".repeat(row_budget - used),
-                            row_style,
-                        ));
-                    }
-                    Line::from(spans)
+                    let row = build_row(&ctx);
+                    crate::components::table::render_table(
+                        &[row],
+                        &workspace_columns,
+                        row_budget,
+                    )
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
                 }
                 VisibleRow::Session {
                     workspace,
@@ -2155,20 +1800,20 @@ impl Sidebar {
 /// Visible width of the status column. Sized for the longest pill
 /// (` CONFLICT ` = 10 cells) so the time column always lands at the
 /// same offset.
-const STATUS_COL_W: usize = 10;
+pub(crate) const STATUS_COL_W: usize = 10;
 /// Visible width of the time column. `now`/`Xm`/`Xh`/`Xd`/`Xmo` all
 /// fit in 4 cells (max is `12mo`).
-const TIME_COL_W: usize = 4;
+pub(crate) const TIME_COL_W: usize = 4;
 /// Visible width of the unread-pill column. ` ●99+` is the worst
 /// case (5 cells). Rows without unread render 5 row-styled spaces
 /// so the badge / status / time columns to its right don't shift.
-const UNREAD_COL_W: usize = 5;
+pub(crate) const UNREAD_COL_W: usize = 5;
 /// Visible width of the agent-badge column. Sized to fit the common
 /// "one agent + one shell" case ( ` C ` + space + ` S ` = 7 cells);
 /// a single badge gets right-aligned padding, more than two get
 /// truncated. Rows without any badge render this many row-styled
 /// spaces so the status / time columns to the right stay anchored.
-const BADGE_COL_W: usize = 7;
+pub(crate) const BADGE_COL_W: usize = 7;
 
 /// Right-side status pill showing the most actionable problem on the
 /// PR. One pill at a time, ordered by severity: merge conflict beats
@@ -2177,9 +1822,9 @@ const BADGE_COL_W: usize = 7;
 /// (` CONFLICT ` / ` CI FAIL ` / ` CI OK ` / etc.) with strong fg +
 /// colored bg — the v1 design that the user actually likes; subtle
 /// text-only failed visually.
-struct StatusPill {
-    label: &'static str,
-    style: Style,
+pub(crate) struct StatusPill {
+    pub(crate) label: &'static str,
+    pub(crate) style: Style,
 }
 
 /// Does this workspace want the user's attention right now? Drives
@@ -2191,7 +1836,7 @@ struct StatusPill {
 /// `Some("[I]")` for issue-only workspaces, and `None` for empty
 /// scratch workspaces (no PR, no issues — those have no number to
 /// label anyway).
-fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
+pub(crate) fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
     // Pad to 4 cells so [PR] and [I ] line up column-wise — the
     // `#NNN` number after the label needs the same x position on
     // every row or the eye can't scan the column.
@@ -2400,7 +2045,7 @@ fn workspace_needs_attention(
 ///
 /// Returning `Option<StatusPill>` so the `StatusTag::None` case
 /// renders as a hole (no pill) without making every caller filter.
-fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
+pub(crate) fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
     pill_for_tag(pilot_core::StatusTag::for_task(task))
 }
 
@@ -2526,7 +2171,7 @@ pub(crate) fn relative_time(then: chrono::DateTime<chrono::Utc>, now: chrono::Da
 /// All colors come from the active theme — no hardcoded RGB — so
 /// the badges sit on the same palette as the rest of the UI and
 /// don't fight for attention.
-fn role_badge(theme: &crate::theme::Theme, role: pilot_core::TaskRole) -> (char, Color) {
+pub(crate) fn role_badge(theme: &crate::theme::Theme, role: pilot_core::TaskRole) -> (char, Color) {
     match role {
         pilot_core::TaskRole::Author => ('A', theme.success),
         pilot_core::TaskRole::Reviewer => ('R', theme.accent),
@@ -2538,7 +2183,7 @@ fn role_badge(theme: &crate::theme::Theme, role: pilot_core::TaskRole) -> (char,
 /// Per-letter pill style for the runner badge. Subtle bg tint (chrome
 /// grey, not a saturated accent) + colored bold fg so the pills read
 /// clearly without competing with status colors elsewhere on the row.
-fn badge_pill_style(theme: &crate::theme::Theme, letter: char) -> Style {
+pub(crate) fn badge_pill_style(theme: &crate::theme::Theme, letter: char) -> Style {
     let fg = match letter {
         'C' => theme.accent,
         'X' => theme.warn,

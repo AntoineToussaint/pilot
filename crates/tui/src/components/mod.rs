@@ -9,6 +9,7 @@ pub mod sidebar;
 pub mod table;
 pub mod task_label;
 pub mod terminal_stack;
+pub mod workspace_row;
 
 pub use right_pane::RightPane;
 pub use sidebar::{Mailbox, Sidebar, VisibleRow};

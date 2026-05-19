@@ -39,29 +39,51 @@ pub enum ColumnWidth {
     Flex { min: usize },
 }
 
+/// Horizontal alignment within a column. Drives whether the
+/// padding-spaces sit to the *right* of the content (Left — default)
+/// or to the *left* (Right). Sidebar's trailer columns (unread,
+/// status pill, relative time) are Right; the title column is Left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Left,
+    Right,
+}
+
 /// One column's spec.
 #[derive(Debug, Clone, Copy)]
 pub struct Column {
     pub width: ColumnWidth,
+    pub align: Align,
 }
 
 impl Column {
     pub fn fixed(width: usize) -> Self {
         Self {
             width: ColumnWidth::Fixed(width),
+            align: Align::Left,
         }
     }
 
     pub fn max(min: usize) -> Self {
         Self {
             width: ColumnWidth::Max { min },
+            align: Align::Left,
         }
     }
 
     pub fn flex(min: usize) -> Self {
         Self {
             width: ColumnWidth::Flex { min },
+            align: Align::Left,
         }
+    }
+
+    /// Right-align the column. Content sits flush to the right edge;
+    /// padding spaces fill the left side. Chainable: `Column::fixed(4).right()`.
+    pub fn right(mut self) -> Self {
+        self.align = Align::Right;
+        self
     }
 }
 
@@ -134,22 +156,41 @@ pub fn compute_widths(
 /// One cell — a sequence of pre-styled spans the caller assembled.
 /// `width()` is the visible cell count; `render_table` uses it to
 /// know how much padding to add or where to truncate.
+///
+/// `fill_style`, when set, styles the padding spaces this cell's
+/// renderer emits. The cursor-highlight row uses it so the row's
+/// background colour extends across every cell — without it, gaps
+/// between content and the next cell render as bare spaces and the
+/// highlight looks broken.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
     pub spans: Vec<ratatui::text::Span<'static>>,
+    pub fill_style: Option<ratatui::style::Style>,
 }
 
 impl Cell {
     pub fn new(spans: Vec<ratatui::text::Span<'static>>) -> Self {
-        Self { spans }
+        Self {
+            spans,
+            fill_style: None,
+        }
     }
 
     pub fn from_span(span: ratatui::text::Span<'static>) -> Self {
-        Self { spans: vec![span] }
+        Self {
+            spans: vec![span],
+            fill_style: None,
+        }
     }
 
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Set the padding-fill style for this cell only. Chainable.
+    pub fn fill(mut self, style: ratatui::style::Style) -> Self {
+        self.fill_style = Some(style);
+        self
     }
 
     /// Total visible width of the cell — sum of all span widths in
@@ -166,14 +207,30 @@ impl Cell {
 /// One row's cells. The slice order matches the `Column` slice
 /// passed to `render_table`. Rows can have fewer cells than columns
 /// (missing cells render as empty padded space).
+///
+/// `fill_style` is the row-level default for cell padding (any
+/// `Cell::fill_style` overrides per-cell). The sidebar's cursor row
+/// uses it so every column's padding inherits the highlight bg —
+/// callers don't have to remember to set it on each cell.
 #[derive(Debug, Clone, Default)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    pub fill_style: Option<ratatui::style::Style>,
 }
 
 impl Row {
     pub fn new(cells: Vec<Cell>) -> Self {
-        Self { cells }
+        Self {
+            cells,
+            fill_style: None,
+        }
+    }
+
+    /// Set a row-level fill style that every cell's padding inherits
+    /// (unless the cell has its own `fill_style`). Chainable.
+    pub fn fill(mut self, style: ratatui::style::Style) -> Self {
+        self.fill_style = Some(style);
+        self
     }
 }
 
@@ -196,24 +253,59 @@ pub fn render_table(
     let widths = compute_widths(columns, &cell_widths, total_width);
 
     rows.iter()
-        .map(|row| render_row(row, &widths))
+        .map(|row| render_row(row, columns, &widths))
         .collect()
 }
 
-fn render_row(row: &Row, widths: &[usize]) -> ratatui::text::Line<'static> {
+fn render_row(
+    row: &Row,
+    columns: &[Column],
+    widths: &[usize],
+) -> ratatui::text::Line<'static> {
     let mut spans: Vec<ratatui::text::Span<'static>> = Vec::new();
     for (i, target_w) in widths.iter().enumerate() {
+        // A zero-width column emits NOTHING — not even a `…`. This
+        // matches the prior hand-rolled sidebar behavior where
+        // `saturating_sub` clamped the title budget to 0 and the
+        // title text was simply omitted on cramped panes (rather
+        // than displaying a lone ellipsis where the title should
+        // be).
+        if *target_w == 0 {
+            continue;
+        }
         let empty = Cell::empty();
         let cell = row.cells.get(i).unwrap_or(&empty);
+        let align = columns.get(i).map(|c| c.align).unwrap_or(Align::Left);
+        // Fill resolution: cell override > row default > unstyled.
+        let fill_style = cell
+            .fill_style
+            .or(row.fill_style)
+            .unwrap_or_default();
         let cell_w = cell.width();
         if cell_w <= *target_w {
-            spans.extend(cell.spans.iter().cloned());
-            if cell_w < *target_w {
-                spans.push(ratatui::text::Span::raw(" ".repeat(*target_w - cell_w)));
+            let pad = *target_w - cell_w;
+            let pad_span = ratatui::text::Span::styled(" ".repeat(pad), fill_style);
+            match align {
+                Align::Left => {
+                    spans.extend(cell.spans.iter().cloned());
+                    if pad > 0 {
+                        spans.push(pad_span);
+                    }
+                }
+                Align::Right => {
+                    if pad > 0 {
+                        spans.push(pad_span);
+                    }
+                    spans.extend(cell.spans.iter().cloned());
+                }
             }
         } else {
             // Truncate: walk spans until we've consumed `target_w - 1`
-            // cells, then push a `…` to mark the cut.
+            // cells, then push a `…` to mark the cut. Truncation
+            // always clips on the right edge regardless of align —
+            // a right-aligned over-wide cell is an unusual case and
+            // clipping the left would lose the high-signal end (e.g.
+            // a status pill's label).
             let mut consumed = 0usize;
             let budget = target_w.saturating_sub(1);
             for span in &cell.spans {
@@ -356,6 +448,80 @@ mod tests {
             .collect();
         // "hell" + "…" = 5 cells.
         assert_eq!(joined, "hell…");
+    }
+
+    /// Right-aligned column puts padding on the LEFT.
+    #[test]
+    fn right_align_pads_on_left() {
+        let cols = [Column::fixed(5).right()];
+        let rows = vec![Row::new(vec![Cell::from_span(Span::raw("hi"))])];
+        let lines = render_table(&rows, &cols, 5);
+        let joined: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        // 3 spaces of padding, then "hi" flush right.
+        assert_eq!(joined, "   hi");
+    }
+
+    /// Cell fill_style styles the padding spans (not the content).
+    /// This is what extends the cursor highlight bg across a row.
+    #[test]
+    fn cell_fill_style_applies_to_padding_spans() {
+        use ratatui::style::{Color, Style};
+        let highlight = Style::default().bg(Color::Blue);
+        let cols = [Column::fixed(5)];
+        let rows = vec![Row::new(vec![
+            Cell::from_span(Span::raw("a")).fill(highlight),
+        ])];
+        let lines = render_table(&rows, &cols, 5);
+        // 2 spans: content (no fill) + padding (highlight bg).
+        assert_eq!(lines[0].spans.len(), 2);
+        assert_eq!(lines[0].spans[0].style, Style::default());
+        assert_eq!(lines[0].spans[1].style, highlight);
+        assert_eq!(lines[0].spans[1].content.as_ref(), "    ");
+    }
+
+    /// Row-level fill_style applies to every cell that hasn't
+    /// overridden it. This is the cursor-row entry point.
+    #[test]
+    fn row_fill_style_applies_to_every_cell_padding() {
+        use ratatui::style::{Color, Style};
+        let highlight = Style::default().bg(Color::Blue);
+        let cols = [Column::fixed(3), Column::fixed(3)];
+        let rows = vec![Row::new(vec![
+            Cell::from_span(Span::raw("a")),
+            Cell::from_span(Span::raw("b")),
+        ])
+        .fill(highlight)];
+        let lines = render_table(&rows, &cols, 6);
+        // Both padding spans inherit the row's fill_style.
+        let padding_spans: Vec<&ratatui::text::Span> = lines[0]
+            .spans
+            .iter()
+            .filter(|s| s.content.trim().is_empty() && !s.content.is_empty())
+            .collect();
+        assert_eq!(padding_spans.len(), 2);
+        for s in padding_spans {
+            assert_eq!(s.style, highlight);
+        }
+    }
+
+    /// Cell fill_style wins over the row default.
+    #[test]
+    fn cell_fill_overrides_row_fill() {
+        use ratatui::style::{Color, Style};
+        let row_fill = Style::default().bg(Color::Blue);
+        let cell_fill = Style::default().bg(Color::Red);
+        let cols = [Column::fixed(3)];
+        let rows = vec![Row::new(vec![
+            Cell::from_span(Span::raw("a")).fill(cell_fill),
+        ])
+        .fill(row_fill)];
+        let lines = render_table(&rows, &cols, 3);
+        // Padding span uses the cell-level fill, not the row one.
+        assert_eq!(lines[0].spans[1].style, cell_fill);
     }
 
     /// Max column picks the widest cell across all rows.
