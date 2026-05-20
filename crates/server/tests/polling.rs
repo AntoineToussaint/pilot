@@ -8,24 +8,14 @@
 //!    source doesn't poison the others.
 //! 4. The bus reaches a client connected through `Server::serve`.
 //!
-//! Every `#[tokio::test]` body is wrapped in `tokio::time::timeout`
-//! via the `async_test_body!` helper below. Backstop in case nextest's
-//! process-level slow-timeout (10s, see `.config/nextest.toml`) ever
-//! gets relaxed and a hang doesn't take down the whole suite —
-//! a panicking-with-message test is much easier to diagnose than a
-//! SIGKILLed process. 5s is comfortably under the 10s outer limit.
-
-/// Wrap a test body in a 5s `tokio::time::timeout`. Use as the FIRST
-/// expression in a `#[tokio::test]` function body so the timer starts
-/// before any test setup.
-macro_rules! async_test_body {
-    ($body:block) => {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), async move $body).await {
-            Ok(()) => (),
-            Err(_) => panic!("test exceeded 5s timeout"),
-        }
-    };
-}
+//! Per-test timeout is enforced by nextest's process-level
+//! slow-timeout (10s, see `.config/nextest.toml`) — body-wrapping
+//! every test in `tokio::time::timeout(D, async move { … })` is
+//! an anti-pattern because it masks which await actually hung.
+//! For per-await bounded waits, use
+//! `tokio::time::timeout(2s, channel.recv())` on the specific
+//! `await` that could block; the rest of the body runs without
+//! an outer wall-clock cap. See `feedback_test_timeouts.md`.
 
 use chrono::Utc;
 use pilot_core::{
@@ -151,7 +141,7 @@ impl TaskSource for CountingSource {
 // ── tick() / upsert() ───────────────────────────────────────────────
 
 #[tokio::test]
-async fn tick_broadcasts_session_upserted_for_each_task() { async_test_body!({
+async fn tick_broadcasts_session_upserted_for_each_task() {
     let config = ServerConfig::in_memory();
     let mut bus_rx = config.bus.subscribe();
 
@@ -172,10 +162,9 @@ async fn tick_broadcasts_session_upserted_for_each_task() { async_test_body!({
     }
     keys.sort();
     assert_eq!(keys, vec!["o/r#1", "o/r#2"]);
-}); }
-
+}
 #[tokio::test]
-async fn upsert_persists_to_store_so_subscribe_can_replay_it() { async_test_body!({
+async fn upsert_persists_to_store_so_subscribe_can_replay_it() {
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_task("o/r#42")).await;
 
@@ -198,10 +187,9 @@ async fn upsert_persists_to_store_so_subscribe_can_replay_it() { async_test_body
         }
         other => panic!("expected Snapshot, got {other:?}"),
     }
-}); }
-
+}
 #[tokio::test]
-async fn upsert_preserves_seen_count_across_updates() { async_test_body!({
+async fn upsert_preserves_seen_count_across_updates() {
     // The user marked the workspace read; the poller mustn't wipe
     // that out when GitHub returns the same PR again.
     let config = ServerConfig::in_memory();
@@ -227,10 +215,9 @@ async fn upsert_preserves_seen_count_across_updates() { async_test_body!({
     let parsed: pilot_core::Workspace =
         serde_json::from_str(&stored.workspace_json.unwrap()).unwrap();
     assert_eq!(parsed.seen_count, 5, "seen_count preserved");
-}); }
-
+}
 #[tokio::test]
-async fn upsert_de_duplicates_recent_activity() { async_test_body!({
+async fn upsert_de_duplicates_recent_activity() {
     // Provider returns the same activity entry on every poll. Without
     // de-dup, every tick would push another copy onto session.activity
     // and the unread-count would explode.
@@ -264,10 +251,9 @@ async fn upsert_de_duplicates_recent_activity() { async_test_body!({
     let workspace: pilot_core::Workspace =
         serde_json::from_str(&stored.workspace_json.unwrap()).unwrap();
     assert_eq!(workspace.activity.len(), 1, "activity de-duplicated");
-}); }
-
+}
 #[tokio::test]
-async fn tick_emits_provider_error_on_failure() { async_test_body!({
+async fn tick_emits_provider_error_on_failure() {
     let config = ServerConfig::in_memory();
     let mut bus_rx = config.bus.subscribe();
 
@@ -289,10 +275,9 @@ async fn tick_emits_provider_error_on_failure() { async_test_body!({
         }
         other => panic!("expected ProviderError, got {other:?}"),
     }
-}); }
-
+}
 #[tokio::test]
-async fn tick_continues_after_one_source_fails() { async_test_body!({
+async fn tick_continues_after_one_source_fails() {
     let config = ServerConfig::in_memory();
     let mut bus_rx = config.bus.subscribe();
 
@@ -314,8 +299,7 @@ async fn tick_continues_after_one_source_fails() { async_test_body!({
     }
     assert!(had_error, "failure broadcast");
     assert!(had_upsert, "successful source still ran");
-}); }
-
+}
 // ── mark_workspace_read ──────────────────────────────────────────────
 //
 // Activity-seen state is local to the user — independent of provider
@@ -324,7 +308,7 @@ async fn tick_continues_after_one_source_fails() { async_test_body!({
 // pending unread badge.
 
 #[tokio::test]
-async fn mark_workspace_read_persists_seen_count() { async_test_body!({
+async fn mark_workspace_read_persists_seen_count() {
     let config = ServerConfig::in_memory();
 
     // Seed a workspace with three activity items, none read.
@@ -367,10 +351,9 @@ async fn mark_workspace_read_persists_seen_count() { async_test_body!({
     assert_eq!(after.unread_count(), 0, "everything read after mark");
     assert_eq!(after.seen_count, 3, "seen_count bumped to activity len");
     assert!(after.last_viewed_at.is_some(), "last_viewed stamped");
-}); }
-
+}
 #[tokio::test]
-async fn mark_workspace_read_broadcasts_upsert() { async_test_body!({
+async fn mark_workspace_read_broadcasts_upsert() {
     let config = ServerConfig::in_memory();
     let (mut client, server) = channel::pair();
     let serve_config = config.clone();
@@ -405,10 +388,9 @@ async fn mark_workspace_read_broadcasts_upsert() { async_test_body!({
         }
         other => panic!("expected WorkspaceUpserted, got {other:?}"),
     }
-}); }
-
+}
 #[tokio::test]
-async fn mark_workspace_read_is_independent_of_provider_state() { async_test_body!({
+async fn mark_workspace_read_is_independent_of_provider_state() {
     // Marking read is purely a local user gesture — no provider
     // metadata changes. After re-polling the same task, seen state
     // must survive (the upsert path preserves seen_count).
@@ -436,18 +418,16 @@ async fn mark_workspace_read_is_independent_of_provider_state() { async_test_bod
     )
     .unwrap();
     assert_eq!(stored.unread_count(), 0, "still read after re-poll");
-}); }
-
+}
 #[tokio::test]
-async fn mark_workspace_read_no_op_when_workspace_missing() { async_test_body!({
+async fn mark_workspace_read_no_op_when_workspace_missing() {
     // Pressing `m` on a workspace that the daemon doesn't actually have
     // (race: TUI saw a stale snapshot) must not panic.
     let config = ServerConfig::in_memory();
     let key = pilot_core::WorkspaceKey::new("github:o/r#nope");
     polling::mark_workspace_read(&config, &key);
     assert!(config.store.get_workspace(&key).unwrap().is_none());
-}); }
-
+}
 // ── PR-attach migration ──────────────────────────────────────────────
 //
 // `migrate_session_paths_if_needed` walks the workspace's sessions
@@ -458,7 +438,7 @@ async fn mark_workspace_read_no_op_when_workspace_missing() { async_test_body!({
 // rewrites the record without doing I/O.
 
 #[tokio::test]
-async fn migrate_path_only_when_dir_missing() { async_test_body!({
+async fn migrate_path_only_when_dir_missing() {
     use pilot_core::WorkspaceSession;
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#11");
@@ -483,10 +463,9 @@ async fn migrate_path_only_when_dir_missing() { async_test_body!({
         ws.sessions[0].worktree_path, expected,
         "session path now matches the slug-derived path"
     );
-}); }
-
+}
 #[tokio::test]
-async fn migrate_no_op_when_path_already_matches() { async_test_body!({
+async fn migrate_no_op_when_path_already_matches() {
     use pilot_core::WorkspaceSession;
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#22");
@@ -506,10 +485,9 @@ async fn migrate_no_op_when_path_already_matches() { async_test_body!({
     .await;
     assert!(!moved, "path already matches → migration is a no-op");
     assert_eq!(ws.sessions[0].worktree_path, expected);
-}); }
-
+}
 #[tokio::test]
-async fn migrate_handles_zero_sessions() { async_test_body!({
+async fn migrate_handles_zero_sessions() {
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#33");
     let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
@@ -518,10 +496,9 @@ async fn migrate_handles_zero_sessions() { async_test_body!({
     )
     .await;
     assert!(!moved, "no sessions → nothing to migrate");
-}); }
-
+}
 #[tokio::test]
-async fn migrate_picks_up_pr_title_rename() { async_test_body!({
+async fn migrate_picks_up_pr_title_rename() {
     // Regression for the deferred concern flagged in the
     // worktree-slug stability tests: when a PR's title is edited
     // upstream, `worktree_slug()` returns a new string, and the
@@ -581,12 +558,11 @@ async fn migrate_picks_up_pr_title_rename() { async_test_body!({
         ws.sessions[0].worktree_path, original_path,
         "session path actually changed (not a no-op)",
     );
-}); }
-
+}
 // ── Create empty workspace (n key flow) ──────────────────────────────
 
 #[tokio::test]
-async fn create_empty_workspace_persists_with_user_name() { async_test_body!({
+async fn create_empty_workspace_persists_with_user_name() {
     let config = ServerConfig::in_memory();
     let key = polling::create_empty_workspace(&config, "fix login flow");
     assert_eq!(
@@ -606,10 +582,9 @@ async fn create_empty_workspace_persists_with_user_name() { async_test_body!({
     .unwrap();
     assert_eq!(stored.name, "fix login flow", "human-readable name kept");
     assert!(stored.pr.is_none(), "pre-PR workspace has no PR");
-}); }
-
+}
 #[tokio::test]
-async fn create_empty_workspace_disambiguates_collisions() { async_test_body!({
+async fn create_empty_workspace_disambiguates_collisions() {
     let config = ServerConfig::in_memory();
     let k1 = polling::create_empty_workspace(&config, "Refactor auth");
     let k2 = polling::create_empty_workspace(&config, "Refactor auth");
@@ -617,10 +592,9 @@ async fn create_empty_workspace_disambiguates_collisions() { async_test_body!({
     assert_eq!(k1.as_str(), "refactor-auth");
     assert_eq!(k2.as_str(), "refactor-auth-2");
     assert_eq!(k3.as_str(), "refactor-auth-3");
-}); }
-
+}
 #[tokio::test]
-async fn create_empty_workspace_falls_back_when_name_is_unsluggable() { async_test_body!({
+async fn create_empty_workspace_falls_back_when_name_is_unsluggable() {
     let config = ServerConfig::in_memory();
     let k = polling::create_empty_workspace(&config, "🚀✨");
     assert_eq!(
@@ -628,10 +602,9 @@ async fn create_empty_workspace_falls_back_when_name_is_unsluggable() { async_te
         "workspace",
         "fallback slug is 'workspace' when name has no alnum chars"
     );
-}); }
-
+}
 #[tokio::test]
-async fn create_empty_workspace_broadcasts_upserted() { async_test_body!({
+async fn create_empty_workspace_broadcasts_upserted() {
     let config = ServerConfig::in_memory();
     let (mut client, server) = channel::pair();
     let serve_config = config.clone();
@@ -654,12 +627,11 @@ async fn create_empty_workspace_broadcasts_upserted() { async_test_body!({
         }
         other => panic!("expected WorkspaceUpserted, got {other:?}"),
     }
-}); }
-
+}
 // ── Session layout persistence ───────────────────────────────────────
 
 #[tokio::test]
-async fn set_session_layout_persists_and_broadcasts() { async_test_body!({
+async fn set_session_layout_persists_and_broadcasts() {
     use pilot_core::{SessionLayout, TileTree, WorkspaceSession, SessionKind};
     let config = ServerConfig::in_memory();
 
@@ -708,10 +680,9 @@ async fn set_session_layout_persists_and_broadcasts() { async_test_body!({
     .unwrap();
     let stored_layout = &stored.sessions[0].layout;
     assert_eq!(stored_layout, &layout, "layout round-trips through the store");
-}); }
-
+}
 #[tokio::test]
-async fn set_session_layout_no_op_for_missing_session() { async_test_body!({
+async fn set_session_layout_no_op_for_missing_session() {
     use pilot_core::SessionLayout;
     let config = ServerConfig::in_memory();
     let key = pilot_core::WorkspaceKey::new("github:none");
@@ -722,12 +693,11 @@ async fn set_session_layout_no_op_for_missing_session() { async_test_body!({
         pilot_core::SessionId::new(),
         SessionLayout::default(),
     );
-}); }
-
+}
 // ── Bus → Server::serve integration ──────────────────────────────────
 
 #[tokio::test]
-async fn upserts_reach_subscribed_client_through_bus() { async_test_body!({
+async fn upserts_reach_subscribed_client_through_bus() {
     let config = ServerConfig::in_memory();
     let (mut client, server) = channel::pair();
     let serve_config = config.clone();
@@ -753,12 +723,11 @@ async fn upserts_reach_subscribed_client_through_bus() { async_test_body!({
         }
         other => panic!("expected WorkspaceUpserted, got {other:?}"),
     }
-}); }
-
+}
 // ── spawn() loop ─────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn spawn_with_no_sources_exits_quickly_and_silently() { async_test_body!({
+async fn spawn_with_no_sources_exits_quickly_and_silently() {
     // Edge case: user has no GH token + no LINEAR_API_KEY. The daemon
     // should still boot, just with an idle polling task that doesn't
     // burn CPU spinning forever.
@@ -768,8 +737,7 @@ async fn spawn_with_no_sources_exits_quickly_and_silently() { async_test_body!({
         .await
         .expect("polling task exits when sources is empty")
         .expect("no panic");
-}); }
-
+}
 // ── Per-provider filter ────────────────────────────────────────────
 
 fn make_typed_task(key: &str, role: TaskRole, is_pr: bool) -> Task {
@@ -1046,7 +1014,7 @@ fn pr_qualifiers_drop_unknown_provider_prefix() {
 }
 
 #[tokio::test]
-async fn spawn_drives_sources_on_interval() { async_test_body!({
+async fn spawn_drives_sources_on_interval() {
     let config = ServerConfig::in_memory();
     let counter = Arc::new(AtomicUsize::new(0));
     let source: Box<dyn TaskSource> = Box::new(CountingSource {
@@ -1061,10 +1029,9 @@ async fn spawn_drives_sources_on_interval() { async_test_body!({
     handle.abort();
     let n = counter.load(Ordering::SeqCst);
     assert!(n >= 2, "polled at least twice (got {n})");
-}); }
-
+}
 #[tokio::test]
-async fn rescope_removes_workspaces_with_no_active_session() { async_test_body!({
+async fn rescope_removes_workspaces_with_no_active_session() {
     use pilot_core::WorkspaceKey;
     let config = ServerConfig::in_memory();
     // Seed with an existing workspace (was in scope last poll).
@@ -1094,10 +1061,9 @@ async fn rescope_removes_workspaces_with_no_active_session() { async_test_body!(
         "stale workspace should be removed; got: {after:?}"
     );
     assert!(after.iter().any(|k| k.contains("current")));
-}); }
-
+}
 #[tokio::test]
-async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() { async_test_body!({
+async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     use pilot_core::{SessionKey, WorkspaceKey};
     use pilot_ipc::{TerminalId, TerminalKind};
     let config = ServerConfig::in_memory();
@@ -1158,10 +1124,9 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() { asyn
         .map(|r| r.key)
         .collect();
     assert!(after.iter().any(|k| k.contains("alive")));
-}); }
-
+}
 #[tokio::test]
-async fn rescope_with_empty_but_successful_poll_still_cleans_up() { async_test_body!({
+async fn rescope_with_empty_but_successful_poll_still_cleans_up() {
     // User had a wide filter, polled saw 10 PRs. Then they narrow
     // it to "only assigned to me" and they have none. polled is
     // empty but the poll itself succeeded. Existing workspaces in
@@ -1187,10 +1152,9 @@ async fn rescope_with_empty_but_successful_poll_still_cleans_up() { async_test_b
         after.is_empty(),
         "successful but empty poll should still clean up: got {after:?}"
     );
-}); }
-
+}
 #[tokio::test]
-async fn rescope_with_all_sources_failed_skips_cleanup() { async_test_body!({
+async fn rescope_with_all_sources_failed_skips_cleanup() {
     // Different case: poll attempted but every source errored
     // (network down, rate limit, …). polled is empty AND
     // any_source_succeeded is false. We must NOT remove anything;
@@ -1214,10 +1178,9 @@ async fn rescope_with_all_sources_failed_skips_cleanup() { async_test_body!({
         after.iter().any(|k| k.contains("keep-me")),
         "all-failed poll must not remove anything: got {after:?}"
     );
-}); }
-
+}
 #[tokio::test]
-async fn delete_workspace_kills_terminals_via_terminal_meta() { async_test_body!({
+async fn delete_workspace_kills_terminals_via_terminal_meta() {
     // Regression: an earlier implementation parsed the backend_key
     // prefix to find which terminals belong to a workspace. After
     // tmux session names switched to `pilot-{repo}-{kind}-{pid}-{n}`
@@ -1281,8 +1244,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() { async_test_body!
         config.store.list_workspaces().unwrap().is_empty(),
         "workspace deleted from store"
     );
-}); }
-
+}
 // ── Issue → PR collapsing (closingIssuesReferences) ─────────────────
 
 fn make_issue_task(key: &str) -> Task {
@@ -1307,7 +1269,7 @@ fn make_pr_closing(pr_key: &str, closes: &[&str]) -> Task {
 }
 
 #[tokio::test]
-async fn pr_polled_after_issue_collapses_them_into_one_row() { async_test_body!({
+async fn pr_polled_after_issue_collapses_them_into_one_row() {
     // Issue is polled first → standalone workspace (zero sessions).
     // PR shows up claiming the issue via closingIssuesReferences →
     // the empty issue workspace folds into the PR's silently AND
@@ -1352,10 +1314,9 @@ async fn pr_polled_after_issue_collapses_them_into_one_row() { async_test_body!(
         saw_merged_notice,
         "silent merges must emit WorkspaceMerged for the footer notice",
     );
-}); }
-
+}
 #[tokio::test]
-async fn issue_polled_after_pr_routes_into_pr_workspace() { async_test_body!({
+async fn issue_polled_after_pr_routes_into_pr_workspace() {
     // PR polled first (carrying closes_issues); issue polled next.
     // The issue's standalone workspace must NOT get created — its
     // update must flow into the PR workspace instead.
@@ -1374,8 +1335,7 @@ async fn issue_polled_after_pr_routes_into_pr_workspace() { async_test_body!({
     assert_eq!(ws.pr.as_ref().unwrap().id.key, "o/r#141");
     assert_eq!(ws.gh_issues.len(), 1);
     assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
-}); }
-
+}
 /// Seed an issue workspace with a fabricated session and return its
 /// id alongside the workspace key. Used by the merge-prompt + confirm
 /// tests below — both want the same starting state.
@@ -1419,7 +1379,7 @@ async fn seed_issue_with_session(
 }
 
 #[tokio::test]
-async fn live_issue_session_stalls_merge_and_emits_pending_event() { async_test_body!({
+async fn live_issue_session_stalls_merge_and_emits_pending_event() {
     // Safety net: an issue workspace with live sessions must NOT be
     // silently absorbed by its closing PR. The daemon emits a
     // `WorkspaceMergePending` event and leaves both rows alone until
@@ -1456,10 +1416,9 @@ async fn live_issue_session_stalls_merge_and_emits_pending_event() { async_test_
         }
     }
     assert!(saw_pending, "expected a WorkspaceMergePending broadcast");
-}); }
-
+}
 #[tokio::test]
-async fn confirm_merge_accept_runs_the_merge() { async_test_body!({
+async fn confirm_merge_accept_runs_the_merge() {
     // After the user says "yes" to the prompt, the merge runs the
     // same as the silent path: sessions move, terminal_meta rebadges,
     // issue row disappears.
@@ -1489,10 +1448,9 @@ async fn confirm_merge_accept_runs_the_merge() { async_test_body!({
         .find(|s| s.id == session_id)
         .expect("session must have moved");
     assert_eq!(moved.workspace_key, pr_key);
-}); }
-
+}
 #[tokio::test]
-async fn adopt_sessions_moves_sessions_between_workspaces() { async_test_body!({
+async fn adopt_sessions_moves_sessions_between_workspaces() {
     use pilot_core::WorkspaceKey;
 
     let config = ServerConfig::in_memory();
@@ -1536,10 +1494,9 @@ async fn adopt_sessions_moves_sessions_between_workspaces() { async_test_body!({
         .find(|s| s.id == session_id)
         .expect("session must have moved to target");
     assert_eq!(moved.workspace_key, target_key);
-}); }
-
+}
 #[tokio::test]
-async fn adopt_sessions_into_self_is_a_noop() { async_test_body!({
+async fn adopt_sessions_into_self_is_a_noop() {
     let config = ServerConfig::in_memory();
     let (source_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
     polling::handle_adopt_sessions(&config, source_key.clone(), source_key.clone()).await;
@@ -1557,10 +1514,9 @@ async fn adopt_sessions_into_self_is_a_noop() { async_test_body!({
         ws.sessions.iter().any(|s| s.id == session_id),
         "self-adopt must leave the session in place",
     );
-}); }
-
+}
 #[tokio::test]
-async fn adopt_sessions_rewrites_terminal_meta() { async_test_body!({
+async fn adopt_sessions_rewrites_terminal_meta() {
     use pilot_core::{SessionKey, WorkspaceKey};
     use pilot_ipc::{TerminalId, TerminalKind};
 
@@ -1584,10 +1540,9 @@ async fn adopt_sessions_rewrites_terminal_meta() { async_test_body!({
         entry.0, target_session_key,
         "terminal_meta must repoint at the adopt target",
     );
-}); }
-
+}
 #[tokio::test]
-async fn confirm_merge_reject_pins_against_re_prompting() { async_test_body!({
+async fn confirm_merge_reject_pins_against_re_prompting() {
     // User says "no": both workspaces survive, and a subsequent
     // poll of the same PR must NOT re-emit WorkspaceMergePending
     // — otherwise the modal would haunt them every 60 seconds.
@@ -1621,10 +1576,9 @@ async fn confirm_merge_reject_pins_against_re_prompting() { async_test_body!({
         config.store.get_workspace(&issue_key).unwrap().is_some(),
         "rejecting must keep the issue workspace intact",
     );
-}); }
-
+}
 #[tokio::test]
-async fn body_text_referencing_another_pr_does_not_delete_that_pr() { async_test_body!({
+async fn body_text_referencing_another_pr_does_not_delete_that_pr() {
     // CRITICAL regression: GitHub's `#N` syntax is shared by issues
     // AND PRs. Our body-text fallback parser can't distinguish them
     // from the body alone — a PR whose body says "Closes #141" where
@@ -1650,10 +1604,9 @@ async fn body_text_referencing_another_pr_does_not_delete_that_pr() { async_test
         "PR #141 must survive — a PR body referencing another PR via \
          `Closes #N` must NOT delete the referenced PR's workspace",
     );
-}); }
-
+}
 #[tokio::test]
-async fn pr_with_no_closing_issues_leaves_other_workspaces_alone() { async_test_body!({
+async fn pr_with_no_closing_issues_leaves_other_workspaces_alone() {
     // Sanity: the migration only collapses workspaces it has an
     // explicit closing-link for. An unrelated issue keeps its own
     // row.
@@ -1663,10 +1616,9 @@ async fn pr_with_no_closing_issues_leaves_other_workspaces_alone() { async_test_
 
     let count = config.store.list_workspaces().unwrap().len();
     assert_eq!(count, 2, "unlinked issue + PR keep separate rows");
-}); }
-
+}
 #[tokio::test]
-async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() { async_test_body!({
+async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
     // Pre-seed terminal_meta as if a terminal had been spawned
     // against the issue's session_key. After the PR merges the
     // issue, the meta entry must be rebadged to the PR's key —
@@ -1699,8 +1651,7 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() { async_test_bo
         entry.0, pr_session_key,
         "terminal_meta entry must point at the PR's session_key after merge",
     );
-}); }
-
+}
 // ── retry_after_secs propagation ──────────────────────────────────────
 
 struct ThrottledSource {
@@ -1729,7 +1680,7 @@ impl TaskSource for ThrottledSource {
 }
 
 #[tokio::test]
-async fn tick_surfaces_retry_after_from_throttled_source() { async_test_body!({
+async fn tick_surfaces_retry_after_from_throttled_source() {
     // The polling driver consults `TickOutcome::retry_after_secs`
     // to extend the sleep between ticks. Verify the per-source
     // hint propagates through `tick_with_state` unchanged.
@@ -1741,10 +1692,9 @@ async fn tick_surfaces_retry_after_from_throttled_source() { async_test_body!({
     let mut state = polling::TickState::default();
     let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
     assert_eq!(outcome.retry_after_secs, Some(600));
-}); }
-
+}
 #[tokio::test]
-async fn tick_max_aggregates_retry_after_across_sources() { async_test_body!({
+async fn tick_max_aggregates_retry_after_across_sources() {
     // Two sources both throttled with different hints — the outer
     // driver sleeps the LONGER, not the average. Tighter would
     // re-fire the worse-throttled source mid-window.
@@ -1762,8 +1712,7 @@ async fn tick_max_aggregates_retry_after_across_sources() { async_test_body!({
     let mut state = polling::TickState::default();
     let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
     assert_eq!(outcome.retry_after_secs, Some(900));
-}); }
-
+}
 #[tokio::test]
 async fn tick_no_retry_after_when_no_source_supplied_a_hint() {
     // Generic retryable errors (no hint) must NOT populate the

@@ -1559,7 +1559,7 @@ mod tests {
         env.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
         cfg.repos.insert(
             "tensorzero/tensorzero".into(),
-            pilot_config::RepoConfig { env, mounts: vec![] },
+            pilot_config::RepoConfig { env, mounts: vec![], scripts: vec![] },
         );
 
         let out = env_for_repo(&cfg, "tensorzero/tensorzero");
@@ -1582,7 +1582,7 @@ mod tests {
         env.insert("X".into(), "1".into());
         cfg.repos.insert(
             "Owner/Repo".into(),
-            pilot_config::RepoConfig { env, mounts: vec![] },
+            pilot_config::RepoConfig { env, mounts: vec![], scripts: vec![] },
         );
         // Different case should miss.
         assert!(env_for_repo(&cfg, "owner/repo").is_empty());

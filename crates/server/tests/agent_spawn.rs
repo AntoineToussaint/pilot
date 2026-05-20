@@ -4,8 +4,6 @@
 //! subprocesses through a real PTY — gated behind `#[ignore]` and
 //! replaced with focused unit tests for the building blocks.
 
-#[allow(unused_macros)]
-macro_rules! async_test_body { ($body:block) => { match tokio::time::timeout(std::time::Duration::from_secs(5), async move $body).await { Ok(()) => (), Err(_) => panic!("test exceeded 5s timeout") } }; }
 
 use pilot_server::agent_spawn::{ProxyProvider, ProxyTarget, inject_proxy_env};
 use std::collections::HashMap;

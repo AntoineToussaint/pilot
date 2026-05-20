@@ -1,5 +1,3 @@
-#[allow(unused_macros)]
-macro_rules! async_test_body { ($body:block) => { match tokio::time::timeout(std::time::Duration::from_secs(5), async move $body).await { Ok(()) => (), Err(_) => panic!("test exceeded 5s timeout") } }; }
 
 use pilot_agents::{Agent, SpawnCtx};
 use pilot_ipc::{AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, channel};
@@ -54,7 +52,7 @@ fi
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stream_json_agent_run_emits_normalized_events_until_process_exit() { async_test_body!({
+async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
     let temp = tempfile::tempdir().unwrap();
     let program = make_fake_claude_script(temp.path());
     let mut config = ServerConfig::in_memory();
@@ -162,8 +160,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() { as
     assert!(saw_tool_finished);
     assert!(saw_usage);
     assert!(saw_turn_finished);
-}); }
-
+}
 async fn wait_for_started(client: &mut pilot_ipc::Client) -> AgentRunId {
     loop {
         match recv_agent_event(client).await {
