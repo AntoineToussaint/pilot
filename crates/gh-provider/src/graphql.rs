@@ -881,38 +881,123 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         recent_activity: activities,
         additions: pr.additions,
         deletions: pr.deletions,
-        closes_issues: extract_closes_issues(pr),
+        closes_issues: extract_closes_issues(pr, &repo),
     }
 }
 
-/// Build the `closes_issues` list for a PR Task from GitHub's
-/// structured `closingIssuesReferences` field — the authoritative
-/// source. GitHub only populates that field for actual ISSUES the
-/// PR closes; PR-to-PR `Closes #N` references are silently ignored
-/// upstream (which is correct: PRs don't close PRs).
+/// Build the `closes_issues` list for a PR Task. Two sources,
+/// merged:
 ///
-/// We deliberately do NOT fall back to body-text parsing here. Body
-/// text shares `#N` syntax between issues and PRs, so a parser
-/// can't tell them apart from prose alone — using the fallback led
-/// to PR rows being silently absorbed into other PRs that
-/// "referenced" them via the same `#N` syntax. Trade-off: if GitHub
-/// is briefly slow to register a closing-link after a PR opens, we
-/// won't collapse the issue + PR rows until the next poll picks
-/// the structured ref up. That's an acceptable annoyance compared
-/// to losing PR rows entirely.
-fn extract_closes_issues(pr: &GqlPr) -> Vec<TaskId> {
-    let Some(refs) = pr.closing_issues_references.as_ref() else {
-        return Vec::new();
-    };
+/// 1. GitHub's structured `closingIssuesReferences` field — the
+///    authoritative source. GitHub populates it for any closing
+///    keyword in the PR BODY, and only for actual ISSUES the PR
+///    closes (PR-to-PR `Closes #N` is silently ignored upstream,
+///    which is correct).
+/// 2. Closing keywords in the PR TITLE — fallback when (1) is
+///    empty or missed an entry. Users routinely write
+///    `feat: add foo (closes #31)` in the title without restating
+///    it in the body; GitHub's auto-linker doesn't always pick
+///    that up, especially for cross-fork or manually-edited PRs.
+///
+/// We deliberately do NOT parse PR BODY text. Body shares `#N`
+/// syntax between issues and PRs and contains arbitrary prose,
+/// so a parser there led to PR rows being silently absorbed into
+/// other PRs that "referenced" them. Title is one line of
+/// user-authored intent — far safer.
+fn extract_closes_issues(pr: &GqlPr, pr_repo: &str) -> Vec<TaskId> {
     let mut out: Vec<TaskId> = Vec::new();
-    for ci in &refs.nodes {
+    if let Some(refs) = pr.closing_issues_references.as_ref() {
+        for ci in &refs.nodes {
+            let id = TaskId {
+                source: "github".into(),
+                key: format!("{}#{}", ci.repository.name_with_owner, ci.number),
+            };
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    // Fallback: title parsing. Repo defaults to the PR's own repo
+    // (`pr_repo` — extracted from the PR's URL by the caller) —
+    // title closing-keywords almost always reference same-repo
+    // issues. Cross-repo references in titles use the fully-qualified
+    // `owner/repo#N` syntax that this parser doesn't handle yet —
+    // left out by design.
+    for n in parse_closes_from_title(&pr.title) {
         let id = TaskId {
             source: "github".into(),
-            key: format!("{}#{}", ci.repository.name_with_owner, ci.number),
+            key: format!("{pr_repo}#{n}"),
         };
         if !out.contains(&id) {
             out.push(id);
         }
+    }
+    out
+}
+
+/// Scan a PR title for closing keywords + `#N`. Returns the issue
+/// numbers in title order, deduped. Recognizes `close`, `closes`,
+/// `closed`, `closing`, `fix`, `fixes`, `fixed`, `fixing`, `resolve`,
+/// `resolves`, `resolved`, `resolving` (GitHub's full keyword list).
+/// Case-insensitive. Tolerant of `:` / whitespace between the
+/// keyword and `#N`.
+pub(crate) fn parse_closes_from_title(title: &str) -> Vec<u64> {
+    const KEYWORDS: &[&str] = &[
+        "close", "closes", "closed", "closing",
+        "fix", "fixes", "fixed", "fixing",
+        "resolve", "resolves", "resolved", "resolving",
+    ];
+    let lower = title.to_ascii_lowercase();
+    let bytes_lower = lower.as_bytes();
+    let mut out: Vec<u64> = Vec::new();
+    let mut i = 0;
+    while i < bytes_lower.len() {
+        // Match any keyword at position `i` that is bounded by a
+        // non-letter character on the left (start of string OR
+        // previous char is non-alphabetic) — so `unclose` /
+        // `fixed-it` don't false-trigger.
+        let left_ok = i == 0 || !bytes_lower[i - 1].is_ascii_alphabetic();
+        if left_ok {
+            for &kw in KEYWORDS {
+                let kw_bytes = kw.as_bytes();
+                if bytes_lower[i..].starts_with(kw_bytes) {
+                    let after = i + kw_bytes.len();
+                    // Right-bound: must be followed by non-letter so
+                    // `closer` doesn't match `close`.
+                    let right_ok = after >= bytes_lower.len()
+                        || !bytes_lower[after].is_ascii_alphabetic();
+                    if !right_ok {
+                        continue;
+                    }
+                    // Skip whitespace + optional ':' between keyword
+                    // and `#N`.
+                    let mut j = after;
+                    while j < bytes_lower.len()
+                        && (bytes_lower[j].is_ascii_whitespace() || bytes_lower[j] == b':')
+                    {
+                        j += 1;
+                    }
+                    // Expect `#` then digits.
+                    if j < bytes_lower.len() && bytes_lower[j] == b'#' {
+                        j += 1;
+                        let num_start = j;
+                        while j < bytes_lower.len() && bytes_lower[j].is_ascii_digit() {
+                            j += 1;
+                        }
+                        if j > num_start
+                            && let Ok(n) = lower[num_start..j].parse::<u64>()
+                            && !out.contains(&n)
+                        {
+                            out.push(n);
+                        }
+                    }
+                    // Advance past this match and continue scanning.
+                    i = after;
+                    break;
+                }
+            }
+        }
+        i += 1;
     }
     out
 }
@@ -1689,6 +1774,99 @@ mod tests {
         });
         let task = pr_to_task(&pr, "alice");
         assert_eq!(task.closes_issues.len(), 1);
+    }
+
+    // ── Title-based fallback for closes/fixes/resolves ─────────────
+
+    /// Bare title parser — happy paths.
+    #[test]
+    fn parse_closes_from_title_basic_forms() {
+        assert_eq!(parse_closes_from_title("foo (closes #31)"), vec![31]);
+        assert_eq!(parse_closes_from_title("fixes #42"), vec![42]);
+        assert_eq!(parse_closes_from_title("Resolves: #7"), vec![7]);
+        assert_eq!(
+            parse_closes_from_title("feat: thing (closes #5, fixes #6)"),
+            vec![5, 6]
+        );
+    }
+
+    /// Case-insensitive.
+    #[test]
+    fn parse_closes_from_title_case_insensitive() {
+        assert_eq!(parse_closes_from_title("CLOSES #1"), vec![1]);
+        assert_eq!(parse_closes_from_title("Closing #2"), vec![2]);
+        assert_eq!(parse_closes_from_title("FIX #3"), vec![3]);
+    }
+
+    /// Word boundaries — `enclosed` / `prefixing` must not match.
+    #[test]
+    fn parse_closes_from_title_respects_word_boundaries() {
+        assert_eq!(parse_closes_from_title("enclosed #5"), Vec::<u64>::new());
+        assert_eq!(parse_closes_from_title("prefixed #6"), Vec::<u64>::new());
+        assert_eq!(parse_closes_from_title("closer #7"), Vec::<u64>::new());
+    }
+
+    /// No `#` → no match (don't grab plain numbers in titles).
+    #[test]
+    fn parse_closes_from_title_requires_hash() {
+        assert_eq!(parse_closes_from_title("fixes 12"), Vec::<u64>::new());
+    }
+
+    /// Dedupe + preserve title order.
+    #[test]
+    fn parse_closes_from_title_dedupes_in_order() {
+        assert_eq!(
+            parse_closes_from_title("closes #1 and also fixes #1, closes #2"),
+            vec![1, 2]
+        );
+    }
+
+    /// Real PR title from the user's screenshot.
+    #[test]
+    fn parse_closes_from_title_user_example() {
+        let title = "Add dynamic credential source for per-request secrets (closes #31)";
+        assert_eq!(parse_closes_from_title(title), vec![31]);
+    }
+
+    /// Empty closingIssuesReferences but title says "(closes #N)"
+    /// → title fallback fires and the PR's `closes_issues` contains
+    /// the issue. This is the bug the user reported.
+    #[test]
+    fn extract_closes_issues_falls_back_to_title_when_graphql_empty() {
+        // `make_pr` builds URL `https://github.com/o/r/pull/N` so the
+        // repo extracted from URL is `o/r`.
+        let mut pr = make_pr(100, "alice");
+        pr.title =
+            "Add dynamic credential source for per-request secrets (closes #31)".into();
+        pr.closing_issues_references = None; // GitHub didn't link it
+        let task = pr_to_task(&pr, "alice");
+        let keys: Vec<&str> =
+            task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, vec!["o/r#31"]);
+    }
+
+    /// When BOTH GraphQL and title yield issues, results are merged
+    /// and deduped (no double-counting if title repeats a graphql ref).
+    /// Title fallback uses the PR's own repo (`o/r` from `make_pr`'s
+    /// URL); graphql refs carry their own `name_with_owner` (here
+    /// the same repo, deliberately, so the dedupe path is exercised).
+    #[test]
+    fn extract_closes_issues_merges_and_dedupes_graphql_plus_title() {
+        let mut pr = make_pr(100, "alice");
+        pr.title = "feat: foo (closes #1, fixes #2)".into();
+        pr.closing_issues_references = Some(GqlClosingIssues {
+            nodes: vec![GqlClosingIssue {
+                number: 1,
+                repository: GqlIssueRepo {
+                    name_with_owner: "o/r".into(),
+                },
+            }],
+        });
+        let task = pr_to_task(&pr, "alice");
+        let keys: Vec<&str> =
+            task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        // #1 from graphql (deduped against title's #1) + #2 from title.
+        assert_eq!(keys, vec!["o/r#1", "o/r#2"]);
     }
 
     // ── Query-shape regression guards ─────────────────────────────

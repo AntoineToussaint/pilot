@@ -58,6 +58,67 @@ pub fn strip_html_comments(s: &str) -> String {
     out
 }
 
+/// Strip the handful of HTML tags that show up in GitHub PR/issue
+/// bodies and bot comments. Conservative: only the tags below are
+/// touched; everything else passes through unchanged so we don't
+/// accidentally eat user content that looks like `<foo>`.
+///
+/// - `<br>` / `<br/>` / `<br />` → newline (matches HTML semantics).
+/// - `<details>` / `</details>` / `<summary>` / `</summary>` →
+///   removed (tag only — the inner text stays). Codex's review
+///   bot wraps "About Codex" notes in `<details><summary>…`, which
+///   our markdown renderer otherwise shows as literal tags.
+/// - Self-closing variants of those tags (`<details />`, etc.) also
+///   get stripped.
+///
+/// Case-insensitive on the tag name. Attributes inside the opening
+/// tag (`<details open>`) are tolerated.
+pub fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Find the closing `>`. If absent, treat the `<` as
+            // literal (don't lose data on malformed input).
+            if let Some(end_rel) = s[i + 1..].find('>') {
+                let tag_body = &s[i + 1..i + 1 + end_rel];
+                if matches_known_tag(tag_body, "br") {
+                    out.push('\n');
+                    i += 1 + end_rel + 1;
+                    continue;
+                }
+                if matches_known_tag(tag_body, "details")
+                    || matches_known_tag(tag_body, "summary")
+                {
+                    i += 1 + end_rel + 1;
+                    continue;
+                }
+            }
+        }
+        let ch_end = next_char_boundary(s, i);
+        out.push_str(&s[i..ch_end]);
+        i = ch_end;
+    }
+    out
+}
+
+/// Check whether the body of a tag (the part between `<` and `>`)
+/// is the given tag name. Tolerates: leading `/` (closing tag),
+/// attributes (`<details open>`), trailing `/` (self-closing
+/// `<br/>`), and case differences.
+fn matches_known_tag(tag_body: &str, name: &str) -> bool {
+    let stripped = tag_body.strip_prefix('/').unwrap_or(tag_body).trim();
+    // First whitespace-delimited token is the tag name; the rest is
+    // attributes. Strip a trailing `/` for self-closing forms.
+    let head = stripped
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    head.eq_ignore_ascii_case(name)
+}
+
 fn next_char_boundary(s: &str, i: usize) -> usize {
     let mut j = i + 1;
     while j < s.len() && !s.is_char_boundary(j) {
@@ -73,7 +134,12 @@ fn next_char_boundary(s: &str, i: usize) -> usize {
 ///
 /// `width` of 0 is treated as "no wrap"; useful in tests.
 pub fn render_body(body: &str, width: u16, max_lines: usize) -> Vec<Line<'static>> {
-    let cleaned = strip_html_comments(body);
+    // Two-pass cleanup: drop tooling annotations (`<!-- … -->`)
+    // first, then strip the small HTML tag set we know about
+    // (`<br>`, `<details>`, `<summary>`). Order matters because a
+    // comment-containing HTML tag (rare but possible) should have
+    // its outer comment removed first.
+    let cleaned = strip_html_tags(&strip_html_comments(body));
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut in_fence = false;
     // Collapse runs of blank lines to at most one, and drop the
@@ -464,6 +530,61 @@ fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── strip_html_tags ────────────────────────────────────────
+
+    #[test]
+    fn strip_html_tags_replaces_br_with_newline() {
+        assert_eq!(strip_html_tags("hi<br/>there"), "hi\nthere");
+        assert_eq!(strip_html_tags("hi<br>there"), "hi\nthere");
+        assert_eq!(strip_html_tags("hi<br />there"), "hi\nthere");
+        // Case-insensitive.
+        assert_eq!(strip_html_tags("hi<BR>there"), "hi\nthere");
+    }
+
+    #[test]
+    fn strip_html_tags_removes_details_and_summary_keeping_content() {
+        let s = "<details><summary>About</summary>body text</details>";
+        let out = strip_html_tags(s);
+        assert_eq!(out, "Aboutbody text");
+    }
+
+    /// Codex's review-bot template: `<details><summary>[i] About …`.
+    /// Our renderer needs to drop the wrappers but keep the inner
+    /// text so the user actually sees the note.
+    #[test]
+    fn strip_html_tags_codex_review_template() {
+        let s = "<details> <summary>[i]  About Codex in GitHub</summary>\
+                 <br/>\
+                 Codex has been enabled.";
+        let out = strip_html_tags(s);
+        assert_eq!(
+            out,
+            " [i]  About Codex in GitHub\nCodex has been enabled."
+        );
+    }
+
+    #[test]
+    fn strip_html_tags_tolerates_attributes_in_tag() {
+        assert_eq!(strip_html_tags("<details open>x</details>"), "x");
+    }
+
+    /// Tags NOT in the safelist pass through unchanged — we don't
+    /// want to accidentally eat user content like `<foo>` in a code
+    /// snippet.
+    #[test]
+    fn strip_html_tags_leaves_unknown_tags_alone() {
+        assert_eq!(strip_html_tags("a <foo>b</foo> c"), "a <foo>b</foo> c");
+    }
+
+    /// Malformed `<` with no closing `>` is treated as literal —
+    /// pasted-snippet code like `if x < 3 {` must survive.
+    #[test]
+    fn strip_html_tags_unclosed_lt_preserves_literal() {
+        assert_eq!(strip_html_tags("x < y"), "x < y");
+    }
+
+    // ── strip_html_comments ────────────────────────────────────
 
     #[test]
     fn strip_html_comments_removes_single_block() {
