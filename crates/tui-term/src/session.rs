@@ -44,6 +44,10 @@ pub struct TermSession {
     /// True when the viewport has been scrolled up into scrollback history.
     /// Used to display the "[SCROLLBACK]" indicator.
     scrolled_back: bool,
+    /// Cached ratatui buffer for the dirty-tracking renderer (see
+    /// `GhosttyTerminal`). `None` until the first render fills it;
+    /// resized + rebuilt automatically when the area changes.
+    shadow: Option<ratatui::buffer::Buffer>,
     /// Explicit `!Send + !Sync` marker — see struct doc.
     _not_send: std::marker::PhantomData<*mut ()>,
 }
@@ -152,6 +156,7 @@ impl TermSession {
             last_output_at: Instant::now(),
             recent_output: Vec::with_capacity(4096),
             scrolled_back: false,
+            shadow: None,
             _not_send: std::marker::PhantomData,
         })
     }
@@ -216,7 +221,9 @@ impl TermSession {
         self.size
     }
 
-    /// Access terminal + render state for widget rendering.
+    /// Access terminal + render state for widget rendering. The
+    /// returned `&mut Option<Buffer>` is the dirty-tracking widget's
+    /// shadow cache — pass it through to `GhosttyTerminal::new`.
     pub fn render_data(
         &mut self,
     ) -> (
@@ -224,12 +231,14 @@ impl TermSession {
         &mut libghostty_vt::RenderState<'static>,
         &mut libghostty_vt::render::RowIterator<'static>,
         &mut libghostty_vt::render::CellIterator<'static>,
+        &mut Option<ratatui::buffer::Buffer>,
     ) {
         (
             &mut self.terminal,
             &mut self.render_state,
             &mut self.row_iter,
             &mut self.cell_iter,
+            &mut self.shadow,
         )
     }
 
