@@ -3767,11 +3767,11 @@ mod parse_login_tests {
     }
 
     #[test]
-    fn at_prefix_stripped_only_once() {
-        // Only one leading `@` is stripped — `@@alice` would become
-        // `@alice`. Pathological input, but the test pins the rule
-        // so a future refactor doesn't accidentally strip every `@`.
-        assert_eq!(parse_login_list("@@alice"), vec!["@alice"]);
+    fn all_leading_at_prefixes_stripped() {
+        // `trim_start_matches('@')` strips repeatedly — `@@alice`
+        // becomes `alice`. Pathological input from a user typo but
+        // strip-everything is the more forgiving choice.
+        assert_eq!(parse_login_list("@@alice"), vec!["alice"]);
     }
 }
 
