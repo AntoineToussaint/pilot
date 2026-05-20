@@ -85,6 +85,7 @@ fn render_card_header(
     theme: &crate::theme::Theme,
     now: chrono::DateTime<chrono::Utc>,
     teaser_cells: usize,
+    viewer_logins: &std::collections::HashMap<String, String>,
 ) -> Line<'static> {
     use pilot_core::ActivityKind;
     let (kind_icon, kind_label) = match activity.kind {
@@ -152,7 +153,19 @@ fn render_card_header(
         format!("{kind_icon}  {kind_label}  "),
         kind_style,
     ));
-    spans.push(Span::styled(activity.author.clone(), header_style));
+    // Replace the bare author login with `@me` when it matches any
+    // viewer identity (one per provider source — github, linear, …).
+    // Single source of truth so the same convention works on PRs
+    // I authored AND PRs I just review.
+    let author_display = if viewer_logins
+        .values()
+        .any(|login| login == &activity.author)
+    {
+        "@me".to_string()
+    } else {
+        activity.author.clone()
+    };
+    spans.push(Span::styled(author_display, header_style));
 
     let ts = crate::components::sidebar::relative_time(activity.created_at, now);
     spans.push(Span::styled(
@@ -215,6 +228,10 @@ pub struct RightPane {
     /// unit-testable without rendering a `Frame`. See
     /// [`crate::components::activity_feed::ActivityFeed`].
     feed: crate::components::activity_feed::ActivityFeed,
+    /// Per-source authenticated logins. Populated from
+    /// `IpcEvent::ViewerIdentities`. Activity bylines authored by
+    /// the local user render as `@me` instead of their bare login.
+    viewer_logins: std::collections::HashMap<String, String>,
     /// How many activity cards rendered in the last frame. Updated
     /// during `render`; consumed by `clamp_scroll_to_cursor` to
     /// keep the focused row on-screen as j/k walk through long
@@ -241,12 +258,15 @@ pub struct RightPane {
     /// Agent the `f` (fix) shortcut spawns. Configurable via YAML
     /// (`setup.default_agent`); defaults to `"claude"`.
     default_agent: String,
-    /// Collapse state for the task-body / description section. Default
-    /// collapsed: the activity feed is what users come to the inbox
-    /// for; the body is reference material they can pop open with `b`
-    /// when they need it. Without this default a 200-line PR
-    /// description squeezed the activity feed off-screen.
-    task_body_collapsed: bool,
+    /// Visibility cycle for the task-body / description section.
+    /// Default `Collapsed`: the activity feed is what users come to
+    /// the inbox for; the body is reference material they can pop
+    /// open with `b`. `b` cycles
+    /// `Collapsed → Preview → Full → Collapsed`. Preview caps the
+    /// height at `task_body_max_rows`; Full drops the cap entirely
+    /// so a long PR description is fully readable (the activity
+    /// feed shrinks accordingly).
+    task_body_view: TaskBodyView,
     /// Resolved cap on the task-body expanded height, sourced from
     /// `~/.pilot/config.yaml::ui.task_body_max_rows` (default 8).
     task_body_max_rows: u16,
@@ -292,6 +312,38 @@ struct ClickHits {
 /// tests pin every truth-table cell (focused × workspace ×
 /// cursor-unread) directly without going through the rest of the
 /// pane's state.
+/// Three-state visibility for the PR/issue description section.
+/// `b` cycles forward: Collapsed → Preview → Full → Collapsed.
+/// Stored on `RightPane::task_body_view`; the renderer + constraint
+/// math fan out from this single field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskBodyView {
+    /// Header-only row, body hidden. Default for fresh workspaces.
+    #[default]
+    Collapsed,
+    /// Body visible but capped at `task_body_max_rows`. The trailer
+    /// shows `+N more lines` when content exceeds the cap.
+    Preview,
+    /// Body visible with no cap — the description gets as many rows
+    /// as it needs. The activity feed shrinks to fit underneath.
+    Full,
+}
+
+impl TaskBodyView {
+    /// Next state on `b` keypress.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Collapsed => Self::Preview,
+            Self::Preview => Self::Full,
+            Self::Full => Self::Collapsed,
+        }
+    }
+
+    pub fn is_visible(self) -> bool {
+        !matches!(self, Self::Collapsed)
+    }
+}
+
 pub fn should_arm_mark_timer(
     focused: bool,
     workspace: Option<&pilot_core::Workspace>,
@@ -316,6 +368,7 @@ impl RightPane {
             workspace: None,
             comment_scroll: 0,
             feed: crate::components::activity_feed::ActivityFeed::new(),
+            viewer_logins: std::collections::HashMap::new(),
             last_visible_cards: 1,
             // Empty workspace → collapsed; cleared on first non-empty
             // workspace landing in `set_workspace`.
@@ -324,7 +377,7 @@ impl RightPane {
             mark_timer: crate::confirm_latch::TimerLatch::new(),
             last_marked_read: None,
             default_agent: "claude".to_string(),
-            task_body_collapsed: true,
+            task_body_view: TaskBodyView::Collapsed,
             task_body_max_rows: pilot_config::UiDefaults::default().task_body_max_rows,
             auto_mark_delay: pilot_config::UiDefaults::default().auto_mark_delay,
             click_hits: ClickHits::default(),
@@ -349,6 +402,17 @@ impl RightPane {
     /// Replace the default agent at runtime (used by `apply_config`).
     pub fn set_default_agent(&mut self, agent: impl Into<String>) {
         self.default_agent = agent.into();
+    }
+
+    /// Install the daemon-announced viewer identities (source →
+    /// login). Activity bylines whose author matches one of these
+    /// logins render as `@me` instead of the bare username. Called
+    /// from the orchestrator on `IpcEvent::ViewerIdentities`.
+    pub fn set_viewer_logins(
+        &mut self,
+        logins: std::collections::HashMap<String, String>,
+    ) {
+        self.viewer_logins = logins;
     }
 
     /// Returns the auto-mark progress as `(elapsed_ratio, label)` if
@@ -558,7 +622,10 @@ impl RightPane {
             "right_pane.handle_mouse_click",
         );
         if Some(row) == self.click_hits.body_header_row {
-            self.task_body_collapsed = !self.task_body_collapsed;
+            // Click the description header to advance the cycle —
+            // same effect as pressing `b`. Three taps cycles back
+            // to collapsed.
+            self.task_body_view = self.task_body_view.cycle();
             return true;
         }
         if Some(row) == self.click_hits.activity_header_row {
@@ -978,7 +1045,14 @@ impl RightPane {
                 is_selected: self.feed.is_selected(i),
                 focused,
             };
-            cards.push(render_card_header(&state, activity, theme, now, TEASER_CELLS));
+            cards.push(render_card_header(
+                &state,
+                activity,
+                theme,
+                now,
+                TEASER_CELLS,
+                &self.viewer_logins,
+            ));
             if state.is_expanded {
                 cards.extend(render_card_body(activity, theme, &state, body_width, BODY_INDENT));
             }
@@ -1485,7 +1559,7 @@ impl RightPane {
         if !self.has_task_body() {
             return Constraint::Length(0);
         }
-        if self.task_body_collapsed {
+        if !self.task_body_view.is_visible() {
             return Constraint::Length(1);
         }
         // Content + 1 for the `▼ Description` header line.
@@ -1501,16 +1575,30 @@ impl RightPane {
         let Some(body) = self.task_body_str() else {
             return 0;
         };
-        let cap = self.task_body_max_rows;
+        // Preview caps at `task_body_max_rows`; Full drops the cap
+        // entirely (uses `usize::MAX` → `render_body` treats that as
+        // "no truncation"). Layout solver still bounds the upper
+        // height via `Constraint::Max(...)`, so a 500-line body
+        // won't actually push everything off-screen.
+        let cap = match self.task_body_view {
+            TaskBodyView::Collapsed => 0,
+            TaskBodyView::Preview => self.task_body_max_rows as usize,
+            TaskBodyView::Full => usize::MAX,
+        };
+        if cap == 0 {
+            return 0;
+        }
         // Width-aware render so wrapping affects the count. 80 is a
         // conservative default — actual render uses `area.width`,
         // which is always ≥ this for any practical terminal.
-        let rendered = crate::components::comment_render::render_body(
-            body,
-            80,
-            cap as usize,
-        );
-        (rendered.len() as u16).min(cap)
+        let rendered = crate::components::comment_render::render_body(body, 80, cap);
+        let len = rendered.len() as u16;
+        // For Preview, cap to max_rows; Full lets the layout solver
+        // bound it.
+        match self.task_body_view {
+            TaskBodyView::Preview => len.min(self.task_body_max_rows),
+            _ => len,
+        }
     }
 
     fn has_task_body(&self) -> bool {
@@ -1544,28 +1632,39 @@ impl RightPane {
             }
         };
         // First row of the section is the toggle header — clicks
-        // here flip task_body_collapsed.
+        // here advance `task_body_view` through the 3-state cycle.
         self.click_hits.body_header_row = if area.height > 0 {
             Some(area.y)
         } else {
             None
         };
         let body = body.as_str();
-        let glyph = if self.task_body_collapsed { "▶" } else { "▼" };
+        // Three-state glyph: ▶ collapsed, ▼ preview-capped, ▽ full.
+        // The downward-pointing open triangle for Full is just a
+        // visual hint that "this isn't capped anymore" — the (b)
+        // suffix below tells the user which key cycles forward.
+        let (glyph, suffix) = match self.task_body_view {
+            TaskBodyView::Collapsed => ("▶", "  (b)"),
+            TaskBodyView::Preview => ("▼", "  (b)"),
+            TaskBodyView::Full => ("▽", "  (b · full)"),
+        };
         let header = Line::from(vec![
             Span::styled(
                 format!("{glyph} Description"),
                 Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  (b)",
+                suffix.to_string(),
                 Style::default().fg(theme.text_dim),
             ),
         ]);
         let mut lines = vec![header];
-        if !self.task_body_collapsed {
+        if self.task_body_view.is_visible() {
             // Render at most `area.height - 1` body rows — anything
             // more would overflow the rect ratatui carved out for us.
+            // In Full mode the layout solver already gave us a tall
+            // rect, so `body_rows` lets `render_body` produce as
+            // many lines as the area allows.
             let body_rows = area.height.saturating_sub(1) as usize;
             if body_rows > 0 {
                 lines.extend(crate::components::comment_render::render_body(
@@ -1588,10 +1687,11 @@ impl RightPane {
         frame.render_widget(para, inner);
     }
 
-    /// Toggle the task-body collapse state. Bound to `b` in the
-    /// right pane's handler; visible in the keymap hint.
+    /// Advance the description view cycle: Collapsed → Preview →
+    /// Full → Collapsed. Bound to `b` in the right pane's handler
+    /// + the description-header click target.
     pub fn toggle_task_body(&mut self) {
-        self.task_body_collapsed = !self.task_body_collapsed;
+        self.task_body_view = self.task_body_view.cycle();
     }
 }
 
@@ -1775,12 +1875,21 @@ mod click_dispatch_tests {
     }
 
     #[test]
-    fn body_header_row_click_toggles_collapse() {
+    fn body_header_row_click_cycles_view() {
+        use super::TaskBodyView;
         let mut pane = RightPane::new(PaneId::new(0));
         pane.click_hits.body_header_row = Some(5);
-        let before = pane.task_body_collapsed;
+        // Fresh pane is Collapsed.
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
+        // Click: Collapsed → Preview.
         assert!(pane.handle_mouse_click(0, 5));
-        assert_ne!(pane.task_body_collapsed, before);
+        assert_eq!(pane.task_body_view, TaskBodyView::Preview);
+        // Click: Preview → Full.
+        assert!(pane.handle_mouse_click(0, 5));
+        assert_eq!(pane.task_body_view, TaskBodyView::Full);
+        // Click: Full → Collapsed (wraps).
+        assert!(pane.handle_mouse_click(0, 5));
+        assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
 
     #[test]

@@ -159,6 +159,10 @@ pub struct Model<T: TerminalAdapter> {
     pub terminal: T,
     /// Z-stack of modal ids — top is rendered last + receives input.
     pub modal_stack: Vec<Id>,
+    /// Authenticated user logins per provider source. Populated
+    /// from `IpcEvent::ViewerIdentities`. Passed into RightPane so
+    /// activity bylines authored by the local user render as `@me`.
+    pub viewer_logins: std::collections::HashMap<String, String>,
     /// Which pane has focus when no modal is active.
     focus: PaneFocus,
     /// Three pane wrappers held as typed fields so the orchestrator
@@ -365,6 +369,7 @@ impl<T: TerminalAdapter> Model<T> {
             app,
             terminal,
             modal_stack: Vec::new(),
+            viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
             sidebar: Sidebar::new(SIDEBAR_PID),
             right: Right::new(RIGHT_PID),
@@ -2610,6 +2615,21 @@ impl<T: TerminalAdapter> Model<T> {
     /// first Snapshot, apply any pending CLI preselect. Also feeds
     /// the polling modal so it can detect "first task arrived".
     pub fn handle_daemon_event(&mut self, event: IpcEvent) {
+        // Viewer identities — fold into the local map and forward
+        // to RightPane so activity bylines can render `@me`. This
+        // arrives once per daemon connection (just after Snapshot)
+        // and re-emits whenever the gh client's authenticated user
+        // changes (token rotation).
+        if let IpcEvent::ViewerIdentities { logins } = &event {
+            for (source, login) in logins {
+                self.viewer_logins
+                    .insert(source.clone(), login.clone());
+            }
+            self.right.set_viewer_logins(self.viewer_logins.clone());
+            self.redraw = true;
+            return;
+        }
+
         let is_snapshot = matches!(&event, IpcEvent::Snapshot { .. });
         let is_spawn =
             matches!(&event, IpcEvent::TerminalSpawned { .. } | IpcEvent::TerminalFocusRequested { .. });

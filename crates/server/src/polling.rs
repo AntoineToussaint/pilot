@@ -389,6 +389,7 @@ pub async fn sources_for(
     setup: &pilot_core::PersistedSetup,
     bus: tokio::sync::broadcast::Sender<Event>,
     state: &mut TickState,
+    viewer_identities: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
@@ -431,6 +432,39 @@ pub async fn sources_for(
                         // the result is cheap and keeps the cache in
                         // sync with what GhSource holds.
                         let client = client.with_filters(pr_qualifiers, issue_qualifiers);
+                        // Cache + announce the authenticated viewer
+                        // login so the TUI can render `@me` for the
+                        // local user's bylines. Diffs the cache so we
+                        // only broadcast when the value actually
+                        // changes (token rotation, credential
+                        // refresh, …) — quiet on the steady-state
+                        // poll loop.
+                        let viewer = client.username().to_string();
+                        if !viewer.is_empty() {
+                            let mut logins =
+                                viewer_identities.lock().expect("viewer_identities poisoned");
+                            let entry = logins
+                                .iter_mut()
+                                .find(|(src, _)| src == "github");
+                            let changed = match entry {
+                                Some((_, existing)) if *existing == viewer => false,
+                                Some((_, existing)) => {
+                                    *existing = viewer.clone();
+                                    true
+                                }
+                                None => {
+                                    logins.push(("github".into(), viewer.clone()));
+                                    true
+                                }
+                            };
+                            let snapshot = logins.clone();
+                            drop(logins);
+                            if changed {
+                                let _ = bus.send(Event::ViewerIdentities {
+                                    logins: snapshot,
+                                });
+                            }
+                        }
                         state.gh_client = Some(client.clone());
                         sources.push(Box::new(GhSource {
                             client,
@@ -483,9 +517,13 @@ pub async fn default_sources(
         selected_scopes: Default::default(),
     };
     // No persistent state — this helper is for ad-hoc / test paths
-    // where a fresh client per call is the right behavior.
+    // where a fresh client per call is the right behavior. Viewer
+    // identities also get a throwaway slot: ad-hoc callers don't
+    // need the cached value visible to other connections.
     let mut throwaway_state = TickState::default();
-    sources_for(&setup, bus, &mut throwaway_state).await
+    let throwaway_viewers =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    sources_for(&setup, bus, &mut throwaway_state, throwaway_viewers).await
 }
 
 /// Run one poll tick: every source is called once and its tasks are
@@ -856,7 +894,13 @@ pub async fn run_one_tick(config: &ServerConfig) -> Option<u64> {
     // No other writer needs the lock briefly during a tick, so this
     // is safe and avoids the lock-twice + state-drift risk.
     let mut state = config.poll_state.lock().await;
-    let sources = sources_for(&setup, config.bus.clone(), &mut state).await;
+    let sources = sources_for(
+        &setup,
+        config.bus.clone(),
+        &mut state,
+        config.viewer_identities.clone(),
+    )
+    .await;
     if sources.is_empty() {
         // User disabled every provider (or credentials all
         // failed to resolve). Treat as "deliberately empty

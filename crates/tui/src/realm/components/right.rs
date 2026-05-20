@@ -48,6 +48,16 @@ impl Right {
         self.inner.set_default_agent(agent);
     }
 
+    /// Forward viewer identities (source → login) to the inner pane
+    /// so activity bylines authored by the local user render as `@me`.
+    /// Called by the orchestrator on `IpcEvent::ViewerIdentities`.
+    pub fn set_viewer_logins(
+        &mut self,
+        logins: std::collections::HashMap<String, String>,
+    ) {
+        self.inner.set_viewer_logins(logins);
+    }
+
     /// Drain queued IPC commands.
     pub fn drain_cmds(&mut self) -> Vec<IpcCommand> {
         std::mem::take(&mut self.pending_cmds)

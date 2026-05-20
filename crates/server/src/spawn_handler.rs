@@ -354,24 +354,40 @@ pub async fn handle_spawn(
             // the "needs input" label sticks. 4 KiB is enough to
             // capture a single prompt's render + a screen of context,
             // small enough that next-screen content evicts the old.
-            const DETECT_WINDOW: usize = 4 * 1024;
+            // 8 KiB (was 4 KiB) — Claude renders long bash commands
+            // (multi-pipeline `git diff … | comm -12 …` style) that
+            // can push the `Do you want to proceed?` prompt past
+            // 4 KiB of tail, missing the detection on those screens.
+            // 8 KiB still evicts old prompts within ~1 screen of
+            // follow-up output.
+            const DETECT_WINDOW: usize = 8 * 1024;
             let tail_start = buf.len().saturating_sub(DETECT_WINDOW);
             let detect_window = &buf[tail_start..];
             let Some(new_state) = agent.detect_state(detect_window) else {
                 return;
             };
-            // Trace-level so it doesn't drown the log under normal
-            // load (claude emits 100+ chunks/sec during streaming).
-            // Activate with `RUST_LOG=pilot_server=trace` when the
-            // user reports "the pill never showed" so we can confirm
-            // whether detect_state ever saw Asking on this terminal
-            // at all vs. saw it but downstream lost the event.
+            // Trace-level on steady-state runs (claude emits 100+
+            // chunks/sec during streaming and we don't want to drown
+            // the log). Only ELEVATE to debug-level on every Asking
+            // detection so a missing `?` pill is easy to bisect from
+            // the log without re-running with full trace verbosity.
+            // Toggle full trace via `RUST_LOG=pilot_server=trace`.
             tracing::trace!(
                 terminal_id = ?id,
                 buf_len = buf.len(),
                 detected = ?new_state,
                 "detect_state ran",
             );
+            if new_state == pilot_ipc::AgentState::Asking {
+                tracing::debug!(
+                    terminal_id = ?id,
+                    buf_len = buf.len(),
+                    tail_tip = %String::from_utf8_lossy(
+                        &detect_window[detect_window.len().saturating_sub(120)..]
+                    ),
+                    "detect_state → Asking",
+                );
+            }
             if new_state == pilot_ipc::AgentState::Asking {
                 *last_asking_at = Some(std::time::Instant::now());
             }

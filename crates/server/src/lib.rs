@@ -234,6 +234,14 @@ pub struct ServerConfig {
     /// dismiss, and 30s later the long-lived loop would re-prompt
     /// (each has its own `TickState`).
     pub poll_state: Arc<Mutex<polling::TickState>>,
+    /// Authenticated user logins per provider source ("github" →
+    /// "AntoineToussaint"). Populated by the polling layer when
+    /// each provider client initializes; consumed by the Subscribe
+    /// handler so reconnecting TUIs immediately know which authors
+    /// in activity bylines are the local user (→ render as `@me`).
+    /// `std::sync::Mutex` (not tokio's) because the data is tiny
+    /// and read/written from sync contexts only — no await needed.
+    pub viewer_identities: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl ServerConfig {
@@ -303,6 +311,7 @@ impl ServerConfig {
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: pilot_ipc::PrincipalId::local(),
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
+            viewer_identities: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -377,6 +386,20 @@ impl Server {
                                 workspaces,
                                 terminals,
                             });
+                            // Replay cached viewer identities so a
+                            // reconnecting TUI can render `@me` for
+                            // the local user's bylines without
+                            // waiting for the next poll cycle.
+                            let logins = self
+                                .config
+                                .viewer_identities
+                                .lock()
+                                .expect("viewer_identities poisoned")
+                                .clone();
+                            if !logins.is_empty() {
+                                let _ =
+                                    conn.tx.send(Event::ViewerIdentities { logins });
+                            }
                         }
                         pilot_ipc::Command::Spawn {
                             session_key,
@@ -580,9 +603,13 @@ impl Server {
                                 // cached GhClient (held in TickState)
                                 // is reused / refreshed atomically.
                                 let mut state = cfg.poll_state.lock().await;
-                                let sources =
-                                    polling::sources_for(&setup, cfg.bus.clone(), &mut state)
-                                        .await;
+                                let sources = polling::sources_for(
+                                    &setup,
+                                    cfg.bus.clone(),
+                                    &mut state,
+                                    cfg.viewer_identities.clone(),
+                                )
+                                .await;
                                 let outcome = if sources.is_empty() {
                                     // User just disabled every provider.
                                     // Treat as a deliberately empty

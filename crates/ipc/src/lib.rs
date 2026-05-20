@@ -464,6 +464,15 @@ pub enum Event {
         workspaces: Vec<pilot_core::Workspace>,
         terminals: Vec<TerminalSnapshot>,
     },
+    /// Authenticated user's login per provider source ("github" →
+    /// "AntoineToussaint", etc.). Emitted once after the daemon's
+    /// gh/linear client(s) initialize; the TUI uses these logins
+    /// to render activity authored by the current user as `@me`
+    /// instead of the bare login. Empty vec is valid — providers
+    /// that don't have an identified user just omit themselves.
+    ViewerIdentities {
+        logins: Vec<(String, String)>,
+    },
     /// A workspace was created or updated.
     /// Boxed because Workspace is several KB once activity is
     /// populated; keeping the `Event` enum slim avoids worst-case
