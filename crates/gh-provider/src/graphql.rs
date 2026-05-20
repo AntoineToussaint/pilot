@@ -516,6 +516,90 @@ mutation($id: ID!) {
 }
 "#;
 
+/// Resolve a GitHub login to its node ID. Needed because the
+/// reviewer/assignee mutations below take node IDs, not bare
+/// usernames — the rest of GitHub's GraphQL surface uses IDs
+/// internally. One round-trip per login (cheap; user nodes are
+/// permanent so caching could be added later if anyone touches
+/// this hot path).
+const USER_ID_QUERY: &str = r#"
+query($login: String!) {
+  user(login: $login) { id }
+}
+"#;
+
+pub fn user_id_body(login: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": USER_ID_QUERY,
+        "variables": { "login": login },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlUserIdResponse {
+    pub data: Option<GqlUserIdData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlUserIdData {
+    pub user: Option<GqlUserNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlUserNode {
+    pub id: String,
+}
+
+/// GraphQL mutation to add reviewers to a PR. `union: true` so the
+/// new reviewer set is the UNION of existing + provided (no
+/// accidental overwrites of someone else's previously-requested
+/// reviewers).
+const REQUEST_REVIEWS_MUTATION: &str = r#"
+mutation($id: ID!, $userIds: [ID!]) {
+  requestReviews(input: { pullRequestId: $id, userIds: $userIds, union: true }) {
+    pullRequest { id }
+  }
+}
+"#;
+
+pub fn request_reviews_body(
+    pull_request_node_id: &str,
+    user_node_ids: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "query": REQUEST_REVIEWS_MUTATION,
+        "variables": {
+            "id": pull_request_node_id,
+            "userIds": user_node_ids,
+        },
+    })
+}
+
+/// GraphQL mutation to add assignees to any Assignable (PR or
+/// Issue — both implement the interface).
+const ADD_ASSIGNEES_MUTATION: &str = r#"
+mutation($id: ID!, $userIds: [ID!]!) {
+  addAssigneesToAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
+    assignable { __typename }
+  }
+}
+"#;
+
+pub fn add_assignees_body(
+    assignable_node_id: &str,
+    user_node_ids: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "query": ADD_ASSIGNEES_MUTATION,
+        "variables": {
+            "id": assignable_node_id,
+            "userIds": user_node_ids,
+        },
+    })
+}
+
 pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     serde_json::json!({
         "query": MERGE_PR_MUTATION,

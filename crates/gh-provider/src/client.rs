@@ -1114,6 +1114,105 @@ impl GhClient {
         Ok(graphql::pr_details_to_activities(&node))
     }
 
+    /// Resolve a GitHub login to its node ID via GraphQL. Used as
+    /// the lookup step before `requestReviews` / `addAssignees` —
+    /// those mutations take node IDs, not logins.
+    pub async fn lookup_user_id(&self, login: &str) -> Result<String, GhError> {
+        self.acquire_or_block("user lookup query")?;
+        let body = graphql::user_id_body(login);
+        let response: graphql::GqlUserIdResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let id = response
+            .data
+            .and_then(|d| d.user)
+            .map(|u| u.id)
+            .ok_or_else(|| {
+                GhError::Graphql(format!("user `{login}` not found"))
+            })?;
+        Ok(id)
+    }
+
+    /// Request reviews from the given logins on the PR. Adds to the
+    /// existing reviewer set (`union: true`) so existing review
+    /// requests aren't dropped. Resolves logins → user IDs first.
+    pub async fn request_reviewers(
+        &self,
+        pull_request_node_id: &str,
+        logins: &[String],
+    ) -> Result<(), GhError> {
+        if logins.is_empty() {
+            return Ok(());
+        }
+        let mut user_ids: Vec<String> = Vec::with_capacity(logins.len());
+        for login in logins {
+            user_ids.push(self.lookup_user_id(login).await?);
+        }
+        self.acquire_or_block("requestReviews mutation")?;
+        let body = graphql::request_reviews_body(pull_request_node_id, &user_ids);
+        let response: graphql::GqlResponse =
+            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("requestReviews errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
+    /// Add assignees to a PR or Issue (both are `Assignable`).
+    /// Resolves logins → user IDs first.
+    pub async fn add_assignees(
+        &self,
+        assignable_node_id: &str,
+        logins: &[String],
+    ) -> Result<(), GhError> {
+        if logins.is_empty() {
+            return Ok(());
+        }
+        let mut user_ids: Vec<String> = Vec::with_capacity(logins.len());
+        for login in logins {
+            user_ids.push(self.lookup_user_id(login).await?);
+        }
+        self.acquire_or_block("addAssigneesToAssignable mutation")?;
+        let body = graphql::add_assignees_body(assignable_node_id, &user_ids);
+        let response: graphql::GqlResponse =
+            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("addAssigneesToAssignable errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);

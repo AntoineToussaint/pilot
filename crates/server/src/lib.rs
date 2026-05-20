@@ -691,6 +691,22 @@ impl Server {
                             )
                             .await;
                         }
+                        pilot_ipc::Command::RequestReviewers { workspace_key, logins } => {
+                            polling::handle_request_reviewers(
+                                &self.config,
+                                workspace_key,
+                                logins,
+                            )
+                            .await;
+                        }
+                        pilot_ipc::Command::AddAssignees { workspace_key, logins } => {
+                            polling::handle_add_assignees(
+                                &self.config,
+                                workspace_key,
+                                logins,
+                            )
+                            .await;
+                        }
                     }
                 }
                 bus = bus_rx.recv() => {

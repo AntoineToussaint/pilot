@@ -2052,6 +2052,143 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     });
 }
 
+/// Handle `Command::RequestReviewers`: add the given GitHub logins
+/// as requested reviewers on the workspace's PR via GraphQL.
+/// `union: true` on the mutation so existing reviewers aren't
+/// dropped. Idempotent at GitHub's end — re-requesting an already
+/// requested reviewer is a no-op.
+///
+/// On success, kicks a `Refresh` so the inbox reflects the new
+/// reviewer set without waiting for the next 60s poll. Errors
+/// surface as a `ProviderError` so the TUI footer flags it.
+pub async fn handle_request_reviewers(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
+    let emit_err = |msg: &str| {
+        let _ = config.bus.send(Event::ProviderError {
+            source: "reviewers".into(),
+            message: msg.to_string(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+    };
+    if logins.is_empty() {
+        return;
+    }
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("request_reviewers: workspace {workspace_key} not found"));
+        return;
+    };
+    let Some(pr) = ws.pr.as_ref() else {
+        emit_err(&format!(
+            "request_reviewers: workspace {workspace_key} has no PR"
+        ));
+        return;
+    };
+    let Some(node_id) = pr.node_id.as_deref() else {
+        emit_err("request_reviewers: PR has no node_id (need to repoll first)");
+        return;
+    };
+
+    let chain = CredentialChain::new()
+        .with(EnvProvider::new("GH_TOKEN"))
+        .with(EnvProvider::new("GITHUB_TOKEN"))
+        .with(CommandProvider::new("gh", &["auth", "token"]));
+    let cred = match chain.resolve("github").await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_err(&format!("github credentials: {e}"));
+            return;
+        }
+    };
+    let client = match GhClient::from_credential(cred).await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_err(&format!("github client init: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = client.request_reviewers(node_id, &logins).await {
+        tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e}");
+        emit_err(&format!("request reviewers failed: {e}"));
+    } else {
+        tracing::info!(
+            "requested reviewers {logins:?} on workspace {workspace_key}"
+        );
+    }
+}
+
+/// Handle `Command::AddAssignees`: add the given logins as
+/// assignees on the workspace's PR or issue (both implement
+/// GraphQL's `Assignable` interface). Symmetric with
+/// `handle_request_reviewers` — same credential chain, same
+/// error-surface pattern.
+pub async fn handle_add_assignees(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
+    let emit_err = |msg: &str| {
+        let _ = config.bus.send(Event::ProviderError {
+            source: "assignees".into(),
+            message: msg.to_string(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+    };
+    if logins.is_empty() {
+        return;
+    }
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("add_assignees: workspace {workspace_key} not found"));
+        return;
+    };
+    // Prefer the PR's node_id; fall back to the first issue. Both
+    // are `Assignable`s.
+    let node_id = ws
+        .pr
+        .as_ref()
+        .and_then(|p| p.node_id.as_deref())
+        .or_else(|| {
+            ws.gh_issues
+                .first()
+                .and_then(|t| t.node_id.as_deref())
+        });
+    let Some(node_id) = node_id else {
+        emit_err("add_assignees: workspace has no PR / issue with a node_id");
+        return;
+    };
+
+    let chain = CredentialChain::new()
+        .with(EnvProvider::new("GH_TOKEN"))
+        .with(EnvProvider::new("GITHUB_TOKEN"))
+        .with(CommandProvider::new("gh", &["auth", "token"]));
+    let cred = match chain.resolve("github").await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_err(&format!("github credentials: {e}"));
+            return;
+        }
+    };
+    let client = match GhClient::from_credential(cred).await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_err(&format!("github client init: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = client.add_assignees(node_id, &logins).await {
+        tracing::warn!("add_assignees {workspace_key} {logins:?}: {e}");
+        emit_err(&format!("add assignees failed: {e}"));
+    } else {
+        tracing::info!(
+            "added assignees {logins:?} on workspace {workspace_key}"
+        );
+    }
+}
+
 /// Handle `Command::FetchPrDetails`: pull the workspace's PR
 /// review-thread activity from GitHub (the field the inbox-scan
 /// query deliberately omits), merge it into the workspace's

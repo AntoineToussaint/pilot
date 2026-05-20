@@ -385,6 +385,25 @@ pub enum Command {
     MergePr {
         workspace_key: pilot_core::WorkspaceKey,
     },
+    /// Request reviews on the workspace's PR from the given GitHub
+    /// logins. Adds to the existing reviewer set (no replacement).
+    /// Only meaningful when the focused workspace's primary task is
+    /// a PR — daemon resolves the PR's node ID from its stored task
+    /// and calls the `requestReviews` GraphQL mutation. Logins
+    /// flow through unchanged; the daemon resolves each to a node
+    /// ID before issuing the mutation.
+    RequestReviewers {
+        workspace_key: pilot_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
+    /// Add assignees to the workspace's PR or issue. Works on any
+    /// `Assignable` (both PRs and issues). Same flow as
+    /// `RequestReviewers` — daemon resolves logins → node IDs and
+    /// calls the `addAssigneesToAssignable` mutation.
+    AddAssignees {
+        workspace_key: pilot_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
     /// Lazy-fetch the workspace's PR-detail activity (review-thread
     /// comments). The inbox-scan query intentionally skips
     /// `reviewThreads` for cost reasons; this command back-fills
