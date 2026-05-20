@@ -250,8 +250,14 @@ pub struct Model<T: TerminalAdapter> {
     /// top modal. Holds the workspace whose PR we'll request
     /// reviewers on.
     pending_review_request: Option<pilot_core::WorkspaceKey>,
+    /// Candidate logins shown in the `RequestReviewers` picker.
+    /// Indices from `Msg::ChoicePicked` index back into this Vec.
+    /// Cleared after the picker dispatches.
+    review_choices: Vec<String>,
     /// Same shape but for the add-assignees flow.
     pending_assignees_request: Option<pilot_core::WorkspaceKey>,
+    /// Candidate logins shown in the `AddAssignees` picker.
+    assignees_choices: Vec<String>,
     /// Workspaces that fell out of scope (filter / scope change) but
     /// have running terminals — the daemon won't auto-remove those.
     /// Each `WorkspaceOutOfScope` event lands here; one at a time
@@ -406,7 +412,9 @@ impl<T: TerminalAdapter> Model<T> {
             layout: LayoutCtx::new(),
             pending_reply: None,
             pending_review_request: None,
+            review_choices: Vec::new(),
             pending_assignees_request: None,
+            assignees_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
@@ -1123,42 +1131,13 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::CreateWorkspace { name });
                 }
             }
-            Some(Id::RequestReviewers) => {
-                let Some(workspace_key) = self.pending_review_request.take() else {
-                    return cmds;
-                };
-                let logins = parse_login_list(&text);
-                if logins.is_empty() {
-                    return cmds;
-                }
-                tracing::info!(
-                    workspace_key = %workspace_key,
-                    logins = ?logins,
-                    "requesting reviewers"
-                );
-                cmds.push(IpcCommand::RequestReviewers {
-                    workspace_key,
-                    logins,
-                });
-            }
-            Some(Id::AddAssignees) => {
-                let Some(workspace_key) = self.pending_assignees_request.take() else {
-                    return cmds;
-                };
-                let logins = parse_login_list(&text);
-                if logins.is_empty() {
-                    return cmds;
-                }
-                tracing::info!(
-                    workspace_key = %workspace_key,
-                    logins = ?logins,
-                    "adding assignees"
-                );
-                cmds.push(IpcCommand::AddAssignees {
-                    workspace_key,
-                    logins,
-                });
-            }
+            // RequestReviewers / AddAssignees used to go through an
+            // Input modal but were migrated to a `Choice::multi`
+            // picker — see `mount_request_reviewers` /
+            // `handle_choice_picked`. The corresponding Input arms
+            // were removed; an Input modal under those Ids never
+            // mounts anymore, so a stray submit would just fall
+            // through to the default arm below.
             _ => {
                 // Unknown input source — silently drop. The pop
                 // above already cleared the modal.
@@ -1199,6 +1178,55 @@ impl<T: TerminalAdapter> Model<T> {
                 });
                 self.status.notice = Some(Notice::new(
                     format!("adopted sessions: {source_key} → {target_key}"),
+                    NoticeSeverity::Info,
+                ));
+                self.redraw = true;
+            }
+            return cmds;
+        }
+        // Reviewer picker (Id::RequestReviewers) — picks index
+        // into `review_choices`. Empty pick drops the slot.
+        if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
+            let logins: Vec<String> = picks
+                .iter()
+                .filter_map(|i| self.review_choices.get(*i).cloned())
+                .collect();
+            self.review_choices.clear();
+            self.pop_modal();
+            let workspace_key = self.pending_review_request.take();
+            if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                let count = logins.len();
+                cmds.push(IpcCommand::RequestReviewers {
+                    workspace_key,
+                    logins,
+                });
+                self.status.notice = Some(Notice::new(
+                    format!("requested {count} reviewer(s)"),
+                    NoticeSeverity::Info,
+                ));
+                self.redraw = true;
+            }
+            return cmds;
+        }
+        // Assignees picker (Id::AddAssignees) — same shape.
+        if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
+            let logins: Vec<String> = picks
+                .iter()
+                .filter_map(|i| self.assignees_choices.get(*i).cloned())
+                .collect();
+            self.assignees_choices.clear();
+            self.pop_modal();
+            let workspace_key = self.pending_assignees_request.take();
+            if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                let count = logins.len();
+                cmds.push(IpcCommand::AddAssignees {
+                    workspace_key,
+                    logins,
+                });
+                self.status.notice = Some(Notice::new(
+                    format!("added {count} assignee(s)"),
                     NoticeSeverity::Info,
                 ));
                 self.redraw = true;
@@ -2402,22 +2430,34 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Mount the "request reviewers" input modal for the given
-    /// workspace's PR. Submit → `handle_input_submitted` →
-    /// `Command::RequestReviewers`. Accepts comma- / whitespace-
-    /// separated logins (optional `@` prefix). No-op when an input
-    /// modal of the same id is already on top.
+    /// Mount the "request reviewers" multi-select picker for the
+    /// given workspace's PR. Candidates are gathered from the
+    /// workspace's known people; Space toggles, Enter submits →
+    /// `Msg::ChoicePicked(indices)` → `handle_choice_picked` looks
+    /// up the chosen logins in `review_choices` and dispatches
+    /// `Command::RequestReviewers`.
     pub(crate) fn mount_request_reviewers(&mut self, workspace_key: pilot_core::WorkspaceKey) {
-        use crate::realm::components::input::Input;
+        use crate::realm::components::choice::Choice;
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
         use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
             return;
         }
-        let label = workspace_key.to_string();
-        let modal = Input::new(format!("Request reviewers on {label}"))
+        let candidates = self.gather_candidate_logins(&workspace_key, true);
+        if candidates.is_empty() {
+            self.status.notice = Some(Notice::new(
+                "no candidate reviewers yet — interact with the PR first",
+                NoticeSeverity::Info,
+            ));
+            self.redraw = true;
+            return;
+        }
+        let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
+        self.review_choices = candidates;
+        self.pending_review_request = Some(workspace_key);
+        let modal = Choice::multi("Request review from", labels)
             .title("Add reviewers")
-            .placeholder("@alice, @bob (comma-separated)")
-            .with_validator(|s: &str| !s.trim().is_empty());
+            .label(|s: &String| s.clone());
         let _ = self.app.mount(
             Id::RequestReviewers,
             Box::new(modal),
@@ -2425,24 +2465,34 @@ impl<T: TerminalAdapter> Model<T> {
         );
         self.modal_stack.push(Id::RequestReviewers);
         let _ = self.app.active(&Id::RequestReviewers);
-        self.pending_review_request = Some(workspace_key);
         self.redraw = true;
     }
 
-    /// Mount the "add assignees" input modal for the given
-    /// workspace's PR or issue. Same shape as
+    /// Mount the "add assignees" multi-select picker for the
+    /// workspace's PR or issue. Symmetric with
     /// `mount_request_reviewers`.
     pub(crate) fn mount_add_assignees(&mut self, workspace_key: pilot_core::WorkspaceKey) {
-        use crate::realm::components::input::Input;
+        use crate::realm::components::choice::Choice;
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
         use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
             return;
         }
-        let label = workspace_key.to_string();
-        let modal = Input::new(format!("Add assignees on {label}"))
+        let candidates = self.gather_candidate_logins(&workspace_key, false);
+        if candidates.is_empty() {
+            self.status.notice = Some(Notice::new(
+                "no candidate assignees yet — interact with the task first",
+                NoticeSeverity::Info,
+            ));
+            self.redraw = true;
+            return;
+        }
+        let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
+        self.assignees_choices = candidates;
+        self.pending_assignees_request = Some(workspace_key);
+        let modal = Choice::multi("Assign to", labels)
             .title("Add assignees")
-            .placeholder("@alice, @bob (comma-separated)")
-            .with_validator(|s: &str| !s.trim().is_empty());
+            .label(|s: &String| s.clone());
         let _ = self.app.mount(
             Id::AddAssignees,
             Box::new(modal),
@@ -2450,8 +2500,72 @@ impl<T: TerminalAdapter> Model<T> {
         );
         self.modal_stack.push(Id::AddAssignees);
         let _ = self.app.active(&Id::AddAssignees);
-        self.pending_assignees_request = Some(workspace_key);
         self.redraw = true;
+    }
+
+    /// Build the candidate-logins list for the picker. Source set
+    /// is the workspace's known people: existing reviewers,
+    /// assignees, activity authors. Excludes the local user
+    /// (no self-review) and either the existing reviewers (when
+    /// building for the reviewer picker — they're already on the
+    /// PR) OR the existing assignees (for the assignees picker).
+    /// Dedupes; first-seen order preserved so the most relevant
+    /// faces are at the top.
+    fn gather_candidate_logins(
+        &self,
+        workspace_key: &pilot_core::WorkspaceKey,
+        exclude_existing_reviewers: bool,
+    ) -> Vec<String> {
+        let Some(ws) = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .map(|(_, w)| w)
+        else {
+            return Vec::new();
+        };
+        let mut excluded: std::collections::HashSet<String> = self
+            .viewer_logins
+            .values()
+            .cloned()
+            .collect();
+        if exclude_existing_reviewers {
+            if let Some(pr) = &ws.pr {
+                for r in &pr.reviewers {
+                    excluded.insert(r.clone());
+                }
+            }
+        } else if let Some(pr) = &ws.pr {
+            for a in &pr.assignees {
+                excluded.insert(a.clone());
+            }
+        }
+        let mut out: Vec<String> = Vec::new();
+        let push = |login: &str, out: &mut Vec<String>| {
+            if !login.is_empty()
+                && !excluded.contains(login)
+                && !out.iter().any(|l| l == login)
+            {
+                out.push(login.to_string());
+            }
+        };
+        if let Some(pr) = &ws.pr {
+            for a in &pr.assignees {
+                push(a, &mut out);
+            }
+            for r in &pr.reviewers {
+                push(r, &mut out);
+            }
+        }
+        for issue in &ws.gh_issues {
+            for a in &issue.assignees {
+                push(a, &mut out);
+            }
+        }
+        for act in &ws.activity {
+            push(&act.author, &mut out);
+        }
+        out
     }
 
     /// Build + mount a Help modal listing the focused pane's keymap
@@ -3087,24 +3201,6 @@ fn spawn_detached_pilot(spec: &crate::pane::DetachSpec) {
 /// Carve the bottom row off for the footer. Returns
 /// (pane_area, footer_area) — `pane_area` is what the three panes
 /// fill; `footer_area` is the 1-row hint/status line at the bottom.
-/// Parse a comma- and/or whitespace-separated list of GitHub
-/// logins. Tolerates a leading `@`, deduplicates, ignores empties.
-/// Used by the request-reviewers / add-assignees input modals.
-fn parse_login_list(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for token in s.split(|c: char| c == ',' || c.is_whitespace()) {
-        let trimmed = token.trim().trim_start_matches('@');
-        if trimmed.is_empty() {
-            continue;
-        }
-        let owned = trimmed.to_string();
-        if !out.contains(&owned) {
-            out.push(owned);
-        }
-    }
-    out
-}
-
 fn split_for_footer(area: Rect) -> (Rect, Rect) {
     if area.height < 2 {
         return (area, Rect::default());
@@ -3619,16 +3715,19 @@ mod effects_tests {
         assert!(m.adopt_choices.is_empty());
     }
 
-    /// `Id::RequestReviewers` modal: input submit produces
-    /// `Command::RequestReviewers { workspace_key, logins }`,
-    /// logins parsed from comma/whitespace separated text.
+    /// `Id::RequestReviewers` picker: selecting two indices into
+    /// `review_choices` produces `Command::RequestReviewers` with
+    /// those logins resolved + the workspace key from
+    /// `pending_review_request`. (Migrated from the older Input
+    /// modal — see `mount_request_reviewers`.)
     #[test]
-    fn input_submitted_on_request_reviewers_modal_returns_request_reviewers_cmd() {
+    fn choice_picked_on_request_reviewers_modal_returns_request_reviewers_cmd() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.pending_review_request = Some(ws_key.clone());
+        m.review_choices = vec!["alice".into(), "bob".into(), "carol".into()];
         m.modal_stack.push(Id::RequestReviewers);
-        let cmds = m.handle_input_submitted("@alice, @bob".into());
+        let cmds = m.handle_choice_picked(vec![0, 2]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::RequestReviewers {
@@ -3636,23 +3735,23 @@ mod effects_tests {
                 logins,
             } => {
                 assert_eq!(workspace_key, &ws_key);
-                assert_eq!(logins, &vec!["alice".to_string(), "bob".to_string()]);
+                assert_eq!(logins, &vec!["alice".to_string(), "carol".to_string()]);
             }
             other => panic!("expected RequestReviewers, got {other:?}"),
         }
-        // Slot cleared.
         assert!(m.pending_review_request.is_none());
+        assert!(m.review_choices.is_empty());
     }
 
-    /// `Id::AddAssignees` modal: works on whitespace-only separation
-    /// and the leading `@` is stripped.
+    /// `Id::AddAssignees` picker symmetry.
     #[test]
-    fn input_submitted_on_add_assignees_modal_returns_add_assignees_cmd() {
+    fn choice_picked_on_add_assignees_modal_returns_add_assignees_cmd() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#5");
         m.pending_assignees_request = Some(ws_key.clone());
+        m.assignees_choices = vec!["alice".into(), "bob".into()];
         m.modal_stack.push(Id::AddAssignees);
-        let cmds = m.handle_input_submitted("alice   @bob".into());
+        let cmds = m.handle_choice_picked(vec![1]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::AddAssignees {
@@ -3660,58 +3759,21 @@ mod effects_tests {
                 logins,
             } => {
                 assert_eq!(workspace_key, &ws_key);
-                assert_eq!(logins, &vec!["alice".to_string(), "bob".to_string()]);
+                assert_eq!(logins, &vec!["bob".to_string()]);
             }
             other => panic!("expected AddAssignees, got {other:?}"),
         }
     }
 
-    /// Empty / whitespace-only login list is dropped (no command).
+    /// Empty pick (Esc — defensive) drops the slot without firing.
     #[test]
-    fn input_submitted_on_request_reviewers_with_empty_text_returns_no_commands() {
+    fn choice_picked_on_request_reviewers_with_empty_picks_returns_no_commands() {
         let mut m = build_model();
         m.pending_review_request = Some(WorkspaceKey::new("github:o/r#1"));
+        m.review_choices = vec!["alice".into()];
         m.modal_stack.push(Id::RequestReviewers);
-        let cmds = m.handle_input_submitted("  @ , ,  ".into());
+        let cmds = m.handle_choice_picked(vec![]);
         assert!(cmds.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod parse_login_tests {
-    use super::parse_login_list;
-
-    #[test]
-    fn comma_separated() {
-        assert_eq!(parse_login_list("@alice, @bob"), vec!["alice", "bob"]);
-    }
-
-    #[test]
-    fn whitespace_separated() {
-        assert_eq!(parse_login_list("alice bob"), vec!["alice", "bob"]);
-    }
-
-    #[test]
-    fn mixed_separators_and_dedup() {
-        assert_eq!(
-            parse_login_list("@alice, bob   alice"),
-            vec!["alice", "bob"]
-        );
-    }
-
-    #[test]
-    fn empty_input_returns_empty() {
-        assert_eq!(parse_login_list(""), Vec::<String>::new());
-        assert_eq!(parse_login_list(",   ,  "), Vec::<String>::new());
-        assert_eq!(parse_login_list("@"), Vec::<String>::new());
-    }
-
-    #[test]
-    fn all_leading_at_prefixes_stripped() {
-        // `trim_start_matches('@')` strips repeatedly — `@@alice`
-        // becomes `alice`. Pathological input from a user typo but
-        // strip-everything is the more forgiving choice.
-        assert_eq!(parse_login_list("@@alice"), vec!["alice"]);
     }
 }
 
