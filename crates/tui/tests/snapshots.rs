@@ -13,8 +13,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 use pilot_ipc::Event;
-use pilot_tui::components::Sidebar;
 use pilot_tui::PaneId;
+use pilot_tui::components::Sidebar;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;

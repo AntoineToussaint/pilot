@@ -562,9 +562,7 @@ async fn run_git(args: &[&str]) -> Result<String, GitError> {
 /// leave a partial install behind.
 fn validate_script_name(name: &str) -> Result<(), GitError> {
     if name.is_empty() {
-        return Err(GitError::Command(
-            "script name must not be empty".into(),
-        ));
+        return Err(GitError::Command("script name must not be empty".into()));
     }
     if name.contains('/') || name.contains('\\') {
         return Err(GitError::Command(format!(

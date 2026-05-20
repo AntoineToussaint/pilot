@@ -138,8 +138,12 @@ impl LayoutCtx {
                 false
             }
             DragTarget::ActivityTerminals => {
-                let (_, right_top_rect, right_bottom_rect) =
-                    pane_areas(self.last_area, self.sidebar_pct, self.right_top_pct, self.sidebar_user_resized);
+                let (_, right_top_rect, right_bottom_rect) = pane_areas(
+                    self.last_area,
+                    self.sidebar_pct,
+                    self.right_top_pct,
+                    self.sidebar_user_resized,
+                );
                 let right_height = right_top_rect.height + right_bottom_rect.height;
                 if right_height == 0 {
                     return false;
@@ -243,9 +247,7 @@ pub(crate) fn pane_areas(
     } else {
         SIDEBAR_MAX_COLS
     };
-    let sidebar_cols = preferred
-        .clamp(SIDEBAR_MIN_COLS, upper)
-        .min(area.width);
+    let sidebar_cols = preferred.clamp(SIDEBAR_MIN_COLS, upper).min(area.width);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(sidebar_cols), Constraint::Min(0)])
@@ -347,7 +349,12 @@ mod tests {
     #[test]
     fn hit_test_finds_the_vertical_splitter() {
         let c = ctx();
-        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        let (sidebar, right_top, _) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
         // Hover one cell right of the sidebar's right edge → vertical splitter.
         let v_x = sidebar.x + sidebar.width;
         assert_eq!(
@@ -359,7 +366,12 @@ mod tests {
     #[test]
     fn hit_test_finds_the_horizontal_splitter() {
         let c = ctx();
-        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        let (sidebar, right_top, _) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
         let h_y = right_top.y + right_top.height;
         assert_eq!(
             c.hit_test_splitter(right_top.x + 5, h_y, sidebar, right_top),
@@ -370,7 +382,12 @@ mod tests {
     #[test]
     fn hit_test_misses_inside_a_pane() {
         let c = ctx();
-        let (sidebar, right_top, _) = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        let (sidebar, right_top, _) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
         // Middle of the sidebar — not on any splitter.
         assert_eq!(c.hit_test_splitter(2, 10, sidebar, right_top), None);
     }

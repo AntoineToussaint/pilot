@@ -116,9 +116,7 @@ fn render_card_header(
     spans.push(if state.is_unread {
         Span::styled(
             "● ",
-            Style::default()
-                .fg(theme.warn)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
         )
     } else {
         Span::raw("  ")
@@ -178,10 +176,7 @@ fn render_card_header(
     if !state.is_expanded {
         let teaser = teaser_text(&activity.body, teaser_cells);
         if !teaser.is_empty() {
-            spans.push(Span::styled(
-                "  ›  ",
-                Style::default().fg(theme.chrome),
-            ));
+            spans.push(Span::styled("  ›  ", Style::default().fg(theme.chrome)));
             spans.push(Span::styled(teaser, teaser_style));
         }
     }
@@ -200,11 +195,8 @@ fn render_card_body(
     body_indent: u16,
 ) -> Vec<Line<'static>> {
     let bar_color = state.bar_color(theme);
-    let body_lines = crate::components::comment_render::render_body(
-        &activity.body,
-        body_width,
-        usize::MAX,
-    );
+    let body_lines =
+        crate::components::comment_render::render_body(&activity.body, body_width, usize::MAX);
     body_lines
         .into_iter()
         .map(|line| {
@@ -408,10 +400,7 @@ impl RightPane {
     /// login). Activity bylines whose author matches one of these
     /// logins render as `@me` instead of the bare username. Called
     /// from the orchestrator on `IpcEvent::ViewerIdentities`.
-    pub fn set_viewer_logins(
-        &mut self,
-        logins: std::collections::HashMap<String, String>,
-    ) {
+    pub fn set_viewer_logins(&mut self, logins: std::collections::HashMap<String, String>) {
         self.viewer_logins = logins;
     }
 
@@ -440,9 +429,7 @@ impl RightPane {
     fn clamp_scroll_to_cursor(&mut self) {
         if self.feed.cursor < self.comment_scroll {
             self.comment_scroll = self.feed.cursor;
-        } else if self.feed.cursor
-            >= self.comment_scroll + self.last_visible_cards
-        {
+        } else if self.feed.cursor >= self.comment_scroll + self.last_visible_cards {
             self.comment_scroll = self.feed.cursor + 1 - self.last_visible_cards;
         }
     }
@@ -659,10 +646,7 @@ impl RightPane {
                         .unwrap_or(0),
                 )
             } else {
-                format!(
-                    "deselected — {} still selected",
-                    self.feed.selected().len(),
-                )
+                format!("deselected — {} still selected", self.feed.selected().len(),)
             });
             self.rearm_mark_timer(true);
             return true;
@@ -789,17 +773,11 @@ impl RightPane {
         if let Some(repo) = task.repo.as_deref() {
             let pr_num = crate::components::task_label::pr_number(task);
             let mut crumbs: Vec<Span> = vec![
-                Span::styled(
-                    format!("{} ", icons::REPO),
-                    Style::default().fg(theme.warn),
-                ),
+                Span::styled(format!("{} ", icons::REPO), Style::default().fg(theme.warn)),
                 Span::styled(repo.to_string(), Style::default().fg(theme.text_strong)),
             ];
             if let Some(n) = pr_num {
-                crumbs.push(Span::styled(
-                    "  ›  ",
-                    Style::default().fg(theme.chrome),
-                ));
+                crumbs.push(Span::styled("  ›  ", Style::default().fg(theme.chrome)));
                 crumbs.push(Span::styled(
                     format!("#{n}"),
                     Style::default()
@@ -897,11 +875,7 @@ impl RightPane {
     fn render_activity(&mut self, area: Rect, frame: &mut Frame, focused: bool) -> u16 {
         let theme = crate::theme::current();
         let title_color = if focused { theme.accent } else { theme.chrome };
-        self.click_hits.activity_header_row = if area.height > 0 {
-            Some(area.y)
-        } else {
-            None
-        };
+        self.click_hits.activity_header_row = if area.height > 0 { Some(area.y) } else { None };
         // Cards list stays empty while collapsed; the click handler
         // checks the header row independently.
         if self.activity_collapsed {
@@ -920,7 +894,11 @@ impl RightPane {
             .unwrap_or(0);
         // Triangle glyph mirrors the sidebar selection caret. ▸ when
         // collapsed (points right, "expand into me"), ▾ when expanded.
-        let glyph = if self.activity_collapsed { "▸" } else { "▾" };
+        let glyph = if self.activity_collapsed {
+            "▸"
+        } else {
+            "▾"
+        };
 
         let mut header_spans: Vec<Span> = vec![
             Span::styled(format!("{glyph} "), Style::default().fg(title_color)),
@@ -1054,7 +1032,13 @@ impl RightPane {
                 &self.viewer_logins,
             ));
             if state.is_expanded {
-                cards.extend(render_card_body(activity, theme, &state, body_width, BODY_INDENT));
+                cards.extend(render_card_body(
+                    activity,
+                    theme,
+                    &state,
+                    body_width,
+                    BODY_INDENT,
+                ));
             }
             // One hit-test push per card. Collapsed → single row;
             // expanded → header + body lines.
@@ -1269,7 +1253,10 @@ impl RightPane {
         // user's mental model: "I'm looking at a message, r replies."
         let _ = has_workspace;
         if has_activity {
-            out.push(Binding { keys: "r", label: "reply" });
+            out.push(Binding {
+                keys: "r",
+                label: "reply",
+            });
         }
         if let Some(label) = work_label {
             out.push(Binding { keys: "w", label });
@@ -1280,11 +1267,18 @@ impl RightPane {
         // the next action ("select" → start a selection, "toggle"
         // → there's a selection in progress).
         if has_activity {
-            let label = if has_selection { "toggle row" } else { "select row" };
+            let label = if has_selection {
+                "toggle row"
+            } else {
+                "select row"
+            };
             out.push(Binding { keys: "v", label });
         }
         if has_body {
-            out.push(Binding { keys: "b", label: "description" });
+            out.push(Binding {
+                keys: "b",
+                label: "description",
+            });
         }
         out
     }
@@ -1295,14 +1289,38 @@ impl RightPane {
         // splitter / detach combos are listed under "Global" in the
         // Help modal so each pane's hint bar stays tight.
         &[
-            Binding { keys: "↑/↓", label: "scroll" },
-            Binding { keys: "→/←", label: "expand/collapse" },
-            Binding { keys: "r", label: "reply" },
-            Binding { keys: "v", label: "select" },
-            Binding { keys: "w", label: "work on selected" },
-            Binding { keys: "b", label: "toggle description" },
-            Binding { keys: "g/G", label: "top/bottom" },
-            Binding { keys: "Enter/o", label: "toggle section" },
+            Binding {
+                keys: "↑/↓",
+                label: "scroll",
+            },
+            Binding {
+                keys: "→/←",
+                label: "expand/collapse",
+            },
+            Binding {
+                keys: "r",
+                label: "reply",
+            },
+            Binding {
+                keys: "v",
+                label: "select",
+            },
+            Binding {
+                keys: "w",
+                label: "work on selected",
+            },
+            Binding {
+                keys: "b",
+                label: "toggle description",
+            },
+            Binding {
+                keys: "g/G",
+                label: "top/bottom",
+            },
+            Binding {
+                keys: "Enter/o",
+                label: "toggle section",
+            },
         ]
     }
 
@@ -1436,14 +1454,10 @@ impl RightPane {
             // tests. The handler just executes whichever Intent the
             // resolver hands back.
             (KeyCode::Char('w'), KeyModifiers::NONE) => {
-                let mut selected: Vec<usize> =
-                    self.feed.selected().iter().copied().collect();
+                let mut selected: Vec<usize> = self.feed.selected().iter().copied().collect();
                 selected.sort();
-                let intent = crate::intent::resolve_work(
-                    Some(workspace),
-                    &selected,
-                    &self.default_agent,
-                );
+                let intent =
+                    crate::intent::resolve_work(Some(workspace), &selected, &self.default_agent);
                 if let crate::intent::Intent::SpawnAgent {
                     workspace_key,
                     agent_id,
@@ -1467,8 +1481,7 @@ impl RightPane {
             // hover already does this passively; this binding is
             // for the user who wants to clear without the timer.
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                if !workspace.activity.is_empty()
-                    && workspace.is_activity_unread(self.feed.cursor)
+                if !workspace.activity.is_empty() && workspace.is_activity_unread(self.feed.cursor)
                 {
                     cmds.push(Command::MarkActivityRead {
                         session_key: workspace.key.clone().into(),
@@ -1527,10 +1540,10 @@ impl RightPane {
         // + 2 rows visible, no matter how long the PR description is.
         let body_constraint = self.task_body_constraint();
         let chunks = Layout::vertical([
-            Constraint::Length(4),       // header (crumbs, pill, branch)
-            Constraint::Length(1),       // separator
-            body_constraint,             // 0 / 1 / Max(N) for the body
-            Constraint::Min(3),          // activity — never below 3 rows
+            Constraint::Length(4), // header (crumbs, pill, branch)
+            Constraint::Length(1), // separator
+            body_constraint,       // 0 / 1 / Max(N) for the body
+            Constraint::Min(3),    // activity — never below 3 rows
         ])
         .split(area);
 
@@ -1633,11 +1646,7 @@ impl RightPane {
         };
         // First row of the section is the toggle header — clicks
         // here advance `task_body_view` through the 3-state cycle.
-        self.click_hits.body_header_row = if area.height > 0 {
-            Some(area.y)
-        } else {
-            None
-        };
+        self.click_hits.body_header_row = if area.height > 0 { Some(area.y) } else { None };
         let body = body.as_str();
         // Three-state glyph: ▶ collapsed, ▼ preview-capped, ▽ full.
         // The downward-pointing open triangle for Full is just a
@@ -1651,12 +1660,11 @@ impl RightPane {
         let header = Line::from(vec![
             Span::styled(
                 format!("{glyph} Description"),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                suffix.to_string(),
-                Style::default().fg(theme.text_dim),
-            ),
+            Span::styled(suffix.to_string(), Style::default().fg(theme.text_dim)),
         ]);
         let mut lines = vec![header];
         if self.task_body_view.is_visible() {
@@ -1852,18 +1860,38 @@ mod card_state_tests {
         // pops).
         assert!(base().dim_byline());
         // Unread → never dim regardless of cursor / focus.
-        assert!(!CardState { is_unread: true, ..base() }.dim_byline());
+        assert!(
+            !CardState {
+                is_unread: true,
+                ..base()
+            }
+            .dim_byline()
+        );
         // Focused cursor → never dim, even on a read row.
-        assert!(!CardState { is_cursor: true, focused: true, ..base() }.dim_byline());
+        assert!(
+            !CardState {
+                is_cursor: true,
+                focused: true,
+                ..base()
+            }
+            .dim_byline()
+        );
         // Cursor without focus doesn't count — the user can't see
         // it, so the row should still dim.
-        assert!(CardState { is_cursor: true, focused: false, ..base() }.dim_byline());
+        assert!(
+            CardState {
+                is_cursor: true,
+                focused: false,
+                ..base()
+            }
+            .dim_byline()
+        );
     }
 }
 
 #[cfg(test)]
 mod click_dispatch_tests {
-    use super::{RightPane, PaneId};
+    use super::{PaneId, RightPane};
 
     /// Smoke test: with no rendered hits cached, a click is a no-op.
     /// This is the safety net for "user clicks before first render"
@@ -1932,4 +1960,3 @@ mod click_dispatch_tests {
         assert!(!pane.feed.is_expanded(3));
     }
 }
-

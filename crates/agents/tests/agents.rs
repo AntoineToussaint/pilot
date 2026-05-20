@@ -105,10 +105,7 @@ fn codex_detects_yn_prompt() {
         agent.detect_state(b"run rm -rf? [y/n]"),
         Some(AgentState::Asking)
     );
-    assert_eq!(
-        agent.detect_state(b"hello world"),
-        Some(AgentState::Active)
-    );
+    assert_eq!(agent.detect_state(b"hello world"), Some(AgentState::Active));
 }
 
 #[test]
@@ -146,10 +143,7 @@ fn claude_detects_choice_arrow() {
                ❯ 1. Yes\n\
                  2. Yes, and don't ask again\n\
                  3. No, and tell Claude what to do differently\n";
-    assert_eq!(
-        agent.detect_state(buf.as_bytes()),
-        Some(AgentState::Asking),
-    );
+    assert_eq!(agent.detect_state(buf.as_bytes()), Some(AgentState::Asking),);
 }
 
 #[test]

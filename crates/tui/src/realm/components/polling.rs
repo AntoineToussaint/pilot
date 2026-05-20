@@ -23,9 +23,7 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use tuirealm::state::State;
 
-const SPINNER_FRAMES: &[&str] = &[
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// How long to wait before giving up and dismissing.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -105,8 +103,7 @@ impl Polling {
                 // to an ErrorModal that interrupts the user every
                 // poll cycle.
                 if kind == "retryable" {
-                    self.last_progress =
-                        Some((source.clone(), message.clone()));
+                    self.last_progress = Some((source.clone(), message.clone()));
                     return;
                 }
                 if self.error.is_none() {
@@ -204,9 +201,7 @@ impl Component for Polling {
                 Span::raw("    "),
                 Span::styled(
                     format!("{source}  ·  "),
-                    Style::default()
-                        .fg(theme.warn)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(msg.clone(), Style::default().fg(theme.text_dim)),
             ]));
@@ -236,10 +231,7 @@ impl Component for Polling {
             "  Press any key to dismiss",
             theme.hint(),
         )));
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -287,9 +279,7 @@ impl AppComponent<Msg, UserEvent> for Polling {
                     }
                     IpcEvent::PollProgress { source, message } => {
                         self.last_progress = Some((source.clone(), message.clone()));
-                        if message.starts_with("PR query:")
-                            || message.starts_with("Issue query:")
-                        {
+                        if message.starts_with("PR query:") || message.starts_with("Issue query:") {
                             self.queries_seen.push(format!("[{source}] {message}"));
                         }
                     }
@@ -300,8 +290,7 @@ impl AppComponent<Msg, UserEvent> for Polling {
                         kind,
                     } => {
                         if kind == "retryable" {
-                            self.last_progress =
-                                Some((source.clone(), message.clone()));
+                            self.last_progress = Some((source.clone(), message.clone()));
                         } else if self.error.is_none() {
                             self.error = Some((
                                 source.clone(),

@@ -15,8 +15,8 @@ use pilot_core::{
     Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace,
 };
 use pilot_ipc::Event;
-use pilot_tui::components::RightPane;
 use pilot_tui::PaneId;
+use pilot_tui::components::RightPane;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -395,7 +395,12 @@ fn workspace_upserted_for_current_updates_state() {
         .push(activity("bob", "new one", ActivityKind::Comment));
     ws.sort_activity();
     rp.on_event(&Event::WorkspaceUpserted(Box::new(ws)));
-    assert_eq!(rp.comment_cursor(), 2);
+    // Activity grew 3 → 4 (newest-first, so the new item lands at
+    // index 0). `ActivityFeed::adjust_for_length_change` shifts
+    // every existing index up by the delta — the user was reading
+    // index 2; that comment is now at index 3. Stays focused on
+    // the same comment instead of jumping or collapsing.
+    assert_eq!(rp.comment_cursor(), 3);
     assert_eq!(rp.selected_workspace().unwrap().activity.len(), 4);
 }
 
@@ -442,8 +447,8 @@ fn unrelated_events_do_not_perturb_state() {
     rp.on_event(&Event::ProviderError {
         source: "x".into(),
         message: "y".into(),
-            detail: String::new(),
-            kind: String::new(),
+        detail: String::new(),
+        kind: String::new(),
     });
     assert_eq!(rp.comment_cursor(), 0);
     assert!(rp.selected_workspace().is_some());
@@ -482,10 +487,12 @@ fn render_shows_header_fields() {
     assert!(rendered.contains("OPEN"), "state tag");
     assert!(rendered.contains("PR o/r#1"), "title");
     assert!(rendered.contains("feature/x"), "branch");
-    // Role/Review/Reviewers were intentionally dropped — see the
-    // header simplification commit.
-    assert!(!rendered.contains("Reviewer"), "role hidden");
-    assert!(!rendered.contains("alice"), "reviewers hidden");
+    // Reviewers row added back (see `b7dbb8a`). The fixture's
+    // `make_pr` sets `reviewers = ["alice", "bob"]`, so both
+    // logins appear with the `@` prefix in the header.
+    assert!(rendered.contains("Reviewers:"), "reviewers label visible");
+    assert!(rendered.contains("@alice"), "alice listed");
+    assert!(rendered.contains("@bob"), "bob listed");
 }
 
 #[test]
@@ -685,7 +692,10 @@ fn focus_loss_disarms_timer() {
     rp.notify_focus_changed(true);
     assert!(rp.auto_mark_progress().is_some());
     rp.notify_focus_changed(false);
-    assert!(rp.auto_mark_progress().is_none(), "leaving the pane disarms");
+    assert!(
+        rp.auto_mark_progress().is_none(),
+        "leaving the pane disarms"
+    );
 }
 
 #[test]
@@ -754,7 +764,8 @@ fn z_undoes_most_recent_auto_mark() {
     assert_eq!(rp.selected_workspace().unwrap().unread_count(), 3);
     assert!(!rp.can_undo_mark_read());
     assert!(
-        cmds.iter().any(|c| matches!(c, pilot_ipc::Command::UnmarkActivityRead { .. })),
+        cmds.iter()
+            .any(|c| matches!(c, pilot_ipc::Command::UnmarkActivityRead { .. })),
         "z emits UnmarkActivityRead so the daemon writes the partial undo"
     );
 }
@@ -788,7 +799,10 @@ fn cursor_move_clears_undo_target() {
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert!(!rp.can_undo_mark_read(), "moving the cursor invalidates undo");
+    assert!(
+        !rp.can_undo_mark_read(),
+        "moving the cursor invalidates undo"
+    );
 }
 
 #[test]
@@ -836,7 +850,10 @@ fn page_down_jumps_by_visible_window() {
         KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert!(rp.comment_cursor() > start, "PageDown moves the cursor down");
+    assert!(
+        rp.comment_cursor() > start,
+        "PageDown moves the cursor down"
+    );
 }
 
 #[test]

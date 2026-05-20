@@ -71,16 +71,16 @@ pub struct Theme {
 /// grays. Calibrated against a near-black terminal background.
 pub const PILOT_DARK: Theme = Theme {
     name: "Pilot Dark",
-    accent: Color::Rgb(125, 207, 255),       // soft sky blue
-    hover: Color::Rgb(247, 118, 142),        // muted coral
-    success: Color::Rgb(158, 206, 106),      // sage green
-    warn: Color::Rgb(224, 175, 104),         // warm amber
-    error: Color::Rgb(247, 118, 142),        // same as hover for cohesion
-    text_strong: Color::Rgb(192, 202, 245),  // off-white
-    text_dim: Color::Rgb(122, 130, 167),     // muted blue-gray
-    chrome: Color::Rgb(58, 64, 96),          // slate divider
-    fill: Color::Rgb(41, 46, 66),            // panel bg
-    surface: Color::Rgb(26, 29, 46),         // modal/panel bg, deeper
+    accent: Color::Rgb(125, 207, 255),      // soft sky blue
+    hover: Color::Rgb(247, 118, 142),       // muted coral
+    success: Color::Rgb(158, 206, 106),     // sage green
+    warn: Color::Rgb(224, 175, 104),        // warm amber
+    error: Color::Rgb(247, 118, 142),       // same as hover for cohesion
+    text_strong: Color::Rgb(192, 202, 245), // off-white
+    text_dim: Color::Rgb(122, 130, 167),    // muted blue-gray
+    chrome: Color::Rgb(58, 64, 96),         // slate divider
+    fill: Color::Rgb(41, 46, 66),           // panel bg
+    surface: Color::Rgb(26, 29, 46),        // modal/panel bg, deeper
 };
 
 /// Catppuccin Mocha — popular dark, soft pastels. Balances pinks +
@@ -88,64 +88,64 @@ pub const PILOT_DARK: Theme = Theme {
 /// long sessions.
 pub const CATPPUCCIN_MOCHA: Theme = Theme {
     name: "Catppuccin Mocha",
-    accent: Color::Rgb(137, 220, 235),       // sky
-    hover: Color::Rgb(245, 194, 231),        // pink
-    success: Color::Rgb(166, 227, 161),      // green
-    warn: Color::Rgb(249, 226, 175),         // yellow
-    error: Color::Rgb(243, 139, 168),        // pink-red
-    text_strong: Color::Rgb(205, 214, 244),  // text
-    text_dim: Color::Rgb(147, 153, 178),     // overlay2
-    chrome: Color::Rgb(69, 71, 90),          // surface1
-    fill: Color::Rgb(49, 50, 68),            // surface0
-    surface: Color::Rgb(30, 30, 46),         // base
+    accent: Color::Rgb(137, 220, 235),      // sky
+    hover: Color::Rgb(245, 194, 231),       // pink
+    success: Color::Rgb(166, 227, 161),     // green
+    warn: Color::Rgb(249, 226, 175),        // yellow
+    error: Color::Rgb(243, 139, 168),       // pink-red
+    text_strong: Color::Rgb(205, 214, 244), // text
+    text_dim: Color::Rgb(147, 153, 178),    // overlay2
+    chrome: Color::Rgb(69, 71, 90),         // surface1
+    fill: Color::Rgb(49, 50, 68),           // surface0
+    surface: Color::Rgb(30, 30, 46),        // base
 };
 
 /// Tokyo Night — slightly cooler, navy-leaning dark theme. Higher
 /// contrast than Catppuccin; reads well on OLED.
 pub const TOKYO_NIGHT: Theme = Theme {
     name: "Tokyo Night",
-    accent: Color::Rgb(125, 207, 255),       // blue
-    hover: Color::Rgb(187, 154, 247),        // magenta
-    success: Color::Rgb(158, 206, 106),      // green
-    warn: Color::Rgb(224, 175, 104),         // orange
-    error: Color::Rgb(247, 118, 142),        // red
-    text_strong: Color::Rgb(192, 202, 245),  // fg
-    text_dim: Color::Rgb(86, 95, 137),       // comment
-    chrome: Color::Rgb(65, 72, 104),         // bg_visual
-    fill: Color::Rgb(41, 46, 66),            // bg_highlight
-    surface: Color::Rgb(26, 27, 38),         // bg
+    accent: Color::Rgb(125, 207, 255),      // blue
+    hover: Color::Rgb(187, 154, 247),       // magenta
+    success: Color::Rgb(158, 206, 106),     // green
+    warn: Color::Rgb(224, 175, 104),        // orange
+    error: Color::Rgb(247, 118, 142),       // red
+    text_strong: Color::Rgb(192, 202, 245), // fg
+    text_dim: Color::Rgb(86, 95, 137),      // comment
+    chrome: Color::Rgb(65, 72, 104),        // bg_visual
+    fill: Color::Rgb(41, 46, 66),           // bg_highlight
+    surface: Color::Rgb(26, 27, 38),        // bg
 };
 
 /// Gruvbox Dark — earthy retro palette. Warmer ambers + olive greens,
 /// for users who like the classic vim feel.
 pub const GRUVBOX_DARK: Theme = Theme {
     name: "Gruvbox Dark",
-    accent: Color::Rgb(131, 165, 152),       // aqua
-    hover: Color::Rgb(211, 134, 155),        // pink
-    success: Color::Rgb(184, 187, 38),       // green
-    warn: Color::Rgb(250, 189, 47),          // yellow
-    error: Color::Rgb(251, 73, 52),          // red
-    text_strong: Color::Rgb(235, 219, 178),  // fg
-    text_dim: Color::Rgb(168, 153, 132),     // gray
-    chrome: Color::Rgb(80, 73, 69),          // bg2
-    fill: Color::Rgb(60, 56, 54),            // bg1
-    surface: Color::Rgb(40, 40, 40),         // bg
+    accent: Color::Rgb(131, 165, 152),      // aqua
+    hover: Color::Rgb(211, 134, 155),       // pink
+    success: Color::Rgb(184, 187, 38),      // green
+    warn: Color::Rgb(250, 189, 47),         // yellow
+    error: Color::Rgb(251, 73, 52),         // red
+    text_strong: Color::Rgb(235, 219, 178), // fg
+    text_dim: Color::Rgb(168, 153, 132),    // gray
+    chrome: Color::Rgb(80, 73, 69),         // bg2
+    fill: Color::Rgb(60, 56, 54),           // bg1
+    surface: Color::Rgb(40, 40, 40),        // bg
 };
 
 /// Rose Pine — soothing low-saturation pastels on a deep purple
 /// backdrop. Distinct from the others; lots of users swear by it.
 pub const ROSE_PINE: Theme = Theme {
     name: "Rose Pine",
-    accent: Color::Rgb(156, 207, 216),       // foam
-    hover: Color::Rgb(196, 167, 231),        // iris
-    success: Color::Rgb(49, 116, 143),       // pine
-    warn: Color::Rgb(246, 193, 119),         // gold
-    error: Color::Rgb(235, 111, 146),        // love
-    text_strong: Color::Rgb(224, 222, 244),  // text
-    text_dim: Color::Rgb(144, 140, 170),     // subtle
-    chrome: Color::Rgb(57, 53, 82),          // overlay
-    fill: Color::Rgb(38, 35, 58),            // surface
-    surface: Color::Rgb(25, 23, 36),         // base
+    accent: Color::Rgb(156, 207, 216),      // foam
+    hover: Color::Rgb(196, 167, 231),       // iris
+    success: Color::Rgb(49, 116, 143),      // pine
+    warn: Color::Rgb(246, 193, 119),        // gold
+    error: Color::Rgb(235, 111, 146),       // love
+    text_strong: Color::Rgb(224, 222, 244), // text
+    text_dim: Color::Rgb(144, 140, 170),    // subtle
+    chrome: Color::Rgb(57, 53, 82),         // overlay
+    fill: Color::Rgb(38, 35, 58),           // surface
+    surface: Color::Rgb(25, 23, 36),        // base
 };
 
 /// Built-in themes shipped with the kit, in cycle order. Index 0 is
@@ -204,10 +204,7 @@ pub fn register(theme: Theme) -> &'static Theme {
 /// Snapshot of every registered theme, in cycle order. Useful for
 /// theme pickers.
 pub fn list() -> Vec<&'static Theme> {
-    registry()
-        .read()
-        .expect("theme registry poisoned")
-        .clone()
+    registry().read().expect("theme registry poisoned").clone()
 }
 
 /// Cycle to the next theme. Returns the new theme name so callers
@@ -353,9 +350,7 @@ impl Theme {
 
     /// Unread / "new" badge inline.
     pub fn badge_unread(&self) -> Style {
-        Style::default()
-            .fg(self.warn)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(self.warn).add_modifier(Modifier::BOLD)
     }
 
     /// Modal border — accent-tinted, matches the focus ring on panes
@@ -375,19 +370,14 @@ impl Theme {
     /// Section heading inside a modal (e.g. "Inbox" / "Activity" in
     /// the help panel, "Bindings" inside the picker).
     pub fn section_heading(&self) -> Style {
-        Style::default()
-            .fg(self.warn)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(self.warn).add_modifier(Modifier::BOLD)
     }
 
     /// Error pill foreground — used inside error_modal and any other
     /// place that wants the "this is bad" color but on a clear bg.
     pub fn error_text(&self) -> Style {
-        Style::default()
-            .fg(self.error)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(self.error).add_modifier(Modifier::BOLD)
     }
-
 }
 
 #[cfg(test)]

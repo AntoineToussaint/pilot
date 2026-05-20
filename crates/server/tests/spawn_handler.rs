@@ -4,7 +4,6 @@
 //! curl. Tests drive synthetic output via `MockBackend::emit` and end
 //! sessions via `finish`.
 
-
 use pilot_ipc::{Command, Event, TerminalKind, channel};
 use pilot_server::backend::{MockBackend, SessionBackend};
 use pilot_server::{Server, ServerConfig};

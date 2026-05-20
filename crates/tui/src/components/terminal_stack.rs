@@ -30,8 +30,8 @@ use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use libghostty_vt as vt;
 use pilot_core::SessionKey;
-use pilot_tui_term::GhosttyTerminal;
 use pilot_ipc::{Command, Event, TerminalId, TerminalKind};
+use pilot_tui_term::GhosttyTerminal;
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -361,7 +361,8 @@ impl TerminalStack {
                     pilot_core::TileTree::Leaf { terminal_id } => Some(*terminal_id),
                     _ => None,
                 });
-                id.map(TerminalId).or_else(|| leaves.first().map(|i| TerminalId(*i)))
+                id.map(TerminalId)
+                    .or_else(|| leaves.first().map(|i| TerminalId(*i)))
             }
         }
     }
@@ -436,17 +437,12 @@ impl TerminalStack {
     /// already has a Claude → don't spawn a second one"). Returns
     /// `None` for non-singleton kinds (Shell) since those are
     /// always new spawns.
-    pub fn find_runner(
-        &self,
-        session_key: &SessionKey,
-        kind: &TerminalKind,
-    ) -> Option<TerminalId> {
+    pub fn find_runner(&self, session_key: &SessionKey, kind: &TerminalKind) -> Option<TerminalId> {
         let key = kind.singleton_key()?;
         self.terminals
             .iter()
             .find(|(_, slot)| {
-                slot.session_key == *session_key
-                    && slot.kind.singleton_key() == Some(key.clone())
+                slot.session_key == *session_key && slot.kind.singleton_key() == Some(key.clone())
             })
             .map(|(id, _)| *id)
     }
@@ -855,10 +851,22 @@ impl TerminalStack {
     pub fn keymap(&self) -> &'static [crate::Binding] {
         use crate::Binding;
         &[
-            Binding { keys: "all keys", label: "→ PTY" },
-            Binding { keys: "Shift-PgUp/Dn", label: "scroll" },
-            Binding { keys: "]]", label: "exit to sidebar" },
-            Binding { keys: "Ctrl-c", label: "interrupt" },
+            Binding {
+                keys: "all keys",
+                label: "→ PTY",
+            },
+            Binding {
+                keys: "Shift-PgUp/Dn",
+                label: "scroll",
+            },
+            Binding {
+                keys: "]]",
+                label: "exit to sidebar",
+            },
+            Binding {
+                keys: "Ctrl-c",
+                label: "interrupt",
+            },
         ]
     }
 
@@ -924,7 +932,9 @@ impl TerminalStack {
         // `AppState` because that state needs to persist across calls.
         // Here we just route bytes to the focused terminal; everything
         // — q, Tab, Ctrl-C, single Esc — is the agent's.
-        let id = self.focused_terminal_id().or_else(|| self.active_terminal_id());
+        let id = self
+            .focused_terminal_id()
+            .or_else(|| self.active_terminal_id());
         let Some(id) = id else {
             // No terminal to route to — let the parent handle.
             return PaneOutcome::Pass;
@@ -1039,9 +1049,7 @@ impl TerminalStack {
                 // a single-leaf split collapses to a Leaf root; an
                 // n-way split loses just the dead branch. Tabs mode
                 // doesn't carry tile state — no work to do there.
-                if let pilot_core::SessionLayout::Splits { tree, focused } =
-                    &mut self.layout
-                {
+                if let pilot_core::SessionLayout::Splits { tree, focused } = &mut self.layout {
                     if let Some(path) = tree.path_to(terminal_id.0) {
                         match tree.remove_at(&path) {
                             Ok(new_focus) => {
@@ -1053,8 +1061,7 @@ impl TerminalStack {
                                 // tabs default so a future spawn opens
                                 // a fresh layout instead of leaving an
                                 // orphan tree.
-                                self.layout =
-                                    pilot_core::SessionLayout::Tabs { active: 0 };
+                                self.layout = pilot_core::SessionLayout::Tabs { active: 0 };
                             }
                         }
                     }
@@ -1063,8 +1070,7 @@ impl TerminalStack {
                     // payload renders fine but means the next spawn
                     // promotes us right back into Splits, which is
                     // confusing UX.
-                    if let pilot_core::SessionLayout::Splits { tree, .. } =
-                        &self.layout
+                    if let pilot_core::SessionLayout::Splits { tree, .. } = &self.layout
                         && matches!(tree, pilot_core::TileTree::Leaf { .. })
                     {
                         self.layout = pilot_core::SessionLayout::Tabs { active: 0 };
@@ -1164,9 +1170,7 @@ impl TerminalStack {
                 let asking_text = " ! needs input";
                 title_spans.push(Span::styled(
                     asking_text,
-                    Style::default()
-                        .fg(theme.warn)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                 ));
                 cursor = cursor.saturating_add(asking_text.chars().count() as u16);
             }
@@ -1221,7 +1225,10 @@ impl TerminalStack {
                     self.render_one_terminal(id, body, frame, focused);
                 }
             }
-            pilot_core::SessionLayout::Splits { tree, focused: focus_path } => {
+            pilot_core::SessionLayout::Splits {
+                tree,
+                focused: focus_path,
+            } => {
                 // Recursive tile renderer. Dividers are drawn on the
                 // boundary between adjacent leaves; the focused leaf
                 // gets a brighter border so the user can tell where
@@ -1308,11 +1315,7 @@ impl TerminalStack {
     /// Splits, focus moves, close, escape. Anything unrecognised is
     /// a clean no-op (the prefix has already been consumed; the user
     /// just has to retry).
-    fn handle_tile_action(
-        &mut self,
-        key: KeyEvent,
-        cmds: &mut Vec<Command>,
-    ) -> PaneOutcome {
+    fn handle_tile_action(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
         use pilot_core::TileDirection;
 
         // Need an active session to know where to spawn into. Without
@@ -1468,19 +1471,13 @@ impl TerminalStack {
             // and the bottom rows go blank as soon as the user scrolls
             // past them. Queue a resize for the App to ship.
             let new_size = (rect.width, rect.height);
-            if rect.width > 0
-                && rect.height > 0
-                && slot.last_rendered_size != Some(new_size)
-            {
+            if rect.width > 0 && rect.height > 0 && slot.last_rendered_size != Some(new_size) {
                 slot.last_rendered_size = Some(new_size);
                 self.pending_resizes.push((id, rect.width, rect.height));
             }
             if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
-                let widget = GhosttyTerminal::new(
-                    &snapshot,
-                    &mut slot.vt.row_iter,
-                    &mut slot.vt.cell_iter,
-                );
+                let widget =
+                    GhosttyTerminal::new(&snapshot, &mut slot.vt.row_iter, &mut slot.vt.cell_iter);
                 frame.render_widget(widget, rect);
             }
         }
@@ -1547,10 +1544,24 @@ impl TerminalStack {
                 let mut p_right = current_path.to_vec();
                 p_right.push(1);
                 self.render_tile_tree(
-                    left, left_rect, frame, pane_focused, focus_path, &p_left, chrome, accent,
+                    left,
+                    left_rect,
+                    frame,
+                    pane_focused,
+                    focus_path,
+                    &p_left,
+                    chrome,
+                    accent,
                 );
                 self.render_tile_tree(
-                    right, right_rect, frame, pane_focused, focus_path, &p_right, chrome, accent,
+                    right,
+                    right_rect,
+                    frame,
+                    pane_focused,
+                    focus_path,
+                    &p_right,
+                    chrome,
+                    accent,
                 );
                 // Vertical divider between the two halves.
                 if rect.height > 0 {
@@ -1588,7 +1599,14 @@ impl TerminalStack {
                 let mut p_bot = current_path.to_vec();
                 p_bot.push(1);
                 self.render_tile_tree(
-                    top, top_rect, frame, pane_focused, focus_path, &p_top, chrome, accent,
+                    top,
+                    top_rect,
+                    frame,
+                    pane_focused,
+                    focus_path,
+                    &p_top,
+                    chrome,
+                    accent,
                 );
                 self.render_tile_tree(
                     bottom,
@@ -1620,7 +1638,6 @@ impl TerminalStack {
         }
     }
 }
-
 
 // ── ANSI strip helper ──────────────────────────────────────────────────
 

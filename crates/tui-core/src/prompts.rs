@@ -115,7 +115,12 @@ fn build_implement_issue_prompt(issue: &pilot_core::Task) -> String {
         .map(|(_, n)| n)
         .unwrap_or(&issue.id.key);
     let repo = issue.repo.as_deref().unwrap_or("the repository");
-    let body_block = match issue.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let body_block = match issue
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(body) => format!("\n\nIssue body:\n{body}\n"),
         None => String::new(),
     };

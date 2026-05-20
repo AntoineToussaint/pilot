@@ -5,10 +5,10 @@
 
 use crate::pane::Binding;
 use crate::realm::Msg;
+use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
-use crate::realm::UserEvent;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::{Constraint, Layout, Rect};
@@ -112,12 +112,8 @@ impl Component for Help {
                 .bg(theme.surface)
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD);
-            let sep_style = Style::default()
-                .bg(theme.surface)
-                .fg(theme.text_dim);
-            let label_style = Style::default()
-                .bg(theme.surface)
-                .fg(theme.text_strong);
+            let sep_style = Style::default().bg(theme.surface).fg(theme.text_dim);
+            let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
             let line = Line::from(vec![
                 Span::styled(" ", panel_bg),
                 Span::styled(key, key_style),

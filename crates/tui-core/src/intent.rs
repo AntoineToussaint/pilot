@@ -47,20 +47,14 @@ pub enum Intent {
         prompt: Option<String>,
     },
     /// Spawn a plain shell in the named workspace.
-    SpawnShell {
-        workspace_key: SessionKey,
-    },
+    SpawnShell { workspace_key: SessionKey },
     /// Mount the reply textarea targeted at the workspace.
-    MountReply {
-        workspace_key: WorkspaceKey,
-    },
+    MountReply { workspace_key: WorkspaceKey },
     /// Mount the new-workspace name input.
     MountNewWorkspaceInput,
     /// Mount the adopt-target picker for moving sessions out of
     /// the named source workspace.
-    MountAdoptPicker {
-        source_key: WorkspaceKey,
-    },
+    MountAdoptPicker { source_key: WorkspaceKey },
     /// Open the focused workspace's worktree in an editor. The
     /// model knows which editor (single → launch directly; multiple
     /// → mount a picker first).
@@ -68,14 +62,10 @@ pub enum Intent {
     /// Run the GraphQL `mergePullRequest` mutation for the focused
     /// workspace's PR. Two-press confirm latch is the model's job;
     /// this Intent is the fire-side payload.
-    MergePr {
-        workspace_key: WorkspaceKey,
-    },
+    MergePr { workspace_key: WorkspaceKey },
     /// Kill every running terminal under the workspace + remove
     /// the row. Two-press confirm at the model layer.
-    KillWorkspace {
-        session_key: SessionKey,
-    },
+    KillWorkspace { session_key: SessionKey },
     /// Snooze the workspace until `now + duration`. Producer is
     /// pure (`resolve_short_snooze` / `resolve_long_snooze`); the
     /// `Shift-Z` confirm latch lives in the model.
@@ -86,13 +76,9 @@ pub enum Intent {
     /// Unsnooze (reset the snoozed-until timestamp). The short-
     /// snooze resolver chooses Snooze vs. Unsnooze based on the
     /// workspace's current state.
-    Unsnooze {
-        session_key: SessionKey,
-    },
+    Unsnooze { session_key: SessionKey },
     /// Bulk-mark every activity row on the workspace as read.
-    MarkAllRead {
-        session_key: SessionKey,
-    },
+    MarkAllRead { session_key: SessionKey },
     /// Show a transient footer notice. Used when an action fires but
     /// can't do anything meaningful in the current state (e.g.,
     /// "no sessions to adopt").
@@ -183,9 +169,7 @@ pub fn resolve_work(
     };
     let session_key = SessionKey::from(&ws.key);
     let prompt = match priority {
-        WorkPriority::AddressComments => {
-            build_address_comments_prompt(ws, selected_comments)
-        }
+        WorkPriority::AddressComments => build_address_comments_prompt(ws, selected_comments),
         WorkPriority::FixConflict => {
             // classify_work already confirmed `pr.has_conflicts`,
             // so the inner Option always unwraps. `expect` over
@@ -201,9 +185,10 @@ pub fn resolve_work(
                 .1
         }
         WorkPriority::ImplementIssue => {
-            let issue = ws.gh_issues.first().expect(
-                "ImplementIssue classification implies at least one gh_issue",
-            );
+            let issue = ws
+                .gh_issues
+                .first()
+                .expect("ImplementIssue classification implies at least one gh_issue");
             build_implement_issue_prompt(issue)
         }
     };
@@ -325,10 +310,7 @@ pub fn resolve_short_snooze(
 /// Resolve `Shift-Z` (long snooze, ~1 year). No toggle behaviour —
 /// just snooze for `duration`. The model's `long_snooze_pending`
 /// latch handles confirmation.
-pub fn resolve_long_snooze(
-    workspace: Option<&Workspace>,
-    duration: Duration,
-) -> Intent {
+pub fn resolve_long_snooze(workspace: Option<&Workspace>, duration: Duration) -> Intent {
     workspace
         .map(|w| Intent::Snooze {
             session_key: SessionKey::from(&w.key),
@@ -406,7 +388,12 @@ fn build_address_comments_prompt(workspace: &Workspace, indices: &[usize]) -> St
         let Some(act) = workspace.activity.get(*idx) else {
             continue;
         };
-        comments.push_str(&format!("\n[{}] {} on {}:\n", i + 1, act.author, act.created_at));
+        comments.push_str(&format!(
+            "\n[{}] {} on {}:\n",
+            i + 1,
+            act.author,
+            act.created_at
+        ));
         if let Some(path) = &act.path {
             if let Some(line) = act.line {
                 comments.push_str(&format!("    file: {path}:{line}\n"));
@@ -438,7 +425,12 @@ fn build_implement_issue_prompt(issue: &pilot_core::Task) -> String {
         .map(|(_, n)| n)
         .unwrap_or(&issue.id.key);
     let repo = issue.repo.as_deref().unwrap_or("the repository");
-    let body_block = match issue.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let body_block = match issue
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(body) => format!("\n\nIssue body:\n{body}\n"),
         None => String::new(),
     };
@@ -459,8 +451,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use pilot_core::{
-        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace,
-        WorkspaceKey,
+        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
     };
 
     fn pr(key: &str, ci: CiStatus, review: ReviewStatus) -> Workspace {
@@ -525,13 +516,12 @@ mod tests {
         let ws = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
         let intent = resolve_work(Some(&ws), &[], "claude");
         match intent {
-            Intent::SpawnAgent { agent_id, prompt, .. } => {
+            Intent::SpawnAgent {
+                agent_id, prompt, ..
+            } => {
                 assert_eq!(agent_id, "claude");
                 let prompt = prompt.expect("fix-CI carries a prompt");
-                assert!(
-                    prompt.contains("CI is failing"),
-                    "{prompt}",
-                );
+                assert!(prompt.contains("CI is failing"), "{prompt}",);
             }
             other => panic!("expected SpawnAgent, got {other:?}"),
         }
@@ -614,10 +604,25 @@ mod tests {
             vec![
                 ("healthy PR", None, healthy_pr, &[][..]),
                 ("ci-fail PR", Some(WorkPriority::FixCi), ci_fail, &[][..]),
-                ("conflict PR", Some(WorkPriority::FixConflict), conflict_pr, &[][..]),
-                ("conflict beats ci", Some(WorkPriority::FixConflict), conflict_plus_ci, &[][..]),
+                (
+                    "conflict PR",
+                    Some(WorkPriority::FixConflict),
+                    conflict_pr,
+                    &[][..],
+                ),
+                (
+                    "conflict beats ci",
+                    Some(WorkPriority::FixConflict),
+                    conflict_plus_ci,
+                    &[][..],
+                ),
                 ("issue", Some(WorkPriority::ImplementIssue), issue, &[][..]),
-                ("comments selected", Some(WorkPriority::AddressComments), commented, &[0][..]),
+                (
+                    "comments selected",
+                    Some(WorkPriority::AddressComments),
+                    commented,
+                    &[0][..],
+                ),
                 ("empty workspace", None, empty(), &[][..]),
             ]
         };
@@ -710,10 +715,7 @@ mod tests {
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
                 let prompt = prompt.expect("implement carries a prompt");
-                assert!(
-                    prompt.contains("Implement GitHub issue #42"),
-                    "{prompt}",
-                );
+                assert!(prompt.contains("Implement GitHub issue #42"), "{prompt}",);
             }
             other => panic!("expected SpawnAgent, got {other:?}"),
         }

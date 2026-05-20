@@ -5,10 +5,10 @@
 //! `Msg::ModalDismissed` on Esc.
 
 use crate::realm::Msg;
+use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
-use crate::realm::UserEvent;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -171,9 +171,7 @@ impl Component for Input {
 impl AppComponent<Msg, UserEvent> for Input {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
-            Event::Keyboard(KeyEvent {
-                code: Key::Esc, ..
-            }) => Some(Msg::ModalDismissed),
+            Event::Keyboard(KeyEvent { code: Key::Esc, .. }) => Some(Msg::ModalDismissed),
             Event::Keyboard(KeyEvent {
                 code: Key::Char('c'),
                 modifiers,

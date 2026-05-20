@@ -191,10 +191,7 @@ mod tests {
     fn trigger_modifier_match_is_subset_via_contains() {
         let t = shift_x();
         assert!(t.matches(KeyCode::Char('X'), KeyModifiers::SHIFT));
-        assert!(t.matches(
-            KeyCode::Char('X'),
-            KeyModifiers::SHIFT | KeyModifiers::ALT,
-        ));
+        assert!(t.matches(KeyCode::Char('X'), KeyModifiers::SHIFT | KeyModifiers::ALT,));
         // Missing the required SHIFT modifier → no match.
         assert!(!t.matches(KeyCode::Char('X'), KeyModifiers::NONE));
     }

@@ -2,7 +2,6 @@
 //! `ipc::channel::pair` — zero serialization, zero sockets — so tests
 //! are fast and deterministic.
 
-
 use pilot_ipc::{
     AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, PrincipalId,
     ProviderCredentialInput, channel,

@@ -4,7 +4,6 @@
 //! subprocesses through a real PTY — gated behind `#[ignore]` and
 //! replaced with focused unit tests for the building blocks.
 
-
 use pilot_server::agent_spawn::{ProxyProvider, ProxyTarget, inject_proxy_env};
 use std::collections::HashMap;
 use std::time::Duration;

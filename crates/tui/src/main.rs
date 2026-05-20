@@ -16,11 +16,11 @@
 
 use pilot_ipc::{channel, socket};
 use pilot_server::lifecycle::{self, ServerStatus};
-use std::path::PathBuf;
 use pilot_server::polling;
 use pilot_server::socket_service::SocketService;
 use pilot_server::{Server, ServerConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Fallback poll interval when `~/.pilot/config.yaml::providers.github.poll_interval`
@@ -322,13 +322,11 @@ async fn run_embedded_realm(
         // for an immediate tick + rescope. `Arc<dyn Fn>` because
         // partial flows can fire many times.
         let store_for_save = std::sync::Arc::new(store_for_save);
-        let hook: std::sync::Arc<
-            dyn Fn(pilot_tui::setup_flow::SetupOutcome) + Send + Sync,
-        > = std::sync::Arc::new(move |outcome| {
-            let persisted =
-                pilot_tui::setup_flow::outcome_to_persisted(&outcome);
-            pilot_tui::setup_flow::save_persisted(&**store_for_save, &persisted);
-        });
+        let hook: std::sync::Arc<dyn Fn(pilot_tui::setup_flow::SetupOutcome) + Send + Sync> =
+            std::sync::Arc::new(move |outcome| {
+                let persisted = pilot_tui::setup_flow::outcome_to_persisted(&outcome);
+                pilot_tui::setup_flow::save_persisted(&**store_for_save, &persisted);
+            });
         model = model.with_setup_complete_hook(hook);
         if let Some(p) = preselect {
             model = model.with_preselect(p);
@@ -346,23 +344,18 @@ async fn run_embedded_realm(
         // Detect installed editors for the `e` shortcut. User
         // overrides come from `~/.pilot/config.yaml::editors`; the
         // builtins ship as defaults.
-        let editors =
-            pilot_tui::editors::discover_at_startup(load_user_editors());
+        let editors = pilot_tui::editors::discover_at_startup(load_user_editors());
         tracing::info!("detected {} editor(s)", editors.len());
         model.cache_editors(editors);
         // Apply ~/.pilot/config.yaml::{attention, ui, agent_shortcuts}
         // → sidebar + Model. Single load; subsequent reads happen
         // on-demand via Config::save_with for the writable parts.
-        let user_config = pilot_config::Config::load()
-            .unwrap_or_else(|e| {
-                tracing::warn!("config.yaml load: {e}; using defaults");
-                pilot_config::Config::default()
-            });
-        let agent_shortcuts: std::collections::HashMap<char, String> = user_config
-            .agent_shortcuts
-            .clone()
-            .into_iter()
-            .collect();
+        let user_config = pilot_config::Config::load().unwrap_or_else(|e| {
+            tracing::warn!("config.yaml load: {e}; using defaults");
+            pilot_config::Config::default()
+        });
+        let agent_shortcuts: std::collections::HashMap<char, String> =
+            user_config.agent_shortcuts.clone().into_iter().collect();
         let ui_defaults = user_config.ui.resolved();
         let keybindings = user_config.ui.keybindings.clone();
         model.apply_sidebar_config(
@@ -374,10 +367,7 @@ async fn run_embedded_realm(
             &ui_defaults,
         );
         model.apply_keybindings(keybindings);
-        model = model.with_splits(
-            user_config.ui.sidebar_pct,
-            user_config.ui.right_top_pct,
-        );
+        model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);
         }
@@ -406,9 +396,7 @@ async fn build_scope_sources() -> Vec<Box<dyn pilot_core::ScopeSource>> {
     sources
 }
 
-fn persisted_setup(
-    store: &dyn pilot_store::Store,
-) -> Option<pilot_core::PersistedSetup> {
+fn persisted_setup(store: &dyn pilot_store::Store) -> Option<pilot_core::PersistedSetup> {
     pilot_tui::setup_flow::load_persisted(store)
 }
 
@@ -485,7 +473,10 @@ fn server_stop() -> anyhow::Result<()> {
 fn server_status() -> anyhow::Result<()> {
     match lifecycle::status() {
         ServerStatus::Running { pid } => {
-            println!("running (pid {pid}) at {}", lifecycle::socket_path().display());
+            println!(
+                "running (pid {pid}) at {}",
+                lifecycle::socket_path().display()
+            );
         }
         ServerStatus::Stopped => println!("stopped"),
     }

@@ -22,13 +22,13 @@
 //! the top changes. Modal payloads come back as `Msg`s from
 //! `app.tick(...)` and `Model::update` decides what to do.
 
+use crate::PaneId;
+use crate::realm::UserEvent;
 use crate::realm::components::right::Right;
 use crate::realm::components::sidebar::Sidebar;
 use crate::realm::components::splash::Splash;
 use crate::realm::components::terminals::Terminals;
 use crate::realm::keymap::realm_key_to_crossterm;
-use crate::realm::UserEvent;
-use crate::PaneId;
 use pilot_ipc::{Client, Command as IpcCommand, Event as IpcEvent};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -325,9 +325,9 @@ impl Poll<UserEvent> for ChannelPort {
         match self.rx.try_recv() {
             Ok(ev) => Ok(Some(ev)),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Err(
-                PortError::PermanentError("event channel disconnected".into()),
-            ),
+            Err(mpsc::TryRecvError::Disconnected) => Err(PortError::PermanentError(
+                "event channel disconnected".into(),
+            )),
         }
     }
 }
@@ -345,7 +345,7 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{pane_areas, LayoutCtx};
+use crate::realm::layout::{LayoutCtx, pane_areas};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 
@@ -433,10 +433,7 @@ impl Model<CrosstermTerminalAdapter> {
         // via OSC 52). F8 / Alt-s toggles capture off if the user
         // wants the host's native selection (which spans across
         // pilot's UI chrome and is uglier).
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::EnableMouseCapture,
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
         // Bracketed paste: the host terminal wraps Cmd-V'd text in
         // `ESC [ 200 ~ … ESC [ 201 ~` so we can tell "user pasted a
         // chunk" from "user typed N characters very fast." Without
@@ -445,10 +442,7 @@ impl Model<CrosstermTerminalAdapter> {
         // jumps around, etc. The `Event::Paste(text)` handler
         // below forwards the wrapped sequence to the PTY so the
         // inner program sees it as a single paste.
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::EnableBracketedPaste,
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,);
         // Ask the host terminal to disambiguate modified Enter /
         // Tab / Backspace etc. via the kitty keyboard protocol.
         // Without this, most terminals collapse Shift-Enter into
@@ -505,9 +499,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// the polling loop with the user's persisted selections.
     pub fn with_setup_complete_hook(
         mut self,
-        hook: std::sync::Arc<
-            dyn Fn(crate::setup_flow::SetupOutcome) + Send + Sync,
-        >,
+        hook: std::sync::Arc<dyn Fn(crate::setup_flow::SetupOutcome) + Send + Sync>,
     ) -> Self {
         self.setup.on_complete = Some(hook);
         self
@@ -729,8 +721,12 @@ impl<T: TerminalAdapter> Model<T> {
     fn mount_editor_picker(&mut self) {
         use crate::realm::components::choice::Choice;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
-        let labels: Vec<String> =
-            self.setup.editors.iter().map(|e| e.display.clone()).collect();
+        let labels: Vec<String> = self
+            .setup
+            .editors
+            .iter()
+            .map(|e| e.display.clone())
+            .collect();
         self.setup.editor_choices = self.setup.editors.clone();
         let modal = Choice::single("Open in which editor?", labels)
             .title("Open editor")
@@ -853,9 +849,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditFilters { provider_id, .. } => {
                 PartialEntry::EditFilter(provider_id)
             }
-            SettingsAction::EditScopes { provider_id, .. } => {
-                PartialEntry::EditScopes(provider_id)
-            }
+            SettingsAction::EditScopes { provider_id, .. } => PartialEntry::EditScopes(provider_id),
             SettingsAction::FullSetup => {
                 self.start_setup_wizard(report, sources);
                 return;
@@ -897,18 +891,12 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Restore terminal state (idempotent).
     pub fn shutdown(&mut self) {
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::DisableMouseCapture,
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture,);
         // Drop the bracketed-paste enable we set in `new`. Without
         // this the host terminal keeps wrapping pastes in
         // `ESC[200~…ESC[201~` even after pilot exits — every
         // subsequent shell paste shows the literal markers.
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::DisableBracketedPaste,
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste,);
         // Drop the kitty keyboard protocol bits we pushed in `new`.
         // Skipping this would leak the request into the user's host
         // shell after pilot exits — subsequent commands would still
@@ -1064,28 +1052,21 @@ impl<T: TerminalAdapter> Model<T> {
             // sticky; retryable ones (which shouldn't reach here)
             // auto-fade in render.
             Msg::PollingError((source, kind, detail, message)) => {
-                tracing::warn!(
-                    "polling error from {source} ({kind}): {message} — {detail}"
-                );
+                tracing::warn!("polling error from {source} ({kind}): {message} — {detail}");
                 use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let severity = match kind.as_str() {
                     "auth" => NoticeSeverity::Auth,
                     "retryable" => NoticeSeverity::Retryable,
                     _ => NoticeSeverity::Permanent,
                 };
-                self.status.notice = Some(Notice::new(
-                    format!("{source}: {message}"),
-                    severity,
-                ));
+                self.status.notice = Some(Notice::new(format!("{source}: {message}"), severity));
                 self.redraw = true;
             }
             Msg::PollingTimeout => {
                 tracing::info!("polling first-cycle timeout — modal dismissed");
             }
             Msg::PollingEmptyInbox(queries) => {
-                tracing::info!(
-                    "polling completed with empty inbox; queries seen: {queries:?}"
-                );
+                tracing::info!("polling completed with empty inbox; queries seen: {queries:?}");
             }
         }
     }
@@ -1143,8 +1124,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Some(Id::RequestReviewers) => {
-                let Some(workspace_key) = self.pending_review_request.take()
-                else {
+                let Some(workspace_key) = self.pending_review_request.take() else {
                     return cmds;
                 };
                 let logins = parse_login_list(&text);
@@ -1162,8 +1142,7 @@ impl<T: TerminalAdapter> Model<T> {
                 });
             }
             Some(Id::AddAssignees) => {
-                let Some(workspace_key) = self.pending_assignees_request.take()
-                else {
+                let Some(workspace_key) = self.pending_assignees_request.take() else {
                     return cmds;
                 };
                 let logins = parse_login_list(&text);
@@ -1237,8 +1216,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.pop_modal();
             let Some(editor) = editor else { return cmds };
             if let Some(workspace_key) = self.setup.pending_editor_workspace.take() {
-                self.setup.pending_editor_launch =
-                    Some((workspace_key.clone(), editor.clone()));
+                self.setup.pending_editor_launch = Some((workspace_key.clone(), editor.clone()));
                 cmds.push(IpcCommand::Spawn {
                     session_key: workspace_key.clone(),
                     session_id: None,
@@ -1403,12 +1381,10 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_setup_modal(component);
             }
             RunnerStep::Finish(outcome) => {
-                let sources: Vec<String> =
-                    outcome.enabled_providers.iter().cloned().collect();
+                let sources: Vec<String> = outcome.enabled_providers.iter().cloned().collect();
                 // Cache the new persisted state so subsequent partial
                 // flows (Settings → Add a repo) see the latest scopes.
-                self.setup.persisted =
-                    Some(crate::setup_flow::outcome_to_persisted(&outcome));
+                self.setup.persisted = Some(crate::setup_flow::outcome_to_persisted(&outcome));
                 // Push the new repo subscriptions into the sidebar so
                 // the user sees a header for the freshly-added repo
                 // even before polling finds workspaces under it.
@@ -1503,9 +1479,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
-            _ if self.focus != PaneFocus::Terminals
-                && self.matches_quit_chord(&key) =>
-            {
+            _ if self.focus != PaneFocus::Terminals && self.matches_quit_chord(&key) => {
                 // Quit chord (default `q q`): first key arms the
                 // latch; second key within `ui.quit_double_tap_window`
                 // fires. Single-key bindings (e.g., a user remap to
@@ -1672,11 +1646,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // Need a PR or a gh issue with a node_id —
                     // assignment requires the Assignable's GraphQL
                     // id. Empty workspaces don't have one yet.
-                    let has_target = ws
-                        .pr
-                        .as_ref()
-                        .map(|p| p.node_id.is_some())
-                        .unwrap_or(false)
+                    let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
                         || ws
                             .gh_issues
                             .first()
@@ -1799,8 +1769,7 @@ impl<T: TerminalAdapter> Model<T> {
             // arriving between the two `]`s falls through to the
             // flush-held branch below. Use a generous 1s window so a
             // hesitant user still gets out.
-            const ESCAPE_WINDOW: std::time::Duration =
-                std::time::Duration::from_secs(1);
+            const ESCAPE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
             if self.escape_latch.tap(ESCAPE_WINDOW) {
                 self.focus = PaneFocus::Sidebar;
                 self.set_focus_attr();
@@ -2012,11 +1981,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Test entry point: drive a mouse event through `handle_mouse`
     /// after manually setting `last_area` (since `view()` would
     /// otherwise be needed to populate it).
-    pub fn dispatch_mouse_in(
-        &mut self,
-        m: crossterm::event::MouseEvent,
-        area: Rect,
-    ) {
+    pub fn dispatch_mouse_in(&mut self, m: crossterm::event::MouseEvent, area: Rect) {
         self.layout.last_area = area;
         self.handle_mouse(m);
     }
@@ -2083,10 +2048,7 @@ impl<T: TerminalAdapter> Model<T> {
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());
         bytes.extend_from_slice(b"\x1b[201~");
-        self.send_cmd(IpcCommand::Write {
-            terminal_id,
-            bytes,
-        });
+        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
         self.redraw = true;
     }
 
@@ -2133,26 +2095,19 @@ impl<T: TerminalAdapter> Model<T> {
                 if rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
-                    && self.layout.hit_test_splitter(
-                        m.column,
-                        m.row,
-                        sidebar_rect,
-                        right_top_rect,
-                    )
-                    .is_none()
+                    && self
+                        .layout
+                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
+                        .is_none()
                 {
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
                     let vt_button = match button {
-                        crossterm::event::MouseButton::Left => {
-                            libghostty_vt::mouse::Button::Left
-                        }
+                        crossterm::event::MouseButton::Left => libghostty_vt::mouse::Button::Left,
                         crossterm::event::MouseButton::Middle => {
                             libghostty_vt::mouse::Button::Middle
                         }
-                        crossterm::event::MouseButton::Right => {
-                            libghostty_vt::mouse::Button::Right
-                        }
+                        crossterm::event::MouseButton::Right => libghostty_vt::mouse::Button::Right,
                     };
                     if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
                         libghostty_vt::mouse::Action::Press,
@@ -2160,20 +2115,15 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        self.send_cmd(IpcCommand::Write {
-                            terminal_id,
-                            bytes,
-                        });
+                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
                         self.redraw = true;
                         return;
                     }
                 }
-                if let Some(target) = self.layout.hit_test_splitter(
-                    m.column,
-                    m.row,
-                    sidebar_rect,
-                    right_top_rect,
-                ) {
+                if let Some(target) =
+                    self.layout
+                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
+                {
                     self.layout.active_drag = Some(target);
                     return;
                 }
@@ -2219,34 +2169,27 @@ impl<T: TerminalAdapter> Model<T> {
                         && matches!(button, crossterm::event::MouseButton::Left)
                         && !self.terminals.focused_terminal_tracks_mouse()
                     {
-                        self.terminal_selection =
-                            Some(((m.column, m.row), (m.column, m.row)));
+                        self.terminal_selection = Some(((m.column, m.row), (m.column, m.row)));
                     } else {
                         let _ = button;
                     }
                     if focus == PaneFocus::Right {
                         const DOUBLE_CLICK_WINDOW: std::time::Duration =
                             std::time::Duration::from_millis(400);
-                        let is_double = matches!(
-                            button,
-                            crossterm::event::MouseButton::Left
-                        ) && self
-                            .last_click
-                            .map(|(c, r, t)| {
-                                c == m.column
-                                    && r == m.row
-                                    && t.elapsed() <= DOUBLE_CLICK_WINDOW
-                            })
-                            .unwrap_or(false);
+                        let is_double = matches!(button, crossterm::event::MouseButton::Left)
+                            && self
+                                .last_click
+                                .map(|(c, r, t)| {
+                                    c == m.column
+                                        && r == m.row
+                                        && t.elapsed() <= DOUBLE_CLICK_WINDOW
+                                })
+                                .unwrap_or(false);
                         let handled = if is_double {
                             self.last_click = None; // consume the pair
                             self.right.handle_mouse_double_click(m.column, m.row)
                         } else {
-                            self.last_click = Some((
-                                m.column,
-                                m.row,
-                                std::time::Instant::now(),
-                            ));
+                            self.last_click = Some((m.column, m.row, std::time::Instant::now()));
                             self.right.handle_mouse_click(m.column, m.row)
                         };
                         if handled {
@@ -2257,8 +2200,7 @@ impl<T: TerminalAdapter> Model<T> {
                         // users coming from mouse-heavy IDEs.
                         if let Some(msg) = self.right.drain_selection_notice() {
                             use crate::realm::components::footer::{Notice, NoticeSeverity};
-                            self.status.notice =
-                                Some(Notice::new(msg, NoticeSeverity::Hint));
+                            self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
                         }
                     }
                 }
@@ -2295,11 +2237,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // skip the copy gesture for it.
                     let was_drag = start != end;
                     if was_drag {
-                        let text = self.terminals.extract_text(
-                            right_bottom_rect,
-                            start,
-                            end,
-                        );
+                        let text = self.terminals.extract_text(right_bottom_rect, start, end);
                         if !text.trim().is_empty() {
                             emit_clipboard_copy(&text);
                             use crate::realm::components::footer::{Notice, NoticeSeverity};
@@ -2324,15 +2262,11 @@ impl<T: TerminalAdapter> Model<T> {
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
                     let vt_button = match button {
-                        crossterm::event::MouseButton::Left => {
-                            libghostty_vt::mouse::Button::Left
-                        }
+                        crossterm::event::MouseButton::Left => libghostty_vt::mouse::Button::Left,
                         crossterm::event::MouseButton::Middle => {
                             libghostty_vt::mouse::Button::Middle
                         }
-                        crossterm::event::MouseButton::Right => {
-                            libghostty_vt::mouse::Button::Right
-                        }
+                        crossterm::event::MouseButton::Right => libghostty_vt::mouse::Button::Right,
                     };
                     if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
                         libghostty_vt::mouse::Action::Release,
@@ -2340,10 +2274,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        self.send_cmd(IpcCommand::Write {
-                            terminal_id,
-                            bytes,
-                        });
+                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
                         self.redraw = true;
                     }
                 }
@@ -2360,8 +2291,11 @@ impl<T: TerminalAdapter> Model<T> {
                     // visible window which felt molasses-slow vs
                     // native terminals.
                     const STEP: isize = 8;
-                    let delta =
-                        if matches!(m.kind, MouseEventKind::ScrollUp) { -STEP } else { STEP };
+                    let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                        -STEP
+                    } else {
+                        STEP
+                    };
                     if self.right.scroll_activity(delta) {
                         self.redraw = true;
                     }
@@ -2384,10 +2318,8 @@ impl<T: TerminalAdapter> Model<T> {
                 // work" — encode + forward is the only way to scroll
                 // anything pilot wraps.
                 if self.terminals.focused_terminal_tracks_mouse() {
-                    let cell_col =
-                        m.column.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row =
-                        m.row.saturating_sub(right_bottom_rect.y) as u32;
+                    let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
+                    let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
                     // SGR wheel mapping: button 4 = up, button 5 = down.
                     let button = if matches!(m.kind, MouseEventKind::ScrollUp) {
                         libghostty_vt::mouse::Button::Four
@@ -2400,10 +2332,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        self.send_cmd(IpcCommand::Write {
-                            terminal_id,
-                            bytes,
-                        });
+                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
                         self.redraw = true;
                         return;
                     }
@@ -2478,10 +2407,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Command::RequestReviewers`. Accepts comma- / whitespace-
     /// separated logins (optional `@` prefix). No-op when an input
     /// modal of the same id is already on top.
-    pub(crate) fn mount_request_reviewers(
-        &mut self,
-        workspace_key: pilot_core::WorkspaceKey,
-    ) {
+    pub(crate) fn mount_request_reviewers(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::input::Input;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
@@ -2506,10 +2432,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the "add assignees" input modal for the given
     /// workspace's PR or issue. Same shape as
     /// `mount_request_reviewers`.
-    pub(crate) fn mount_add_assignees(
-        &mut self,
-        workspace_key: pilot_core::WorkspaceKey,
-    ) {
+    pub(crate) fn mount_add_assignees(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::input::Input;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
@@ -2549,19 +2472,49 @@ impl<T: TerminalAdapter> Model<T> {
         // local keymap is built from its own `keymap()` and doesn't
         // duplicate these.
         const GLOBAL: &[Binding] = &[
-            Binding { keys: "Tab", label: "cycle panes" },
-            Binding { keys: "Shift-Arrows", label: "resize splitters" },
-            Binding { keys: "Ctrl-Shift-D", label: "detach pane" },
-            Binding { keys: ",", label: "settings" },
-            Binding { keys: "?", label: "this help" },
-            Binding { keys: "q q", label: "quit" },
+            Binding {
+                keys: "Tab",
+                label: "cycle panes",
+            },
+            Binding {
+                keys: "Shift-Arrows",
+                label: "resize splitters",
+            },
+            Binding {
+                keys: "Ctrl-Shift-D",
+                label: "detach pane",
+            },
+            Binding {
+                keys: ",",
+                label: "settings",
+            },
+            Binding {
+                keys: "?",
+                label: "this help",
+            },
+            Binding {
+                keys: "q q",
+                label: "quit",
+            },
         ];
 
         let sections = vec![
-            HelpSection { title: "Global", bindings: GLOBAL },
-            HelpSection { title: "Sidebar", bindings: self.sidebar.keymap() },
-            HelpSection { title: "Activity", bindings: self.right.keymap() },
-            HelpSection { title: "Terminals", bindings: self.terminals.keymap() },
+            HelpSection {
+                title: "Global",
+                bindings: GLOBAL,
+            },
+            HelpSection {
+                title: "Sidebar",
+                bindings: self.sidebar.keymap(),
+            },
+            HelpSection {
+                title: "Activity",
+                bindings: self.right.keymap(),
+            },
+            HelpSection {
+                title: "Terminals",
+                bindings: self.terminals.keymap(),
+            },
         ];
 
         let _ = self.app.mount(
@@ -2585,8 +2538,7 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.modal_stack.is_empty() {
             return;
         }
-        let Some((workspace_key, label, title, count)) =
-            self.pending_removal_prompts.pop_front()
+        let Some((workspace_key, label, title, count)) = self.pending_removal_prompts.pop_front()
         else {
             return;
         };
@@ -2647,10 +2599,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .primary_task()
                 .map(|t| t.id.key.clone())
                 .unwrap_or_else(|| ws.name.clone());
-            items.push((
-                pilot_core::WorkspaceKey::new(key.as_str()),
-                label,
-            ));
+            items.push((pilot_core::WorkspaceKey::new(key.as_str()), label));
         }
         if items.is_empty() {
             self.status.notice = Some(Notice::new(
@@ -2745,17 +2694,14 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::realm::components::footer::{Notice, NoticeSeverity};
         self.mouse_capture_on = !self.mouse_capture_on;
         let (msg, _) = if self.mouse_capture_on {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::event::EnableMouseCapture,
-            );
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
             ("mouse: pilot (clicks → splitter/focus, wheel → scroll)", ())
         } else {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::event::DisableMouseCapture,
-            );
-            ("mouse: host (native selection ON — Ctrl-Shift-S to flip back)", ())
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture,);
+            (
+                "mouse: host (native selection ON — Ctrl-Shift-S to flip back)",
+                (),
+            )
         };
         self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
         self.redraw = true;
@@ -2786,8 +2732,7 @@ impl<T: TerminalAdapter> Model<T> {
         // changes (token rotation).
         if let IpcEvent::ViewerIdentities { logins } = &event {
             for (source, login) in logins {
-                self.viewer_logins
-                    .insert(source.clone(), login.clone());
+                self.viewer_logins.insert(source.clone(), login.clone());
             }
             self.right.set_viewer_logins(self.viewer_logins.clone());
             self.redraw = true;
@@ -2795,8 +2740,10 @@ impl<T: TerminalAdapter> Model<T> {
         }
 
         let is_snapshot = matches!(&event, IpcEvent::Snapshot { .. });
-        let is_spawn =
-            matches!(&event, IpcEvent::TerminalSpawned { .. } | IpcEvent::TerminalFocusRequested { .. });
+        let is_spawn = matches!(
+            &event,
+            IpcEvent::TerminalSpawned { .. } | IpcEvent::TerminalFocusRequested { .. }
+        );
 
         // Out-of-scope workspaces with running terminals — queue a
         // Confirm prompt before killing anything. Don't forward the
@@ -2890,7 +2837,12 @@ impl<T: TerminalAdapter> Model<T> {
         // to the next poll cycle (~30s) for the visual to catch up,
         // which felt broken. Refresh still goes out so the next
         // poll backfills everything else.
-        if let IpcEvent::PrMerged { pr_label, workspace_key, .. } = &event {
+        if let IpcEvent::PrMerged {
+            pr_label,
+            workspace_key,
+            ..
+        } = &event
+        {
             use crate::realm::components::footer::{Notice, NoticeSeverity};
             self.sidebar.mark_workspace_merged(workspace_key);
             self.status.notice = Some(Notice::new(
@@ -3008,10 +2960,7 @@ impl<T: TerminalAdapter> Model<T> {
                 index,
                 "auto-mark-read fired → Command::MarkActivityRead",
             );
-            self.send_cmd(IpcCommand::MarkActivityRead {
-                session_key,
-                index,
-            });
+            self.send_cmd(IpcCommand::MarkActivityRead { session_key, index });
             self.redraw = true;
         }
     }
@@ -3105,10 +3054,7 @@ impl<T: TerminalAdapter> Model<T> {
 
 /// True if `(col, row)` lies within `rect`'s half-open bounds.
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
-    col >= rect.x
-        && col < rect.x + rect.width
-        && row >= rect.y
-        && row < rect.y + rect.height
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
 /// Spawn a new `pilot` process pinned to the focused pane's
@@ -3207,9 +3153,7 @@ pub fn run() -> anyhow::Result<()> {
 /// Run the loop on a pre-configured model. Used by
 /// `main::run_embedded_realm` so it can install the on-setup-complete
 /// hook + start the wizard before entering the loop.
-pub fn run_loop_with_model<T: TerminalAdapter>(
-    mut model: Model<T>,
-) -> anyhow::Result<()> {
+pub fn run_loop_with_model<T: TerminalAdapter>(mut model: Model<T>) -> anyhow::Result<()> {
     let result = run_loop(&mut model);
     model.shutdown();
     result
@@ -3272,9 +3216,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                     if model.modal_stack.is_empty() {
                         model.handle_pane_key(realm_key);
                     } else {
-                        let _ = model
-                            .modal_event_tx
-                            .send(RealmEvent::Keyboard(realm_key));
+                        let _ = model.modal_event_tx.send(RealmEvent::Keyboard(realm_key));
                         // ChannelPort is polled by the listener thread
                         // every 10ms, so a tight 15ms window often
                         // expires before the listener delivers the
@@ -3290,14 +3232,10 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                         // under the human-noticeable threshold for
                         // key feedback but long enough to absorb the
                         // 10ms listener cadence + system jitter.
-                        let deadline = std::time::Instant::now()
-                            + Duration::from_millis(150);
+                        let deadline = std::time::Instant::now() + Duration::from_millis(150);
                         let mut handled = false;
                         loop {
-                            match model
-                                .app
-                                .tick(PollStrategy::Once(Duration::ZERO))
-                            {
+                            match model.app.tick(PollStrategy::Once(Duration::ZERO)) {
                                 Ok(messages) if !messages.is_empty() => {
                                     for msg in messages {
                                         model.update(msg);
@@ -3319,8 +3257,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                         // multiple `Msg`s and we don't want them to
                         // straggle into the next keypress.
                         if handled
-                            && let Ok(messages) =
-                                model.app.tick(PollStrategy::Once(Duration::ZERO))
+                            && let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO))
                         {
                             for msg in messages {
                                 model.update(msg);
@@ -3347,9 +3284,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                         // the modal event channel. The textarea
                         // modal will see this as a multi-char paste
                         // and insert at cursor.
-                        let _ = model
-                            .modal_event_tx
-                            .send(RealmEvent::Paste(text));
+                        let _ = model.modal_event_tx.send(RealmEvent::Paste(text));
                     }
                 }
                 _ => {}
@@ -3442,8 +3377,7 @@ fn emit_clipboard_copy(text: &str) {
 /// and pulling one in for one OSC 52 call is overkill. ~25 lines,
 /// allocation-free aside from the output `String`.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -3697,7 +3631,10 @@ mod effects_tests {
         let cmds = m.handle_input_submitted("@alice, @bob".into());
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::RequestReviewers { workspace_key, logins } => {
+            IpcCommand::RequestReviewers {
+                workspace_key,
+                logins,
+            } => {
                 assert_eq!(workspace_key, &ws_key);
                 assert_eq!(logins, &vec!["alice".to_string(), "bob".to_string()]);
             }
@@ -3718,7 +3655,10 @@ mod effects_tests {
         let cmds = m.handle_input_submitted("alice   @bob".into());
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::AddAssignees { workspace_key, logins } => {
+            IpcCommand::AddAssignees {
+                workspace_key,
+                logins,
+            } => {
                 assert_eq!(workspace_key, &ws_key);
                 assert_eq!(logins, &vec!["alice".to_string(), "bob".to_string()]);
             }

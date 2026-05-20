@@ -5,8 +5,7 @@
 // pilot-server. Import via the public re-export instead;
 // `agent_stream` is already `pub mod` in lib.rs.
 use pilot_server::agent_stream::{
-    ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, parse_jsonl_line,
-    user_text_value,
+    ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, parse_jsonl_line, user_text_value,
 };
 use serde_json::json;
 use std::path::PathBuf;

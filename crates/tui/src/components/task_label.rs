@@ -178,9 +178,7 @@ pub fn kind_color(k: ConventionalKind) -> Color {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use pilot_core::{
-        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
-    };
+    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     fn task_with_key(key: &str) -> Task {
         Task {
@@ -296,8 +294,7 @@ mod tests {
     #[test]
     fn pr_number_color_varies_across_palette() {
         // Six distinct PR numbers should hit every palette slot.
-        let colors: std::collections::HashSet<_> =
-            (0..6).map(pr_number_color).collect();
+        let colors: std::collections::HashSet<_> = (0..6).map(pr_number_color).collect();
         assert_eq!(colors.len(), 6);
     }
 

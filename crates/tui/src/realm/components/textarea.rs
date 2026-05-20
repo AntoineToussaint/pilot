@@ -14,10 +14,10 @@
 //! - `Ctrl-W` / `Ctrl-Backspace` — kill word back.
 
 use crate::realm::Msg;
+use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyModifiers};
-use crate::realm::UserEvent;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;

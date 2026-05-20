@@ -5,10 +5,10 @@
 //! validated `!Send` components mount cleanly inside `Application`,
 //! so this wrapper just delegates render + key dispatch.
 
+use crate::PaneId;
 use crate::components::terminal_stack::TerminalStack as PilotTerminals;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
-use crate::PaneId;
 use pilot_core::SessionKey;
 use pilot_ipc::Command as IpcCommand;
 use pilot_ipc::Event as IpcEvent;
@@ -75,16 +75,12 @@ impl Terminals {
 
     /// Forward a daemon event so the inner stack stays in sync.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
-        self.inner.on_event(evt,
-        );
+        self.inner.on_event(evt);
     }
 
     /// Direct render entry point.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
-        self.inner.render(area,
-            frame,
-            self.focused,
-        );
+        self.inner.render(area, frame, self.focused);
     }
 
     /// Direct key dispatch.
@@ -93,9 +89,7 @@ impl Terminals {
         key: crossterm::event::KeyEvent,
         cmds: &mut Vec<IpcCommand>,
     ) {
-        let _ = self.inner.handle_key(key,
-            cmds,
-        );
+        let _ = self.inner.handle_key(key, cmds);
     }
 
     /// Update the focused-flag.
@@ -196,10 +190,7 @@ impl Terminals {
 
 impl Component for Terminals {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        self.inner.render(area,
-            frame,
-            self.focused,
-        );
+        self.inner.render(area, frame, self.focused);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -225,16 +216,13 @@ impl AppComponent<Msg, UserEvent> for Terminals {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
             Event::User(UserEvent::Daemon(evt)) => {
-                self.inner.on_event(evt,
-                );
+                self.inner.on_event(evt);
                 None
             }
             Event::Keyboard(key) if self.focused => {
                 let ct_key = realm_key_to_crossterm(key);
                 let mut cmds: Vec<IpcCommand> = Vec::new();
-                let _ = self.inner.handle_key(ct_key,
-                    &mut cmds,
-                );
+                let _ = self.inner.handle_key(ct_key, &mut cmds);
                 if !cmds.is_empty() {
                     self.pending_cmds.extend(cmds);
                     return Some(Msg::TerminalCmds);

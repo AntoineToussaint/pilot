@@ -161,7 +161,13 @@ impl TmuxBackend {
         // '.', ':', or whitespace. Replace any with '-'.
         let safe: String = hint
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect();
         format!("pilot-{safe}-{}-{n}", std::process::id())
     }

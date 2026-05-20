@@ -25,7 +25,19 @@ jobs:
 
       - name: Install C toolchain (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+        # `libstdc++-dev` (any recent version on the runner image)
+        # is required so rust-lld can resolve the libcxx runtime
+        # symbols that the Zig-built ghostty static archive
+        # references (`__cxa_throw`, `std::length_error` vtable, …).
+        # build-essential brings the runtime in but not the
+        # link-time stubs on `ubuntu-22.04`.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+          # Prefer the version that matches the runner's default gcc.
+          sudo apt-get install -y libstdc++-12-dev || \
+            sudo apt-get install -y libstdc++-11-dev || \
+            sudo apt-get install -y libstdc++-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

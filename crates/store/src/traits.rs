@@ -51,10 +51,7 @@ pub trait Store: Send + Sync {
     // Concrete stores can override for native indexes; simple kv-only
     // stores get workspace methods for free without overrides.
 
-    fn get_workspace(
-        &self,
-        key: &WorkspaceKey,
-    ) -> Result<Option<WorkspaceRecord>, StoreError> {
+    fn get_workspace(&self, key: &WorkspaceKey) -> Result<Option<WorkspaceRecord>, StoreError> {
         let kv_key = format!("workspace:{}", key.as_str());
         let Some(json) = self.get_kv(&kv_key)? else {
             return Ok(None);

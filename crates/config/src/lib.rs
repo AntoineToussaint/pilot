@@ -351,8 +351,7 @@ impl Keybindings {
                 Action::AdoptSessions => "Shift-A",
                 Action::JumpToAsking => "!",
             };
-            KeySpec::parse_chord(fallback)
-                .expect("fallback chord must parse — code-only constant")
+            KeySpec::parse_chord(fallback).expect("fallback chord must parse — code-only constant")
         })
     }
 }
@@ -862,19 +861,14 @@ mod duration_secs_opt {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
-    pub fn serialize<S: Serializer>(
-        d: &Option<Duration>,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
         match d {
             Some(d) => s.serialize_str(&format!("{}s", d.as_secs())),
             None => s.serialize_none(),
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<Duration>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
         let s: Option<String> = Option::deserialize(d)?;
         match s {
             Some(s) => {
@@ -886,7 +880,6 @@ mod duration_secs_opt {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -919,7 +912,10 @@ repos:
             entry.env.get("DATABASE_URL").map(String::as_str),
             Some("postgres://localhost/dev")
         );
-        assert_eq!(entry.env.get("OPENAI_API_KEY").map(String::as_str), Some("sk-test"));
+        assert_eq!(
+            entry.env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
         assert_eq!(entry.mounts.len(), 2);
         assert_eq!(entry.mounts[0].placement, PlacementSpec::Inside);
         // Second mount omits `placement` — should default to Inside.

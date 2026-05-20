@@ -27,9 +27,9 @@ use chrono::Utc;
 use pilot_auth::{CommandProvider, CredentialChain, EnvProvider};
 use pilot_core::{ProviderConfig, Task, Workspace, WorkspaceKey};
 use pilot_gh::GhClient;
+use pilot_ipc::Event;
 use pilot_linear::LinearClient;
 use pilot_store::WorkspaceRecord;
-use pilot_ipc::Event;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -87,7 +87,8 @@ impl TaskSource for GhSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
         Box::pin(async move {
             let want_prs = self.filter.pr_enabled();
             let want_issues = self.filter.issue_enabled();
@@ -115,10 +116,7 @@ impl TaskSource for GhSource {
                 self.emit_progress(format!("PR query: {}", self.client.pr_search_query()));
             }
             if want_issues {
-                self.emit_progress(format!(
-                    "Issue query: {}",
-                    self.client.issue_search_query()
-                ));
+                self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
             }
 
             let raw = self
@@ -173,7 +171,8 @@ impl TaskSource for LinearSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
         Box::pin(async move {
             self.emit_progress("Querying Linear for issues…");
             let raw = self
@@ -270,11 +269,7 @@ pub fn build_issue_search_qualifiers(
 ///
 /// Net effect: the wire query never contains a parens group, so the
 /// "0 results from a valid query" footgun is gone.
-fn role_qualifier(
-    filter: &ProviderConfig,
-    username: &str,
-    keys: &[(&str, &str)],
-) -> String {
+fn role_qualifier(filter: &ProviderConfig, username: &str, keys: &[(&str, &str)]) -> String {
     let enabled: Vec<&str> = keys
         .iter()
         .filter(|(k, _)| filter.has(k))
@@ -408,9 +403,10 @@ pub async fn sources_for(
                 // GhSource we hand out below) remain visible to the
                 // cached copy and vice versa.
                 let cred_source = cred.source.clone();
-                let cached = state.gh_client.take().filter(|c| {
-                    c.credential_source() == cred_source.as_str()
-                });
+                let cached = state
+                    .gh_client
+                    .take()
+                    .filter(|c| c.credential_source() == cred_source.as_str());
                 let client_result: Result<GhClient, _> = match cached {
                     Some(existing) => Ok(existing),
                     None => GhClient::from_credential(cred).await,
@@ -441,11 +437,10 @@ pub async fn sources_for(
                         // poll loop.
                         let viewer = client.username().to_string();
                         if !viewer.is_empty() {
-                            let mut logins =
-                                viewer_identities.lock().expect("viewer_identities poisoned");
-                            let entry = logins
-                                .iter_mut()
-                                .find(|(src, _)| src == "github");
+                            let mut logins = viewer_identities
+                                .lock()
+                                .expect("viewer_identities poisoned");
+                            let entry = logins.iter_mut().find(|(src, _)| src == "github");
                             let changed = match entry {
                                 Some((_, existing)) if *existing == viewer => false,
                                 Some((_, existing)) => {
@@ -460,9 +455,7 @@ pub async fn sources_for(
                             let snapshot = logins.clone();
                             drop(logins);
                             if changed {
-                                let _ = bus.send(Event::ViewerIdentities {
-                                    logins: snapshot,
-                                });
+                                let _ = bus.send(Event::ViewerIdentities { logins: snapshot });
                             }
                         }
                         state.gh_client = Some(client.clone());
@@ -521,8 +514,7 @@ pub async fn default_sources(
     // identities also get a throwaway slot: ad-hoc callers don't
     // need the cached value visible to other connections.
     let mut throwaway_state = TickState::default();
-    let throwaway_viewers =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let throwaway_viewers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     sources_for(&setup, bus, &mut throwaway_state, throwaway_viewers).await
 }
 
@@ -638,9 +630,8 @@ pub async fn tick_with_state(
                 // precise number (GitHub's rateLimit.resetAt) —
                 // honor it.
                 if let Some(secs) = e.retry_after_secs() {
-                    max_retry_after_secs = Some(
-                        max_retry_after_secs.map_or(secs, |existing| existing.max(secs)),
-                    );
+                    max_retry_after_secs =
+                        Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
                 }
                 // Debounce: only emit a ProviderError if the message
                 // changed since the last failure for this source.
@@ -649,7 +640,9 @@ pub async fn tick_with_state(
                 let msg = e.user_message();
                 let prev = state.last_error.get(source.name());
                 if prev.map(String::as_str) != Some(msg.as_str()) {
-                    state.last_error.insert(source.name().to_string(), msg.clone());
+                    state
+                        .last_error
+                        .insert(source.name().to_string(), msg.clone());
                     let _ = config.bus.send(Event::ProviderError {
                         source: e.source().to_string(),
                         message: msg,
@@ -717,7 +710,9 @@ pub async fn rescope_with_state(
     // Anything we polled is back in scope — drop any "already
     // prompted" memory for it so a future fall-out triggers a fresh
     // prompt.
-    state.prompted_out_of_scope.retain(|k| !polled_set.contains(k.as_str()));
+    state
+        .prompted_out_of_scope
+        .retain(|k| !polled_set.contains(k.as_str()));
 
     let records = match config.store.list_workspaces() {
         Ok(r) => r,
@@ -731,7 +726,8 @@ pub async fn rescope_with_state(
     // detect "has active session" and report the count to the user
     // when prompting.
     let terminal_meta = config.terminal_meta.lock().await;
-    let mut active_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut active_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (sk, _) in terminal_meta.values() {
         *active_counts.entry(sk.as_str().to_string()).or_default() += 1;
     }
@@ -818,10 +814,7 @@ pub async fn rescope_with_state(
 /// no separate "respawn polling" plumbing needed, and the previous
 /// per-Finish-respawn pattern (which leaked one tokio task per
 /// edit) is gone.
-pub fn spawn(
-    config: ServerConfig,
-    interval: Duration,
-) -> tokio::task::JoinHandle<()> {
+pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             // First iteration also runs immediately — the loop
@@ -959,9 +952,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
             .ok()
             .flatten()
             .is_some();
-        if !already_standalone
-            && let Some(pr_key) = pr_workspace_claiming_issue(config, &task.id)
-        {
+        if !already_standalone && let Some(pr_key) = pr_workspace_claiming_issue(config, &task.id) {
             tracing::info!(
                 issue = %task.id,
                 pr_workspace = %pr_key,
@@ -982,11 +973,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
 /// then persist + broadcast. Split out from `upsert` so the
 /// "route to PR workspace" path can reuse the same write/broadcast
 /// behaviour without duplicating it.
-async fn upsert_into_workspace_key(
-    config: &ServerConfig,
-    key: &WorkspaceKey,
-    task: Task,
-) {
+async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, task: Task) {
     // 1. PREPARE: build the workspace's final in-memory state.
     //    Includes the optional issue-collapse merge — if a PR
     //    polls in with `closes_issues`, we fold standalone issue
@@ -1016,11 +1003,7 @@ async fn upsert_into_workspace_key(
 /// drive the prepare step against a mock store without committing
 /// real state — the "did the merge attach the issue task?" question
 /// is now answerable without the full IPC bus + store side effects.
-async fn prepare_upsert(
-    config: &ServerConfig,
-    key: &WorkspaceKey,
-    task: Task,
-) -> Workspace {
+async fn prepare_upsert(config: &ServerConfig, key: &WorkspaceKey, task: Task) -> Workspace {
     let existing = config
         .store
         .get_workspace(key)
@@ -1138,10 +1121,7 @@ fn pr_workspace_claiming_issue(
 ///
 /// No-op when there's no PR, no `closes_issues`, or no matching
 /// issue workspace exists yet.
-async fn merge_closing_issue_workspaces(
-    config: &ServerConfig,
-    workspace: &mut Workspace,
-) {
+async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut Workspace) {
     let Some(pr) = workspace.pr.as_ref() else {
         return;
     };
@@ -1219,9 +1199,7 @@ async fn merge_closing_issue_workspaces(
                 "delete_workspace during PR merge failed: {e}"
             );
         }
-        let _ = config
-            .bus
-            .send(Event::WorkspaceRemoved(issue_key.clone()));
+        let _ = config.bus.send(Event::WorkspaceRemoved(issue_key.clone()));
         let _ = config.bus.send(Event::WorkspaceMerged {
             issue_workspace_key: issue_key.clone(),
             pr_workspace_key: workspace.key.clone(),
@@ -1324,9 +1302,7 @@ pub async fn handle_confirm_merge(
         issue_label,
         pr_label,
     });
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(pr_ws)));
+    let _ = config.bus.send(Event::WorkspaceUpserted(Box::new(pr_ws)));
 }
 
 /// Manual "adopt": move every session out of `source_key`'s
@@ -1602,11 +1578,7 @@ pub fn ensure_sandbox_workspace(config: &ServerConfig) -> WorkspaceKey {
 /// Set or clear the workspace's `snoozed_until` timestamp. `None`
 /// un-snoozes. Persists + broadcasts so the sidebar's mailbox-aware
 /// rendering re-categorises the row.
-pub fn set_snooze(
-    config: &ServerConfig,
-    key: &WorkspaceKey,
-    until: Option<chrono::DateTime<Utc>>,
-) {
+pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chrono::DateTime<Utc>>) {
     let Some(json) = config
         .store
         .get_workspace(key)
@@ -1787,12 +1759,7 @@ pub fn unmark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: us
     apply_activity_mark(config, key, index, /*read=*/ false);
 }
 
-fn apply_activity_mark(
-    config: &ServerConfig,
-    key: &WorkspaceKey,
-    index: usize,
-    read: bool,
-) {
+fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, read: bool) {
     let Some(json) = config
         .store
         .get_workspace(key)
@@ -1887,11 +1854,7 @@ pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
 /// into the same shape. On success we don't update the local activity
 /// feed inline — the next poll picks up the new comment, which keeps
 /// the "what the upstream provider says" invariant intact.
-pub async fn post_reply(
-    config: &ServerConfig,
-    session_key: pilot_core::SessionKey,
-    body: String,
-) {
+pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionKey, body: String) {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return;
@@ -1961,7 +1924,10 @@ pub async fn post_reply(
         emit_reply_error(config, &format!("post failed: {e}"));
         return;
     }
-    tracing::info!("posted reply to {repo}#{pr_number} ({} chars)", trimmed.len());
+    tracing::info!(
+        "posted reply to {repo}#{pr_number} ({} chars)",
+        trimmed.len()
+    );
     // The poller picks up the comment on its next tick and broadcasts
     // a workspace upsert; nothing else to do here.
 }
@@ -2078,7 +2044,9 @@ pub async fn handle_request_reviewers(
         return;
     }
     let Some(ws) = load_workspace(config, &workspace_key) else {
-        emit_err(&format!("request_reviewers: workspace {workspace_key} not found"));
+        emit_err(&format!(
+            "request_reviewers: workspace {workspace_key} not found"
+        ));
         return;
     };
     let Some(pr) = ws.pr.as_ref() else {
@@ -2114,9 +2082,7 @@ pub async fn handle_request_reviewers(
         tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e}");
         emit_err(&format!("request reviewers failed: {e}"));
     } else {
-        tracing::info!(
-            "requested reviewers {logins:?} on workspace {workspace_key}"
-        );
+        tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
     }
 }
 
@@ -2142,7 +2108,9 @@ pub async fn handle_add_assignees(
         return;
     }
     let Some(ws) = load_workspace(config, &workspace_key) else {
-        emit_err(&format!("add_assignees: workspace {workspace_key} not found"));
+        emit_err(&format!(
+            "add_assignees: workspace {workspace_key} not found"
+        ));
         return;
     };
     // Prefer the PR's node_id; fall back to the first issue. Both
@@ -2151,11 +2119,7 @@ pub async fn handle_add_assignees(
         .pr
         .as_ref()
         .and_then(|p| p.node_id.as_deref())
-        .or_else(|| {
-            ws.gh_issues
-                .first()
-                .and_then(|t| t.node_id.as_deref())
-        });
+        .or_else(|| ws.gh_issues.first().and_then(|t| t.node_id.as_deref()));
     let Some(node_id) = node_id else {
         emit_err("add_assignees: workspace has no PR / issue with a node_id");
         return;
@@ -2183,9 +2147,7 @@ pub async fn handle_add_assignees(
         tracing::warn!("add_assignees {workspace_key} {logins:?}: {e}");
         emit_err(&format!("add assignees failed: {e}"));
     } else {
-        tracing::info!(
-            "added assignees {logins:?} on workspace {workspace_key}"
-        );
+        tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
     }
 }
 

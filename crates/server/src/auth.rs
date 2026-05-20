@@ -296,8 +296,8 @@ fn send_auth_error(
     let _ = tx.send(Event::ProviderError {
         source: format!("auth:{provider_id}"),
         message: error.to_string(),
-            detail: String::new(),
-            kind: String::new(),
+        detail: String::new(),
+        kind: String::new(),
     });
 }
 

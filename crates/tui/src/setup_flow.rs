@@ -114,7 +114,9 @@ pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
         Ok(Some(raw)) if !raw.is_empty() => match serde_json::from_str::<PersistedSetup>(&raw) {
             Ok(mut p) => {
                 p.migrate_legacy_keys();
-                tracing::info!("setup loaded from legacy kv blob; will migrate to YAML on next save");
+                tracing::info!(
+                    "setup loaded from legacy kv blob; will migrate to YAML on next save"
+                );
                 Some(p)
             }
             Err(e) => {
@@ -275,19 +277,52 @@ fn provider_display(id: &str) -> String {
 fn filter_options(provider_id: &str) -> Vec<FilterOption> {
     match provider_id {
         "github" => vec![
-            FilterOption { key: "pr.author".into(), label: "I authored".into() },
-            FilterOption { key: "pr.reviewer".into(), label: "Awaiting my review".into() },
-            FilterOption { key: "pr.assignee".into(), label: "Assigned to me".into() },
-            FilterOption { key: "pr.mentioned".into(), label: "Mentioned me".into() },
-            FilterOption { key: "issue.author".into(), label: "I authored".into() },
-            FilterOption { key: "issue.assignee".into(), label: "Assigned to me".into() },
-            FilterOption { key: "issue.mentioned".into(), label: "Mentioned me".into() },
+            FilterOption {
+                key: "pr.author".into(),
+                label: "I authored".into(),
+            },
+            FilterOption {
+                key: "pr.reviewer".into(),
+                label: "Awaiting my review".into(),
+            },
+            FilterOption {
+                key: "pr.assignee".into(),
+                label: "Assigned to me".into(),
+            },
+            FilterOption {
+                key: "pr.mentioned".into(),
+                label: "Mentioned me".into(),
+            },
+            FilterOption {
+                key: "issue.author".into(),
+                label: "I authored".into(),
+            },
+            FilterOption {
+                key: "issue.assignee".into(),
+                label: "Assigned to me".into(),
+            },
+            FilterOption {
+                key: "issue.mentioned".into(),
+                label: "Mentioned me".into(),
+            },
         ],
         "linear" => vec![
-            FilterOption { key: "role.author".into(), label: "I created".into() },
-            FilterOption { key: "role.assignee".into(), label: "Assigned to me".into() },
-            FilterOption { key: "role.subscriber".into(), label: "Subscribed to".into() },
-            FilterOption { key: "role.mentioned".into(), label: "Mentioned me".into() },
+            FilterOption {
+                key: "role.author".into(),
+                label: "I created".into(),
+            },
+            FilterOption {
+                key: "role.assignee".into(),
+                label: "Assigned to me".into(),
+            },
+            FilterOption {
+                key: "role.subscriber".into(),
+                label: "Subscribed to".into(),
+            },
+            FilterOption {
+                key: "role.mentioned".into(),
+                label: "Mentioned me".into(),
+            },
         ],
         _ => vec![],
     }
@@ -298,7 +333,9 @@ fn filter_keys_set(c: &ProviderConfig) -> BTreeSet<String> {
 }
 
 fn filter_from_keys(keys: &BTreeSet<String>) -> ProviderConfig {
-    ProviderConfig { enabled_keys: keys.clone() }
+    ProviderConfig {
+        enabled_keys: keys.clone(),
+    }
 }
 
 // ── Async entry shim ────────────────────────────────────────────────────
@@ -527,10 +564,8 @@ impl SetupRunner {
                 // `insert(provider, picked_ids)` clobbered all
                 // repo-level entries silently — users would add an
                 // org and lose every prior narrowed subscription.
-                let picked_orgs: BTreeSet<String> =
-                    picked.iter().map(|s| s.id.clone()).collect();
-                let prefixes: Vec<String> =
-                    picked_orgs.iter().map(|o| format!("{o}/")).collect();
+                let picked_orgs: BTreeSet<String> = picked.iter().map(|s| s.id.clone()).collect();
+                let prefixes: Vec<String> = picked_orgs.iter().map(|o| format!("{o}/")).collect();
                 let existing = self
                     .accumulator
                     .selected_scopes
@@ -540,8 +575,7 @@ impl SetupRunner {
                 // itself, or any repo under it). Drop everything
                 // else — that's how un-ticking an org cleans up.
                 existing.retain(|id| {
-                    picked_orgs.contains(id)
-                        || prefixes.iter().any(|p| id.starts_with(p))
+                    picked_orgs.contains(id) || prefixes.iter().any(|p| id.starts_with(p))
                 });
                 // For each newly-picked org with no narrowed repos
                 // yet, add the org-level subscription so the repo
@@ -650,10 +684,7 @@ impl SetupRunner {
 
     /// Loading modal resolved its background task — payload is the
     /// boxed value the producer sent.
-    pub fn step_loading_resolved(
-        &mut self,
-        payload: Box<dyn std::any::Any + Send>,
-    ) -> RunnerStep {
+    pub fn step_loading_resolved(&mut self, payload: Box<dyn std::any::Any + Send>) -> RunnerStep {
         match self.expecting.clone() {
             ExpectingStep::ProvidersRefresh => {
                 if let Ok(report) = payload.downcast::<crate::setup::SetupReport>() {
@@ -671,20 +702,22 @@ impl SetupRunner {
                 self.expecting = ExpectingStep::Agents;
                 RunnerStep::Next(modal)
             }
-            ExpectingStep::ScopeLoadFor(provider_id) => match downcast_load_result::<Scope>(payload) {
-                LoadOutcome::Items(scopes) if scopes.is_empty() => self.next_scope_step(),
-                LoadOutcome::Items(scopes) => {
-                    let modal = self.build_scope_pick_modal(&provider_id, scopes);
-                    self.expecting = ExpectingStep::ScopePickFor(provider_id);
-                    RunnerStep::Next(modal)
+            ExpectingStep::ScopeLoadFor(provider_id) => {
+                match downcast_load_result::<Scope>(payload) {
+                    LoadOutcome::Items(scopes) if scopes.is_empty() => self.next_scope_step(),
+                    LoadOutcome::Items(scopes) => {
+                        let modal = self.build_scope_pick_modal(&provider_id, scopes);
+                        self.expecting = ExpectingStep::ScopePickFor(provider_id);
+                        RunnerStep::Next(modal)
+                    }
+                    LoadOutcome::Failed(err) => {
+                        let info = scope_error_modal(&provider_id, "orgs", &err);
+                        self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                        RunnerStep::Next(info)
+                    }
+                    LoadOutcome::BadType => RunnerStep::Cancel,
                 }
-                LoadOutcome::Failed(err) => {
-                    let info = scope_error_modal(&provider_id, "orgs", &err);
-                    self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
-                    RunnerStep::Next(info)
-                }
-                LoadOutcome::BadType => RunnerStep::Cancel,
-            },
+            }
             ExpectingStep::RepoLoadFor(provider_id, parent_id, parent_label) => {
                 match downcast_load_result::<Scope>(payload) {
                     LoadOutcome::Items(scopes) if scopes.is_empty() => {
@@ -693,11 +726,7 @@ impl SetupRunner {
                         RunnerStep::Next(info)
                     }
                     LoadOutcome::Items(scopes) => {
-                        let modal = self.build_repo_pick_modal(
-                            &provider_id,
-                            &parent_label,
-                            scopes,
-                        );
+                        let modal = self.build_repo_pick_modal(&provider_id, &parent_label, scopes);
                         self.expecting = ExpectingStep::RepoPickFor(provider_id, parent_id);
                         RunnerStep::Next(modal)
                     }
@@ -728,7 +757,8 @@ impl SetupRunner {
                     self.next_scope_step()
                 }
                 ExpectingStep::RepoLoadFor(_, _, _) => {
-                    self.expecting = ExpectingStep::RepoLoadFor(String::new(), String::new(), String::new());
+                    self.expecting =
+                        ExpectingStep::RepoLoadFor(String::new(), String::new(), String::new());
                     self.next_repo_step()
                 }
                 _ => RunnerStep::Cancel,
@@ -789,12 +819,7 @@ impl SetupRunner {
         self.pending_filters.clear();
         self.pending_scopes.clear();
         self.pending_repo_pickers.clear();
-        let providers: Vec<String> = self
-            .accumulator
-            .enabled_providers
-            .iter()
-            .cloned()
-            .collect();
+        let providers: Vec<String> = self.accumulator.enabled_providers.iter().cloned().collect();
         for pid in providers {
             self.pending_filters.push_back(pid.clone());
             self.pending_scopes.push_back(pid);
@@ -940,8 +965,7 @@ impl SetupRunner {
                 .with_selected_by(move |s: &Scope| {
                     let org_id = &s.id;
                     let prefix = format!("{org_id}/");
-                    already.contains(org_id)
-                        || already.iter().any(|id| id.starts_with(&prefix))
+                    already.contains(org_id) || already.iter().any(|id| id.starts_with(&prefix))
                 })
                 .allow_empty(true)
                 .with_back(true),
@@ -1086,14 +1110,18 @@ mod tests {
                     id: "github",
                     display_name: "GitHub",
                     category: Category::Provider,
-                    state: ToolState::Found { detail: "gh".into() },
+                    state: ToolState::Found {
+                        detail: "gh".into(),
+                    },
                     install_hint: "",
                 },
                 ToolStatus {
                     id: "claude",
                     display_name: "Claude",
                     category: Category::Agent,
-                    state: ToolState::Found { detail: "1.0".into() },
+                    state: ToolState::Found {
+                        detail: "1.0".into(),
+                    },
                     install_hint: "",
                 },
             ],
@@ -1228,7 +1256,10 @@ mod tests {
                 assert!(out.enabled_providers.is_empty());
                 assert!(out.enabled_agents.contains("claude"));
             }
-            other => panic!("expected Finish, got {:?}", matches!(other, RunnerStep::Finish(_))),
+            other => panic!(
+                "expected Finish, got {:?}",
+                matches!(other, RunnerStep::Finish(_))
+            ),
         }
     }
 
@@ -1278,7 +1309,11 @@ mod tests {
             !gh.iter().any(|f| f.key == "issue.reviewer"),
             "issues have no reviewer role"
         );
-        assert!(filter_options("linear").iter().any(|f| f.key == "role.subscriber"));
+        assert!(
+            filter_options("linear")
+                .iter()
+                .any(|f| f.key == "role.subscriber")
+        );
         assert!(filter_options("nonexistent").is_empty());
     }
 

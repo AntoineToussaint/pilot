@@ -8,9 +8,7 @@
 //! so they don't need a real terminal or raw mode.
 
 use chrono::Utc;
-use crossterm::event::{
-    KeyModifiers as CtKeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{KeyModifiers as CtKeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use pilot_core::{SessionKey, Workspace, WorkspaceKey};
 use pilot_ipc::{Event as IpcEvent, channel};
 use pilot_tui::realm::Model;
@@ -230,11 +228,7 @@ fn handle_daemon_event_applies_preselect_on_first_snapshot() {
         session_id_raw: None,
     });
     // Build a snapshot with a single workspace matching the target.
-    let workspace = Workspace::empty(
-        WorkspaceKey(target_key.to_string()),
-        "main",
-        Utc::now(),
-    );
+    let workspace = Workspace::empty(WorkspaceKey(target_key.to_string()), "main", Utc::now());
     let snapshot = IpcEvent::Snapshot {
         workspaces: vec![workspace],
         terminals: Vec::new(),
@@ -345,11 +339,7 @@ fn r_mounts_reply_modal_from_sidebar() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let target_key = "github:owner/repo#42";
-    let workspace = Workspace::empty(
-        WorkspaceKey(target_key.to_string()),
-        "main",
-        Utc::now(),
-    );
+    let workspace = Workspace::empty(WorkspaceKey(target_key.to_string()), "main", Utc::now());
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![workspace],
         terminals: Vec::new(),
@@ -367,11 +357,7 @@ fn r_mounts_reply_modal_from_right_pane() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let target_key = "github:owner/repo#42";
-    let workspace = Workspace::empty(
-        WorkspaceKey(target_key.to_string()),
-        "main",
-        Utc::now(),
-    );
+    let workspace = Workspace::empty(WorkspaceKey(target_key.to_string()), "main", Utc::now());
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![workspace],
         terminals: Vec::new(),
@@ -577,7 +563,10 @@ fn merge_confirm_esc_sends_reject_command() {
         active_terminal_count: 1,
     });
     m.update(pilot_tui::realm::Msg::ModalDismissed);
-    let cmd = server.rx.try_recv().expect("ConfirmMerge command emitted on Esc");
+    let cmd = server
+        .rx
+        .try_recv()
+        .expect("ConfirmMerge command emitted on Esc");
     match cmd {
         Command::ConfirmMerge { accept, .. } => assert!(!accept),
         other => panic!("expected ConfirmMerge, got {other:?}"),
@@ -585,9 +574,7 @@ fn merge_confirm_esc_sends_reject_command() {
 }
 
 fn task_with_pr(key: &str) -> pilot_core::Task {
-    use pilot_core::{
-        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
-    };
+    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
     Task {
         id: TaskId {
@@ -751,10 +738,7 @@ fn tick_right_drives_auto_mark_and_emits_command() {
         commands.push(cmd);
     }
     let marked = commands.iter().find_map(|c| match c {
-        Command::MarkActivityRead {
-            session_key,
-            index,
-        } => Some((session_key.clone(), *index)),
+        Command::MarkActivityRead { session_key, index } => Some((session_key.clone(), *index)),
         _ => None,
     });
     let (session_key, index) =

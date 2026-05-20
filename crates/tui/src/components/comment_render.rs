@@ -88,8 +88,7 @@ pub fn strip_html_tags(s: &str) -> String {
                     i += 1 + end_rel + 1;
                     continue;
                 }
-                if matches_known_tag(tag_body, "details")
-                    || matches_known_tag(tag_body, "summary")
+                if matches_known_tag(tag_body, "details") || matches_known_tag(tag_body, "summary")
                 {
                     i += 1 + end_rel + 1;
                     continue;
@@ -227,10 +226,7 @@ fn render_inline_line(line: &str) -> Line<'static> {
 
     // Block quote.
     if let Some(rest) = line.strip_prefix("> ").or_else(|| line.strip_prefix(">")) {
-        let mut spans = vec![Span::styled(
-            "▎ ",
-            Style::default().fg(Color::DarkGray),
-        )];
+        let mut spans = vec![Span::styled("▎ ", Style::default().fg(Color::DarkGray))];
         spans.extend(inline_spans(rest, Style::default().fg(Color::DarkGray)));
         return Line::from(spans);
     }
@@ -319,10 +315,7 @@ fn inline_spans(s: &str, base_style: Style) -> Vec<Span<'static>> {
         {
             flush(&mut buf, &mut spans, base_style);
             let inner: String = chars[i + 2..end].iter().collect();
-            spans.push(Span::styled(
-                inner,
-                base_style.add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(inner, base_style.add_modifier(Modifier::BOLD)));
             i = end + 2;
             continue;
         }
@@ -494,7 +487,13 @@ fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
         for ch in text.chars() {
             if ch == ' ' {
                 if !buf.is_empty() {
-                    push_word(&mut out, &mut current, &mut current_w, std::mem::take(&mut buf), style);
+                    push_word(
+                        &mut out,
+                        &mut current,
+                        &mut current_w,
+                        std::mem::take(&mut buf),
+                        style,
+                    );
                 }
                 if current_w < width {
                     current.push(Span::styled(" ".to_string(), style));
@@ -502,7 +501,13 @@ fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
                 }
             } else if ch == '\t' {
                 if !buf.is_empty() {
-                    push_word(&mut out, &mut current, &mut current_w, std::mem::take(&mut buf), style);
+                    push_word(
+                        &mut out,
+                        &mut current,
+                        &mut current_w,
+                        std::mem::take(&mut buf),
+                        style,
+                    );
                 }
                 let stops = 4_usize.saturating_sub(current_w % 4);
                 let pad = " ".repeat(stops.min(width.saturating_sub(current_w)));
@@ -558,10 +563,7 @@ mod tests {
                  <br/>\
                  Codex has been enabled.";
         let out = strip_html_tags(s);
-        assert_eq!(
-            out,
-            " [i]  About Codex in GitHub\nCodex has been enabled."
-        );
+        assert_eq!(out, " [i]  About Codex in GitHub\nCodex has been enabled.");
     }
 
     #[test]
@@ -682,12 +684,11 @@ mod tests {
             .join("\n");
         let out = render_body(&body, 0, 4);
         assert_eq!(out.len(), 4);
-        let last: String = out[3]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(last.contains("more lines"), "last line is the count hint, got: {last}");
+        let last: String = out[3].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            last.contains("more lines"),
+            "last line is the count hint, got: {last}"
+        );
     }
 
     #[test]
@@ -718,11 +719,7 @@ mod tests {
         let lines = wrap_one(line, 10);
         // None of the wrapped lines exceed `width`.
         for l in &lines {
-            let len: usize = l
-                .spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum();
+            let len: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(len <= 10, "wrapped line is {len} cells: {l:?}");
         }
         assert!(lines.len() > 1);
@@ -731,7 +728,8 @@ mod tests {
     #[test]
     fn render_body_handles_real_world_bugbot_comment() {
         // The exact pattern the screenshot showed.
-        let body = "<!-- BUGBOT_REVIEW -->\n### Error message missing backticks around technical terms";
+        let body =
+            "<!-- BUGBOT_REVIEW -->\n### Error message missing backticks around technical terms";
         let out = render_body(body, 0, 10);
         // Two non-empty lines: blank from removed marker + heading.
         // Or one if the empty leading line is filtered. Either way

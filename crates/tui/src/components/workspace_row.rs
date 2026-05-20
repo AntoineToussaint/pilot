@@ -13,8 +13,8 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    BADGE_COL_W, STATUS_COL_W, TIME_COL_W, UNREAD_COL_W, badge_pill_style, role_badge,
-    status_pill, workspace_type_label,
+    BADGE_COL_W, STATUS_COL_W, TIME_COL_W, UNREAD_COL_W, badge_pill_style, role_badge, status_pill,
+    workspace_type_label,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -64,9 +64,7 @@ impl<'a> WorkspaceRowCtx<'a> {
     fn raw_title(&self) -> &'a str {
         self.task
             .map(|t| t.title.as_str())
-            .unwrap_or_else(|| {
-                self.workspace.map(|w| w.name.as_str()).unwrap_or("?")
-            })
+            .unwrap_or_else(|| self.workspace.map(|w| w.name.as_str()).unwrap_or("?"))
     }
 }
 
@@ -99,21 +97,21 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // (1) + ` X ` (3) = BADGE_COL_W.
     debug_assert_eq!(BADGE_COL_W, 3 + 1 + 3);
     vec![
-        Column::fixed(4),                       // 0: prefix
-        Column::fixed(5),                       // 1: type label (incl. trailing space)
+        Column::fixed(4),                        // 0: prefix
+        Column::fixed(5),                        // 1: type label (incl. trailing space)
         Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
-        Column::fixed(2),                       // 3: role (" R" or blank)
-        Column::fixed(3),                       // 4: asking (" ? " reserved)
-        Column::max(0),                         // 5: kind ("[feat] " or blank)
-        Column::flex(0),                        // 6: title
-        Column::max(0),                         // 7: kill_mark
-        Column::fixed(UNREAD_COL_W).right(),    // 8: unread
-        Column::fixed(3),                       // 9: badge_agent
-        Column::fixed(1),                       // 10: badge_sep
-        Column::fixed(3),                       // 11: badge_shell
-        Column::fixed(STATUS_COL_W).right(),    // 12: status
-        Column::fixed(1),                       // 13: gutter
-        Column::fixed(TIME_COL_W).right(),      // 14: time
+        Column::fixed(2),                        // 3: role (" R" or blank)
+        Column::fixed(3),                        // 4: asking (" ? " reserved)
+        Column::max(0),                          // 5: kind ("[feat] " or blank)
+        Column::flex(0),                         // 6: title
+        Column::max(0),                          // 7: kill_mark
+        Column::fixed(UNREAD_COL_W).right(),     // 8: unread
+        Column::fixed(3),                        // 9: badge_agent
+        Column::fixed(1),                        // 10: badge_sep
+        Column::fixed(3),                        // 11: badge_shell
+        Column::fixed(STATUS_COL_W).right(),     // 12: status
+        Column::fixed(1),                        // 13: gutter
+        Column::fixed(TIME_COL_W).right(),       // 14: time
     ]
 }
 
@@ -358,9 +356,7 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use pilot_core::{
-        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace,
-    };
+    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 
     fn fixed_time() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap()

@@ -22,10 +22,10 @@ use pilot_core::{
     Activity, ActivityKind, CiStatus, ProviderConfig, ReviewStatus, Task, TaskId, TaskRole,
     TaskState,
 };
-use pilot_store::WorkspaceRecord;
 use pilot_ipc::{Command, Event, channel};
 use pilot_server::polling::{self, TaskSource};
 use pilot_server::{Server, ServerConfig};
+use pilot_store::WorkspaceRecord;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -99,7 +99,8 @@ impl TaskSource for FakeSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
         let tasks = self.tasks.clone();
         Box::pin(async move { Ok(tasks) })
     }
@@ -113,8 +114,14 @@ impl TaskSource for FailingSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>> {
-        Box::pin(async move { Err(pilot_core::ProviderError::retryable(self.0.clone(), "rate limited")) })
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(pilot_core::ProviderError::retryable(
+                self.0.clone(),
+                "rate limited",
+            ))
+        })
     }
 }
 
@@ -129,7 +136,8 @@ impl TaskSource for CountingSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
         let counter = self.counter.clone();
         Box::pin(async move {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -262,7 +270,9 @@ async fn tick_emits_provider_error_on_failure() {
 
     let evt = bus_rx.try_recv().expect("error broadcasted");
     match evt {
-        Event::ProviderError { source, message, .. } => {
+        Event::ProviderError {
+            source, message, ..
+        } => {
             assert_eq!(source, "github");
             // Message on the bus is the user-facing one (terse) —
             // full diagnostic lives in /tmp/pilot.log. For a
@@ -320,9 +330,7 @@ async fn mark_workspace_read_persists_seen_count() {
     ];
     polling::upsert(&config, task).await;
 
-    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task(
-        "o/r#11",
-    )));
+    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#11")));
     let before: pilot_core::Workspace = serde_json::from_str(
         &config
             .store
@@ -373,9 +381,7 @@ async fn mark_workspace_read_broadcasts_upsert() {
         .await
         .unwrap();
 
-    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task(
-        "o/r#22",
-    )));
+    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#22")));
     polling::mark_workspace_read(&config, &key);
 
     let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
@@ -399,9 +405,7 @@ async fn mark_workspace_read_is_independent_of_provider_state() {
     task.recent_activity = vec![make_activity("alice", "ping")];
     polling::upsert(&config, task.clone()).await;
 
-    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task(
-        "o/r#33",
-    )));
+    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#33")));
     polling::mark_workspace_read(&config, &key);
 
     // Re-poll the same task — seen state survives.
@@ -451,14 +455,11 @@ async fn migrate_path_only_when_dir_missing() {
     );
     ws.add_session(session);
 
-    let moved = pilot_server::spawn_handler::migrate_session_paths_if_needed(
-        &config, &mut ws,
-    )
-    .await;
+    let moved =
+        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(moved, "stale path detected → migrated record");
 
-    let expected =
-        pilot_server::spawn_handler::worktree_root().join(ws.worktree_slug());
+    let expected = pilot_server::spawn_handler::worktree_root().join(ws.worktree_slug());
     assert_eq!(
         ws.sessions[0].worktree_path, expected,
         "session path now matches the slug-derived path"
@@ -479,10 +480,8 @@ async fn migrate_no_op_when_path_already_matches() {
     );
     ws.add_session(session);
 
-    let moved = pilot_server::spawn_handler::migrate_session_paths_if_needed(
-        &config, &mut ws,
-    )
-    .await;
+    let moved =
+        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(!moved, "path already matches → migration is a no-op");
     assert_eq!(ws.sessions[0].worktree_path, expected);
 }
@@ -491,10 +490,8 @@ async fn migrate_handles_zero_sessions() {
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#33");
     let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
-    let moved = pilot_server::spawn_handler::migrate_session_paths_if_needed(
-        &config, &mut ws,
-    )
-    .await;
+    let moved =
+        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(!moved, "no sessions → nothing to migrate");
 }
 #[tokio::test]
@@ -540,13 +537,14 @@ async fn migrate_picks_up_pr_title_rename() {
 
     // Sanity-check our fixture: the slug actually changed.
     let renamed_slug = ws.worktree_slug();
-    assert_ne!(original_slug, renamed_slug, "fixture must trigger the rename");
+    assert_ne!(
+        original_slug, renamed_slug,
+        "fixture must trigger the rename"
+    );
     assert!(renamed_slug.starts_with("PR-7413-"));
 
-    let moved = pilot_server::spawn_handler::migrate_session_paths_if_needed(
-        &config, &mut ws,
-    )
-    .await;
+    let moved =
+        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(moved, "rename must trigger migration");
 
     let expected = pilot_server::spawn_handler::worktree_root().join(&renamed_slug);
@@ -632,7 +630,7 @@ async fn create_empty_workspace_broadcasts_upserted() {
 
 #[tokio::test]
 async fn set_session_layout_persists_and_broadcasts() {
-    use pilot_core::{SessionLayout, TileTree, WorkspaceSession, SessionKind};
+    use pilot_core::{SessionKind, SessionLayout, TileTree, WorkspaceSession};
     let config = ServerConfig::in_memory();
 
     // Seed a workspace with one session.
@@ -679,7 +677,10 @@ async fn set_session_layout_persists_and_broadcasts() {
     )
     .unwrap();
     let stored_layout = &stored.sessions[0].layout;
-    assert_eq!(stored_layout, &layout, "layout round-trips through the store");
+    assert_eq!(
+        stored_layout, &layout,
+        "layout round-trips through the store"
+    );
 }
 #[tokio::test]
 async fn set_session_layout_no_op_for_missing_session() {
@@ -922,11 +923,8 @@ fn pr_qualifiers_emit_specific_role_when_subset_enabled() {
     // matching other roles we'd drop post-fetch.
     let mut filter = ProviderConfig::default();
     filter.enabled_keys.insert("pr.author".into());
-    let quals = polling::build_pr_search_qualifiers(
-        &filter,
-        &std::collections::BTreeSet::new(),
-        "alice",
-    );
+    let quals =
+        polling::build_pr_search_qualifiers(&filter, &std::collections::BTreeSet::new(), "alice");
     assert_eq!(quals, vec!["author:alice"]);
 }
 
@@ -940,11 +938,8 @@ fn pr_qualifiers_two_roles_emit_involves_not_paren_or() {
     let mut filter = ProviderConfig::default();
     filter.enabled_keys.insert("pr.author".into());
     filter.enabled_keys.insert("pr.reviewer".into());
-    let quals = polling::build_pr_search_qualifiers(
-        &filter,
-        &std::collections::BTreeSet::new(),
-        "alice",
-    );
+    let quals =
+        polling::build_pr_search_qualifiers(&filter, &std::collections::BTreeSet::new(), "alice");
     assert_eq!(
         quals,
         vec!["involves:alice"],
@@ -1101,7 +1096,10 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
             prompts += 1;
         }
     }
-    assert_eq!(prompts, 1, "exactly one prompt for the active-session workspace");
+    assert_eq!(
+        prompts, 1,
+        "exactly one prompt for the active-session workspace"
+    );
 
     // Critical: a second rescope with the same input should NOT
     // re-prompt. State threading dedupes — without it, every 60s
@@ -1113,7 +1111,10 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
             prompts2 += 1;
         }
     }
-    assert_eq!(prompts2, 0, "second rescope must not re-prompt for the same workspace");
+    assert_eq!(
+        prompts2, 0,
+        "second rescope must not re-prompt for the same workspace"
+    );
 
     // Active workspace still in the store; nothing was killed.
     let after: Vec<String> = config
@@ -1229,15 +1230,30 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         "delete_workspace must remove the terminal from the wire-side map"
     );
     assert!(
-        config.terminal_meta.lock().await.get(&TerminalId(42)).is_none(),
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .get(&TerminalId(42))
+            .is_none(),
         "terminal_meta cleaned too"
     );
     assert!(
-        config.terminal_sessions.lock().await.get(&TerminalId(42)).is_none(),
+        config
+            .terminal_sessions
+            .lock()
+            .await
+            .get(&TerminalId(42))
+            .is_none(),
         "terminal_sessions cleaned too"
     );
     assert!(
-        config.agent_states.lock().await.get(&TerminalId(42)).is_none(),
+        config
+            .agent_states
+            .lock()
+            .await
+            .get(&TerminalId(42))
+            .is_none(),
         "agent_states cleaned too"
     );
     assert!(
@@ -1526,10 +1542,11 @@ async fn adopt_sessions_rewrites_terminal_meta() {
     let target_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#999")));
 
     let source_session_key: SessionKey = (&source_key).into();
-    config.terminal_meta.lock().await.insert(
-        TerminalId(7),
-        (source_session_key, TerminalKind::Shell),
-    );
+    config
+        .terminal_meta
+        .lock()
+        .await
+        .insert(TerminalId(7), (source_session_key, TerminalKind::Shell));
 
     polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
 
@@ -1632,11 +1649,10 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
 
     let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_issue_task("o/r#71")));
     let issue_session_key: SessionKey = (&issue_key).into();
-    config
-        .terminal_meta
-        .lock()
-        .await
-        .insert(TerminalId(7), (issue_session_key.clone(), TerminalKind::Shell));
+    config.terminal_meta.lock().await.insert(
+        TerminalId(7),
+        (issue_session_key.clone(), TerminalKind::Shell),
+    );
 
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
 
@@ -1646,7 +1662,9 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
     )));
     let pr_session_key: SessionKey = (&pr_key).into();
     let meta = config.terminal_meta.lock().await;
-    let entry = meta.get(&TerminalId(7)).expect("terminal_meta still present");
+    let entry = meta
+        .get(&TerminalId(7))
+        .expect("terminal_meta still present");
     assert_eq!(
         entry.0, pr_session_key,
         "terminal_meta entry must point at the PR's session_key after merge",

@@ -24,9 +24,9 @@ pub mod socket_service;
 pub mod spawn_handler;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
-use pilot_store::{MemoryStore, SqliteStore, Store};
 use pilot_agents::Registry;
 use pilot_ipc::{AgentRunId, Connection, Event, TerminalId};
+use pilot_store::{MemoryStore, SqliteStore, Store};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -331,10 +331,8 @@ impl ServerConfig {
     /// etc. against the same backend the daemon is using.
     pub fn in_memory_with_mock() -> (Self, backend::MockBackend) {
         let mock = backend::MockBackend::new();
-        let config = Self::with_store_and_backend(
-            Arc::new(MemoryStore::new()),
-            Arc::new(mock.clone()),
-        );
+        let config =
+            Self::with_store_and_backend(Arc::new(MemoryStore::new()), Arc::new(mock.clone()));
         (config, mock)
     }
 }

@@ -48,9 +48,7 @@ pub fn slugify(s: &str) -> String {
     if out.len() > MAX_TOTAL_LEN {
         // Trim to a word boundary near the cap so we don't slice
         // mid-word — looks weirder than a clean truncation.
-        let cut = out[..MAX_TOTAL_LEN]
-            .rfind('-')
-            .unwrap_or(MAX_TOTAL_LEN);
+        let cut = out[..MAX_TOTAL_LEN].rfind('-').unwrap_or(MAX_TOTAL_LEN);
         out.truncate(cut);
     }
     out
@@ -122,11 +120,7 @@ mod tests {
         let title = "this is a very long pull request title with way too many words to keep";
         let out = pr_slug(1, title);
         // PR-1- + 8 words from the title, joined with dashes.
-        let title_words = out
-            .strip_prefix("PR-1-")
-            .unwrap()
-            .split('-')
-            .count();
+        let title_words = out.strip_prefix("PR-1-").unwrap().split('-').count();
         assert_eq!(title_words, 8);
     }
 }

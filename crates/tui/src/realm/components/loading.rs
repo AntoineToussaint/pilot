@@ -16,12 +16,12 @@
 //! That's the same pattern pilot uses for `LoadingModal<T>` in tui-kit.
 
 use crate::realm::Msg;
+use crate::realm::UserEvent;
 use std::any::Any;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
-use crate::realm::UserEvent;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -66,9 +66,7 @@ impl LoadingResult {
     }
 }
 
-const SPINNER_FRAMES: &[&str] = &[
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Spinner modal. `pending(label)` builds it; the producer hand
 /// resolves via [`LoadingResult::send`].
@@ -169,10 +167,7 @@ impl Component for Loading {
             Line::raw(""),
             Line::from(Span::styled("Esc cancel", theme.hint())),
         ];
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -190,9 +185,7 @@ impl Component for Loading {
 impl AppComponent<Msg, UserEvent> for Loading {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
-            Event::Keyboard(KeyEvent {
-                code: Key::Esc, ..
-            }) => {
+            Event::Keyboard(KeyEvent { code: Key::Esc, .. }) => {
                 self.rx = None;
                 Some(Msg::ModalDismissed)
             }

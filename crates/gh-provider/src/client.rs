@@ -72,9 +72,9 @@ fn detail_of(err: &GhError) -> String {
             "GitHub returned {count} PRs across {pages} pages and we hit the safety cap. \
              Your filter likely matches too many PRs — narrow it in Settings."
         ),
-        GhError::WatchAllFailed { count } => format!(
-            "all {count} configured watched-repo queries failed (network or auth issue)"
-        ),
+        GhError::WatchAllFailed { count } => {
+            format!("all {count} configured watched-repo queries failed (network or auth issue)")
+        }
         GhError::Api(octo) => match octo {
             octocrab::Error::GitHub { source, .. } => {
                 // GitHubError's Display does the right thing —
@@ -107,11 +107,7 @@ impl From<GhError> for pilot_core::ProviderError {
             retry_after_secs, ..
         } = &err
         {
-            return pilot_core::ProviderError::retryable_after(
-                SOURCE,
-                detail,
-                *retry_after_secs,
-            );
+            return pilot_core::ProviderError::retryable_after(SOURCE, detail, *retry_after_secs);
         }
 
         // Status-aware classification when we have an octocrab
@@ -222,7 +218,10 @@ impl GhClient {
     /// Snapshot of the current rate budget state. Used by the polling
     /// layer to surface a status indicator and decide pacing.
     pub fn rate_snapshot(&self) -> crate::rate_budget::Snapshot {
-        self.budget.lock().expect("budget mutex poisoned").snapshot()
+        self.budget
+            .lock()
+            .expect("budget mutex poisoned")
+            .snapshot()
     }
 
     /// The exact GraphQL search string `fetch_all_prs` will issue.
@@ -336,9 +335,7 @@ impl GhClient {
         if let Err(reason) = self.try_acquire() {
             tracing::warn!("{op} blocked by rate budget: {reason}");
             let retry_after_secs = match &reason {
-                crate::rate_budget::AcquireError::LocalBudgetExhausted { wait_secs } => {
-                    *wait_secs
-                }
+                crate::rate_budget::AcquireError::LocalBudgetExhausted { wait_secs } => *wait_secs,
                 crate::rate_budget::AcquireError::RemoteLow { reset_at, .. } => {
                     // `reset_at` is in the future when this fires (the
                     // budget check is `reset_at > now`); clamp to >=1
@@ -671,7 +668,9 @@ impl GhClient {
                 // way too loose; surface it as a retryable error so
                 // the TUI's footer can warn instead of silently
                 // dropping the tail.
-                tracing::error!("GraphQL paged: bailing after {page} pages (safety cap; tail truncated)");
+                tracing::error!(
+                    "GraphQL paged: bailing after {page} pages (safety cap; tail truncated)"
+                );
                 return Err(GhError::Truncated {
                     count: tasks.len(),
                     pages: page,
@@ -692,9 +691,7 @@ impl GhClient {
             // to ship those than fail the whole poll. Treat as a
             // failure for the "all watched failed" classifier below.
             if let Err(reason) = self.try_acquire() {
-                tracing::warn!(
-                    "watch-repo query for {repo} blocked by rate budget: {reason}"
-                );
+                tracing::warn!("watch-repo query for {repo} blocked by rate budget: {reason}");
                 watch_failures += 1;
                 continue;
             }
@@ -774,9 +771,7 @@ impl GhClient {
         let merged_query = graphql::build_query(&merged_quals);
         tracing::debug!("Recently-merged sweep: {merged_query}");
         if let Err(reason) = self.try_acquire() {
-            tracing::warn!(
-                "recently-merged sweep blocked by rate budget: {reason}"
-            );
+            tracing::warn!("recently-merged sweep blocked by rate budget: {reason}");
         } else {
             let body = graphql::query_body(&merged_query);
             match self
@@ -807,10 +802,7 @@ impl GhClient {
                     }
                     if let Some(errors) = resp.errors {
                         let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
-                        tracing::warn!(
-                            "recently-merged sweep errors: {}",
-                            detailed.join("; "),
-                        );
+                        tracing::warn!("recently-merged sweep errors: {}", detailed.join("; "),);
                     }
                 }
                 Err(e) => {
@@ -906,7 +898,9 @@ impl GhClient {
             page += 1;
             if page >= 20 {
                 // Same safety-cap visibility as fetch_all_prs.
-                tracing::error!("Issues paged: bailing after {page} pages (safety cap; tail truncated)");
+                tracing::error!(
+                    "Issues paged: bailing after {page} pages (safety cap; tail truncated)"
+                );
                 return Err(GhError::Truncated {
                     count: tasks.len(),
                     pages: page,
@@ -1038,8 +1032,10 @@ impl GhClient {
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("updatePullRequestBranch mutation")?;
         let body = graphql::update_branch_body(pull_request_node_id);
-        let response: graphql::GqlResponse =
-            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
         // Observe rate-limit if the mutation response includes it
         // (currently it doesn't — the mutation body doesn't select
         // `rateLimit` — but if a future query body change pulls it
@@ -1136,9 +1132,7 @@ impl GhClient {
             .data
             .and_then(|d| d.user)
             .map(|u| u.id)
-            .ok_or_else(|| {
-                GhError::Graphql(format!("user `{login}` not found"))
-            })?;
+            .ok_or_else(|| GhError::Graphql(format!("user `{login}` not found")))?;
         Ok(id)
     }
 
@@ -1159,8 +1153,10 @@ impl GhClient {
         }
         self.acquire_or_block("requestReviews mutation")?;
         let body = graphql::request_reviews_body(pull_request_node_id, &user_ids);
-        let response: graphql::GqlResponse =
-            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1194,8 +1190,10 @@ impl GhClient {
         }
         self.acquire_or_block("addAssigneesToAssignable mutation")?;
         let body = graphql::add_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlResponse =
-            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1216,8 +1214,10 @@ impl GhClient {
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
-        let response: graphql::GqlResponse =
-            self.post_graphql_with_retry(&body).await.map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {

@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// In-memory backend. Cheap to clone (it's just an `Arc<Mutex<...>>`).
@@ -88,7 +88,9 @@ impl MockBackend {
         };
         session.replay.extend_from_slice(&bytes);
         // Drop disconnected subscribers as we go.
-        session.subscribers.retain(|tx| tx.send(chunk.clone()).is_ok());
+        session
+            .subscribers
+            .retain(|tx| tx.send(chunk.clone()).is_ok());
     }
 
     /// Mark the session exited with `code`. Subsequent `wait_exit`
@@ -112,17 +114,13 @@ impl MockBackend {
     /// expected bytes, etc.
     pub async fn writes_for(&self, key: &str) -> Vec<Vec<u8>> {
         let map = self.inner.sessions.lock().await;
-        map.get(key)
-            .map(|s| s.writes.clone())
-            .unwrap_or_default()
+        map.get(key).map(|s| s.writes.clone()).unwrap_or_default()
     }
 
     /// Resize calls captured for this session, oldest first.
     pub async fn resizes_for(&self, key: &str) -> Vec<(u16, u16)> {
         let map = self.inner.sessions.lock().await;
-        map.get(key)
-            .map(|s| s.resizes.clone())
-            .unwrap_or_default()
+        map.get(key).map(|s| s.resizes.clone()).unwrap_or_default()
     }
 
     /// argv passed to `spawn()` for this session.
@@ -168,7 +166,13 @@ impl SessionBackend for MockBackend {
             // Safe-ish hint substring — keeps test output readable.
             let safe_hint: String = hint
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
                 .collect();
             let key = format!("mock-{safe_hint}-{n}");
             let session = MockSession {
@@ -184,7 +188,11 @@ impl SessionBackend for MockBackend {
                 exit_waiters: Vec::new(),
                 frozen: false,
             };
-            self.inner.sessions.lock().await.insert(key.clone(), session);
+            self.inner
+                .sessions
+                .lock()
+                .await
+                .insert(key.clone(), session);
             Ok(key)
         })
     }

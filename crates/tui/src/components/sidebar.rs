@@ -345,10 +345,7 @@ impl Sidebar {
     /// stripped, and org-level entries (`github:owner` with no `/`)
     /// are skipped — those mean "whole org subscription" and the
     /// repo headers will materialize as polling finds them.
-    pub fn apply_subscribed_scopes(
-        &mut self,
-        scopes: &BTreeSet<String>,
-    ) {
+    pub fn apply_subscribed_scopes(&mut self, scopes: &BTreeSet<String>) {
         let mut out = BTreeSet::new();
         for id in scopes {
             // `provider:owner/repo` → "owner/repo". Skip if there's
@@ -454,7 +451,10 @@ impl Sidebar {
     pub fn merge_target_for_cursor(&self) -> Option<pilot_core::WorkspaceKey> {
         let workspace = self.selected_workspace()?;
         let pr = workspace.pr.as_ref()?;
-        if !matches!(pr.state, pilot_core::TaskState::Open | pilot_core::TaskState::InReview) {
+        if !matches!(
+            pr.state,
+            pilot_core::TaskState::Open | pilot_core::TaskState::InReview
+        ) {
             return None;
         }
         if !matches!(pr.review, pilot_core::ReviewStatus::Approved) {
@@ -620,7 +620,10 @@ impl Sidebar {
     /// first/last selectable row.
     /// True if the cursor sits on a repo header row.
     pub fn cursor_on_repo_header(&self) -> bool {
-        matches!(self.visible.get(self.cursor), Some(VisibleRow::RepoHeader(_)))
+        matches!(
+            self.visible.get(self.cursor),
+            Some(VisibleRow::RepoHeader(_))
+        )
     }
 
     fn move_cursor_by(&mut self, delta: isize) {
@@ -673,9 +676,7 @@ impl Sidebar {
                 VisibleRow::Workspace(k) => self.workspaces.get(k),
                 _ => None,
             })
-            .filter(|w| {
-                workspace_attention_signals(w, &self.agents_asking).contains(&signal)
-            })
+            .filter(|w| workspace_attention_signals(w, &self.agents_asking).contains(&signal))
             .count()
     }
 
@@ -706,7 +707,11 @@ impl Sidebar {
                 "claude" => 'C',
                 "codex" => 'X',
                 "cursor" => 'U',
-                _ => id.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('A'),
+                _ => id
+                    .chars()
+                    .next()
+                    .map(|c| c.to_ascii_uppercase())
+                    .unwrap_or('A'),
             },
             TerminalKind::Shell => 'S',
             TerminalKind::LogTail { .. } => 'L',
@@ -768,9 +773,7 @@ impl Sidebar {
         // so the layout survives restart. Best-effort; an I/O
         // error here just means next launch starts expanded.
         let snapshot = self.collapsed_repos.clone();
-        if let Err(e) =
-            pilot_config::Config::save_with(|c| c.ui.collapsed_repos = snapshot)
-        {
+        if let Err(e) = pilot_config::Config::save_with(|c| c.ui.collapsed_repos = snapshot) {
             tracing::warn!("save collapsed_repos failed: {e}");
         }
         // Always park the cursor on the toggled header so
@@ -943,11 +946,15 @@ impl Sidebar {
         // dispatcher uses, so the hint can't drift from what `w`
         // actually fires.
         if is_ready {
-            out.push(Binding { keys: "Shift-M", label: "merge" });
-        } else if let Some(priority) =
-            crate::intent::classify_work(workspace, &[])
-        {
-            out.push(Binding { keys: "w", label: priority.label() });
+            out.push(Binding {
+                keys: "Shift-M",
+                label: "merge",
+            });
+        } else if let Some(priority) = crate::intent::classify_work(workspace, &[]) {
+            out.push(Binding {
+                keys: "w",
+                label: priority.label(),
+            });
         }
 
         // `r` reply belongs to Activity, not the sidebar — you reply
@@ -962,7 +969,10 @@ impl Sidebar {
         // matches the email-client "I" / "mark all as read" muscle
         // memory.
         if workspace.is_some_and(|w| w.unread_count() > 0) {
-            out.push(Binding { keys: "m", label: "read all" });
+            out.push(Binding {
+                keys: "m",
+                label: "read all",
+            });
         }
 
         // Session lifecycle. Whenever a workspace is selected we
@@ -976,19 +986,41 @@ impl Sidebar {
         // shortcut on populated rows made it impossible to discover
         // unless the inbox happened to be empty.
         if workspace.is_some() {
-            out.push(Binding { keys: "c", label: "claude" });
-            out.push(Binding { keys: "s", label: "shell" });
-            out.push(Binding { keys: "e", label: "editor" });
+            out.push(Binding {
+                keys: "c",
+                label: "claude",
+            });
+            out.push(Binding {
+                keys: "s",
+                label: "shell",
+            });
+            out.push(Binding {
+                keys: "e",
+                label: "editor",
+            });
             // `Shift-X` archives the focused workspace (removes from
             // inbox + kills any sessions). Always available when a
             // workspace is selected — gating on has_sessions hid the
             // shortcut for the most common case (read-only review
             // workspace the user wants to dismiss).
-            let kill_label = if has_sessions { "archive (kills sessions)" } else { "archive" };
-            out.push(Binding { keys: "Shift-X", label: kill_label });
+            let kill_label = if has_sessions {
+                "archive (kills sessions)"
+            } else {
+                "archive"
+            };
+            out.push(Binding {
+                keys: "Shift-X",
+                label: kill_label,
+            });
         }
-        out.push(Binding { keys: "n", label: "new workspace" });
-        out.push(Binding { keys: "Shift-N", label: "new sandbox" });
+        out.push(Binding {
+            keys: "n",
+            label: "new workspace",
+        });
+        out.push(Binding {
+            keys: "Shift-N",
+            label: "new sandbox",
+        });
 
         out
     }
@@ -999,20 +1031,62 @@ impl Sidebar {
         // Ctrl-Shift-D etc. live in the Global section of the Help
         // modal so they don't duplicate across every pane's hint bar.
         &[
-            Binding { keys: "↑/↓", label: "navigate" },
-            Binding { keys: "Enter", label: "focus activity" },
-            Binding { keys: "n", label: "new workspace" },
-            Binding { keys: "e", label: "open editor" },
-            Binding { keys: "Space", label: "fold repo" },
-            Binding { keys: "s", label: "shell" },
-            Binding { keys: "c", label: "claude" },
-            Binding { keys: "x", label: "codex" },
-            Binding { keys: "u", label: "cursor" },
-            Binding { keys: "w", label: "work on this" },
-            Binding { keys: "Shift-M", label: "merge PR (when READY)" },
-            Binding { keys: "Shift-A", label: "adopt sessions" },
-            Binding { keys: "m", label: "mark all read" },
-            Binding { keys: "/", label: "search" },
+            Binding {
+                keys: "↑/↓",
+                label: "navigate",
+            },
+            Binding {
+                keys: "Enter",
+                label: "focus activity",
+            },
+            Binding {
+                keys: "n",
+                label: "new workspace",
+            },
+            Binding {
+                keys: "e",
+                label: "open editor",
+            },
+            Binding {
+                keys: "Space",
+                label: "fold repo",
+            },
+            Binding {
+                keys: "s",
+                label: "shell",
+            },
+            Binding {
+                keys: "c",
+                label: "claude",
+            },
+            Binding {
+                keys: "x",
+                label: "codex",
+            },
+            Binding {
+                keys: "u",
+                label: "cursor",
+            },
+            Binding {
+                keys: "w",
+                label: "work on this",
+            },
+            Binding {
+                keys: "Shift-M",
+                label: "merge PR (when READY)",
+            },
+            Binding {
+                keys: "Shift-A",
+                label: "adopt sessions",
+            },
+            Binding {
+                keys: "m",
+                label: "mark all read",
+            },
+            Binding {
+                keys: "/",
+                label: "search",
+            },
         ]
     }
 
@@ -1219,7 +1293,10 @@ impl Sidebar {
                     self.short_snooze,
                 );
                 match intent {
-                    crate::intent::Intent::Snooze { session_key, duration } => {
+                    crate::intent::Intent::Snooze {
+                        session_key,
+                        duration,
+                    } => {
                         let until = now
                             + chrono::Duration::from_std(duration)
                                 .unwrap_or(chrono::Duration::hours(4));
@@ -1242,12 +1319,19 @@ impl Sidebar {
                 let Some(session_key) = self.selected_session_key().cloned() else {
                     return PaneOutcome::Consumed;
                 };
-                if !self.latches.arm_or_fire(TRIGGER_LONG_SNOOZE, session_key.clone()) {
+                if !self
+                    .latches
+                    .arm_or_fire(TRIGGER_LONG_SNOOZE, session_key.clone())
+                {
                     return PaneOutcome::Consumed;
                 }
                 let workspace = self.selected_workspace();
                 let intent = crate::intent::resolve_long_snooze(workspace, self.long_snooze);
-                if let crate::intent::Intent::Snooze { session_key, duration } = intent {
+                if let crate::intent::Intent::Snooze {
+                    session_key,
+                    duration,
+                } = intent
+                {
                     let until = chrono::Utc::now()
                         + chrono::Duration::from_std(duration)
                             .unwrap_or(chrono::Duration::days(365));
@@ -1311,7 +1395,7 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
 
-// Anything else: bubble up. Tab / Help / `?` / overlays /
+            // Anything else: bubble up. Tab / Help / `?` / overlays /
             // quit are handled by parent components.
             _ => PaneOutcome::Pass,
         }
@@ -1471,19 +1555,21 @@ impl Sidebar {
         header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
             count.to_string(),
-            Style::default()
-                .fg(theme.warn)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
         ));
         if unread > 0 {
             header_spans.push(Span::raw("  "));
             header_spans.push(Span::styled(
                 "● ",
-                Style::default().fg(theme.hover).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.hover)
+                    .add_modifier(Modifier::BOLD),
             ));
             header_spans.push(Span::styled(
                 format!("{unread} new"),
-                Style::default().fg(theme.hover).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.hover)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         if input_pending > 0 {
@@ -1498,10 +1584,7 @@ impl Sidebar {
             ));
         }
         header_spans.push(Span::raw("  "));
-        header_spans.push(Span::styled(
-            "[7d]",
-            Style::default().fg(theme.text_dim),
-        ));
+        header_spans.push(Span::styled("[7d]", Style::default().fg(theme.text_dim)));
 
         let row0 = Rect::new(area.x + l_pad, area.y, inner_width, 1.min(area.height));
         frame.render_widget(Paragraph::new(Line::from(header_spans)), row0);
@@ -1531,7 +1614,9 @@ impl Sidebar {
         if ci_failing > 0 {
             stats_spans.push(Span::styled(
                 ci_failing.to_string(),
-                Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
             ));
             stats_spans.push(Span::styled(" CI", Style::default().fg(theme.text_dim)));
         }
@@ -1541,12 +1626,11 @@ impl Sidebar {
             }
             stats_spans.push(Span::styled(
                 review_pending.to_string(),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ));
-            stats_spans.push(Span::styled(
-                " review",
-                Style::default().fg(theme.text_dim),
-            ));
+            stats_spans.push(Span::styled(" review", Style::default().fg(theme.text_dim)));
         }
         if !stats_spans.is_empty() && area.height >= 3 {
             let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
@@ -1598,8 +1682,7 @@ impl Sidebar {
         // (max_pr_num_width is fixed across rows in this pass).
         // Each row's `render_table` call reuses this slice; the
         // table primitive owns padding + cursor fill geometry.
-        let workspace_columns =
-            crate::components::workspace_row::build_columns(max_pr_num_width);
+        let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);
         let lines: Vec<Line> = self
             .visible
             .iter()
@@ -1672,22 +1755,15 @@ impl Sidebar {
                         kill_armed: self.latches.armed(TRIGGER_KILL) == Some(key),
                         long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
                         asking: workspace.is_some_and(|w| {
-                            crate::agent_attention::workspace_is_asking(
-                                w,
-                                &self.agents_asking,
-                            )
+                            crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
                         }),
                         badges: self.runner_badges(key),
                     };
                     let row = build_row(&ctx);
-                    crate::components::table::render_table(
-                        &[row],
-                        &workspace_columns,
-                        row_budget,
-                    )
-                    .into_iter()
-                    .next()
-                    .unwrap_or_default()
+                    crate::components::table::render_table(&[row], &workspace_columns, row_budget)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default()
                 }
                 VisibleRow::Session {
                     workspace,
@@ -1714,10 +1790,8 @@ impl Sidebar {
                     let name_budget = row_budget.saturating_sub(visual_width(prefix));
                     let name_text = truncate_ellipsis(name, name_budget);
                     let used = visual_width(prefix) + visual_width(&name_text);
-                    let mut spans = vec![
-                        Span::styled(prefix, style),
-                        Span::styled(name_text, style),
-                    ];
+                    let mut spans =
+                        vec![Span::styled(prefix, style), Span::styled(name_text, style)];
                     if is_cursor && used < row_budget {
                         spans.push(Span::styled(" ".repeat(row_budget - used), style));
                     }
@@ -1869,8 +1943,7 @@ pub fn mailbox_membership(
             }
             matches!(
                 workspace.primary_task().map(|t| t.state),
-                Some(pilot_core::TaskState::Merged)
-                    | Some(pilot_core::TaskState::Closed)
+                Some(pilot_core::TaskState::Merged) | Some(pilot_core::TaskState::Closed)
             )
         }
     }
@@ -2075,7 +2148,10 @@ fn pill_for_tag(tag: pilot_core::StatusTag) -> Option<StatusPill> {
 /// Compact relative time for the right-side trailer. `now` < 1m → "now",
 /// < 1h → `Xm`, < 24h → `Xh`, < 30d → `Xd`, else `Xmo`. Always 2-3
 /// cells so the column lines up.
-pub(crate) fn relative_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+pub(crate) fn relative_time(
+    then: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     let delta = now.signed_duration_since(then);
     let secs = delta.num_seconds().max(0);
     if secs < 60 {
@@ -2192,9 +2268,7 @@ mod truncate_tests {
 #[cfg(test)]
 mod status_pill_tests {
     use super::status_pill;
-    use pilot_core::{
-        CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
-    };
+    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     pub(super) fn base_task() -> Task {
         Task {
@@ -2436,8 +2510,8 @@ mod status_pill_consistency_tests {
     //! arm is a compile error; adding a new arm without these
     //! tests catching it is the gap this module closes.
 
-    use super::{pill_for_tag, status_pill};
     use super::status_pill_tests::base_task;
+    use super::{pill_for_tag, status_pill};
     use pilot_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
 
     /// Every variant of `StatusTag` the contract sweeps over. Keep
@@ -2506,10 +2580,7 @@ mod status_pill_consistency_tests {
                     "StatusTag::None must render no pill, got {:?}",
                     pill.map(|p| p.label),
                 ),
-                other => assert!(
-                    pill.is_some(),
-                    "StatusTag::{other:?} must render a pill"
-                ),
+                other => assert!(pill.is_some(), "StatusTag::{other:?} must render a pill"),
             }
         }
     }
@@ -2665,7 +2736,7 @@ mod mailbox_membership_tests {
     //! Each `(workspace state, mailbox)` cell gets one assertion;
     //! a new mailbox semantic is one helper + ~6 assertions.
 
-    use super::{mailbox_membership, Mailbox};
+    use super::{Mailbox, mailbox_membership};
     use chrono::{Duration, Utc};
     use pilot_core::{TaskState, Workspace, WorkspaceKey};
 
@@ -2758,10 +2829,7 @@ mod mailbox_membership_tests {
     #[test]
     fn freshly_closed_pr_stays_in_inbox_during_grace_window() {
         let now = Utc::now();
-        let w = ws_with_updated_at(
-            Some(TaskState::Closed),
-            now - Duration::minutes(10),
-        );
+        let w = ws_with_updated_at(Some(TaskState::Closed), now - Duration::minutes(10));
         assert!(mailbox_membership(&w, Mailbox::Inbox, now, false));
     }
 
@@ -2769,10 +2837,7 @@ mod mailbox_membership_tests {
     fn merged_pr_past_grace_window_falls_out_of_inbox() {
         // 2 hours after merge: the row belongs in Inactive only.
         let now = Utc::now();
-        let w = ws_with_updated_at(
-            Some(TaskState::Merged),
-            now - Duration::hours(2),
-        );
+        let w = ws_with_updated_at(Some(TaskState::Merged), now - Duration::hours(2));
         assert!(!mailbox_membership(&w, Mailbox::Inbox, now, false));
         assert!(mailbox_membership(&w, Mailbox::Inactive, now, false));
     }
@@ -2800,13 +2865,23 @@ mod mailbox_membership_tests {
     #[test]
     fn open_pr_is_not_in_inactive() {
         let w = ws(Some(TaskState::Open));
-        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+        assert!(!mailbox_membership(
+            &w,
+            Mailbox::Inactive,
+            Utc::now(),
+            false
+        ));
     }
 
     #[test]
     fn empty_workspace_is_not_in_inactive() {
         let w = ws(None);
-        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+        assert!(!mailbox_membership(
+            &w,
+            Mailbox::Inactive,
+            Utc::now(),
+            false
+        ));
     }
 
     // ── Snoozed wins over everything ─────────────────────────────
@@ -2815,7 +2890,12 @@ mod mailbox_membership_tests {
     fn snoozed_open_pr_is_only_in_snoozed() {
         let w = snoozed(ws(Some(TaskState::Open)));
         assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
-        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+        assert!(!mailbox_membership(
+            &w,
+            Mailbox::Inactive,
+            Utc::now(),
+            false
+        ));
         assert!(mailbox_membership(&w, Mailbox::Snoozed, Utc::now(), false));
     }
 
@@ -2824,7 +2904,12 @@ mod mailbox_membership_tests {
         // The exact failure mode the audit called out: a merged-AND-
         // snoozed PR must NOT leak into Inactive. Snoozed wins.
         let w = snoozed(ws(Some(TaskState::Merged)));
-        assert!(!mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+        assert!(!mailbox_membership(
+            &w,
+            Mailbox::Inactive,
+            Utc::now(),
+            false
+        ));
         assert!(mailbox_membership(&w, Mailbox::Snoozed, Utc::now(), false));
     }
 
@@ -2855,8 +2940,8 @@ mod attention_signal_tests {
     //! header counter but NOT the repo attention dot. Now both
     //! read the same signals.
 
-    use super::*;
     use super::status_pill_tests::base_task;
+    use super::*;
     use pilot_core::{ReviewStatus, TaskRole, Workspace};
 
     fn ws_from_pr(mut task: pilot_core::Task) -> Workspace {
@@ -2892,8 +2977,7 @@ mod attention_signal_tests {
         t.ci = pilot_core::CiStatus::Failure;
         let w = ws_from_pr(t);
         assert!(
-            workspace_attention_signals(&w, &empty_set())
-                .contains(&AttentionSignal::CiFailing),
+            workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::CiFailing),
         );
     }
 
@@ -2905,8 +2989,7 @@ mod attention_signal_tests {
         t.ci = pilot_core::CiStatus::Mixed;
         let w = ws_from_pr(t);
         assert!(
-            workspace_attention_signals(&w, &empty_set())
-                .contains(&AttentionSignal::CiFailing),
+            workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::CiFailing),
         );
     }
 
@@ -2917,8 +3000,7 @@ mod attention_signal_tests {
         t.reviewers = vec!["alice".into()];
         let w = ws_from_pr(t);
         assert!(
-            workspace_attention_signals(&w, &empty_set())
-                .contains(&AttentionSignal::ReviewPending),
+            workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::ReviewPending),
         );
     }
 
@@ -2928,8 +3010,7 @@ mod attention_signal_tests {
         t.review = ReviewStatus::ChangesRequested;
         let w = ws_from_pr(t);
         assert!(
-            workspace_attention_signals(&w, &empty_set())
-                .contains(&AttentionSignal::ReviewPending),
+            workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::ReviewPending),
         );
     }
 
@@ -2939,8 +3020,7 @@ mod attention_signal_tests {
         t.role = TaskRole::Mentioned;
         let w = ws_from_pr(t);
         assert!(
-            workspace_attention_signals(&w, &empty_set())
-                .contains(&AttentionSignal::Mentioned),
+            workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::Mentioned),
         );
     }
 
@@ -2958,14 +3038,12 @@ mod attention_signal_tests {
         // Asking (in production they never do, but the test pins
         // the contract).
         assert!(
-            !workspace_attention_signals(&w, &empty_set())
-                .contains(&AttentionSignal::AgentAsking),
+            !workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::AgentAsking),
         );
 
         // Add the workspace's key to the set → signal fires.
         assert!(
-            workspace_attention_signals(&w, &set_with(&w))
-                .contains(&AttentionSignal::AgentAsking),
+            workspace_attention_signals(&w, &set_with(&w)).contains(&AttentionSignal::AgentAsking),
         );
     }
 

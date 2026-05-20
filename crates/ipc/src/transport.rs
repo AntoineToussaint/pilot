@@ -64,12 +64,11 @@ impl Listener {
     pub async fn bind(path: &Path) -> Result<Self, TransportError> {
         #[cfg(unix)]
         {
-            let listener = tokio::net::UnixListener::bind(path).map_err(|e| {
-                TransportError::Bind {
+            let listener =
+                tokio::net::UnixListener::bind(path).map_err(|e| TransportError::Bind {
                     path: path.to_path_buf(),
                     source: e,
-                }
-            })?;
+                })?;
             Ok(Self {
                 inner: ListenerInner::Unix {
                     listener,
@@ -119,12 +118,13 @@ impl Listener {
 pub async fn connect(path: &Path) -> Result<(BoxRead, BoxWrite), TransportError> {
     #[cfg(unix)]
     {
-        let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
-            TransportError::Connect {
-                path: path.to_path_buf(),
-                source: e,
-            }
-        })?;
+        let stream =
+            tokio::net::UnixStream::connect(path)
+                .await
+                .map_err(|e| TransportError::Connect {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?;
         let (rd, wr) = stream.into_split();
         Ok((Box::new(rd), Box::new(wr)))
     }

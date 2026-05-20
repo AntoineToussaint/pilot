@@ -40,7 +40,7 @@ pub trait Agent: Send + Sync {
         None
     }
 
-/// Encode a prompt as bytes the daemon should write to the PTY.
+    /// Encode a prompt as bytes the daemon should write to the PTY.
     /// Most agents accept plain text + a newline; some need bracketed
     /// paste or specific control sequences.
     fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
@@ -120,8 +120,7 @@ pub mod detect {
     /// Standard bare yes/no prompt markers. Used by every CLI that
     /// doesn't have a custom approval UI (Codex, Cursor, most
     /// GenericCli configs). Order doesn't matter — substring search.
-    pub const YN_PROMPT_PATTERNS: &[&str] =
-        &["[y/n]", "(y/n)", "[Y/n]", "[y/N]"];
+    pub const YN_PROMPT_PATTERNS: &[&str] = &["[y/n]", "(y/n)", "[Y/n]", "[y/N]"];
 
     /// Substring "any-of" match. Plain text in; bytes should be
     /// passed through `strip_ansi_lossy` first so escape sequences
@@ -219,8 +218,8 @@ pub mod builtins {
             // option is the giveaway: a chooser is always followed
             // immediately by `2.`).
             let has_arrow = s.contains('❯') || s.contains("> 1.") || s.contains("> 1)");
-            let has_two_options = (s.contains("1.") || s.contains("1)"))
-                && (s.contains("2.") || s.contains("2)"));
+            let has_two_options =
+                (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"));
             if has_arrow && has_two_options {
                 return Some(AgentState::Asking);
             }
@@ -228,11 +227,7 @@ pub mod builtins {
             // Footer marker — Claude renders the textarea hint while
             // editing a prompt. Paired so a chat message that quotes
             // "Esc to cancel" doesn't false-trigger.
-            if super::detect::contains_paired(
-                &s,
-                &["Esc to cancel"],
-                &["Tab to amend"],
-            ) {
+            if super::detect::contains_paired(&s, &["Esc to cancel"], &["Tab to amend"]) {
                 return Some(AgentState::Asking);
             }
 
@@ -343,10 +338,7 @@ pub mod builtins {
                     }
                 } else if intro == b']' {
                     while i < bytes.len() && bytes[i] != 0x07 {
-                        if bytes[i] == 0x1b
-                            && i + 1 < bytes.len()
-                            && bytes[i + 1] == b'\\'
-                        {
+                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
                             i += 2;
                             break;
                         }

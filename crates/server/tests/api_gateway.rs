@@ -4,7 +4,6 @@ pub use pilot_server::{Server, ServerConfig};
 #[path = "../src/api_gateway.rs"]
 mod api_gateway;
 
-
 use api_gateway::{
     CommandResponse, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
     WorkspacesResponse,
@@ -14,10 +13,10 @@ use chrono::Utc;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{AUTHORIZATION, HeaderValue};
 use hyper::{Method, Request, StatusCode};
-use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
-use pilot_store::WorkspaceRecord;
 use pilot_agents::{Agent, SpawnCtx};
+use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 use pilot_ipc::{AgentInputMessage, AgentRuntimeMode, Command, Event};
+use pilot_store::WorkspaceRecord;
 use std::path::PathBuf;
 use std::sync::Arc;
 

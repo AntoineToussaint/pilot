@@ -98,9 +98,7 @@ impl TimerLatch {
 
     /// True iff armed and `delay` has elapsed since `arm`.
     pub fn ready(&self, delay: std::time::Duration) -> bool {
-        self.armed_at
-            .map(|t| t.elapsed() >= delay)
-            .unwrap_or(false)
+        self.armed_at.map(|t| t.elapsed() >= delay).unwrap_or(false)
     }
 
     /// Elapsed fraction of `delay`, clamped to `[0.0, 1.0]`. None

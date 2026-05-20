@@ -405,10 +405,7 @@ impl ClaudeStreamChild {
             .write_all(line.as_bytes())
             .await
             .ctx("write Claude stream input")?;
-        self.stdin
-            .flush()
-            .await
-            .ctx("flush Claude stream input")?;
+        self.stdin.flush().await.ctx("flush Claude stream input")?;
         Ok(())
     }
 
@@ -450,14 +447,8 @@ pub async fn spawn_claude_stream(config: ClaudeStreamConfig) -> Result<ClaudeStr
     command.kill_on_drop(true);
 
     let mut child = command.spawn().ctx("spawn Claude stream child")?;
-    let stdin = child
-        .stdin
-        .take()
-        .ctx("Claude child stdin unavailable")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ctx("Claude child stdout unavailable")?;
+    let stdin = child.stdin.take().ctx("Claude child stdin unavailable")?;
+    let stdout = child.stdout.take().ctx("Claude child stdout unavailable")?;
 
     Ok(ClaudeStreamChild {
         child,

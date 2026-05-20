@@ -4,10 +4,10 @@
 //! existing pilot pane and delegate `view`/`on_event`/`handle_key`
 //! through UFCS.
 
+use crate::PaneId;
 use crate::components::right_pane::RightPane as PilotRight;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
-use crate::PaneId;
 use pilot_ipc::Command as IpcCommand;
 use pilot_ipc::Event as IpcEvent;
 use tuirealm::command::{Cmd, CmdResult};
@@ -51,10 +51,7 @@ impl Right {
     /// Forward viewer identities (source → login) to the inner pane
     /// so activity bylines authored by the local user render as `@me`.
     /// Called by the orchestrator on `IpcEvent::ViewerIdentities`.
-    pub fn set_viewer_logins(
-        &mut self,
-        logins: std::collections::HashMap<String, String>,
-    ) {
+    pub fn set_viewer_logins(&mut self, logins: std::collections::HashMap<String, String>) {
         self.inner.set_viewer_logins(logins);
     }
 
@@ -72,16 +69,12 @@ impl Right {
 
     /// Forward a daemon event so the inner pane can refresh.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
-        self.inner.on_event(evt,
-        );
+        self.inner.on_event(evt);
     }
 
     /// Direct render entry point. See `Sidebar::view_in`.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
-        self.inner.render(area,
-            frame,
-            self.focused,
-        );
+        self.inner.render(area, frame, self.focused);
     }
 
     /// Direct key dispatch.
@@ -90,9 +83,7 @@ impl Right {
         key: crossterm::event::KeyEvent,
         cmds: &mut Vec<IpcCommand>,
     ) {
-        let _ = self.inner.handle_key(key,
-            cmds,
-        );
+        let _ = self.inner.handle_key(key, cmds);
     }
 
     /// Update the focused-flag.
@@ -153,10 +144,7 @@ impl Right {
 
 impl Component for Right {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        self.inner.render(area,
-            frame,
-            self.focused,
-        );
+        self.inner.render(area, frame, self.focused);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -182,16 +170,13 @@ impl AppComponent<Msg, UserEvent> for Right {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
             Event::User(UserEvent::Daemon(evt)) => {
-                self.inner.on_event(evt,
-                );
+                self.inner.on_event(evt);
                 None
             }
             Event::Keyboard(key) if self.focused => {
                 let ct_key = realm_key_to_crossterm(key);
                 let mut cmds: Vec<IpcCommand> = Vec::new();
-                let _ = self.inner.handle_key(ct_key,
-                    &mut cmds,
-                );
+                let _ = self.inner.handle_key(ct_key, &mut cmds);
                 if !cmds.is_empty() {
                     self.pending_cmds.extend(cmds);
                     return Some(Msg::RightCmds);

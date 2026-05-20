@@ -22,8 +22,8 @@ use pilot_core::{
     CiStatus, ReviewStatus, SessionKey, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
 };
 use pilot_ipc::{Command, Event, TerminalKind};
-use pilot_tui::components::{Mailbox, Sidebar, sidebar::VisibleRow};
 use pilot_tui::PaneId;
+use pilot_tui::components::{Mailbox, Sidebar, sidebar::VisibleRow};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -877,8 +877,9 @@ fn subscribed_repo_with_no_workspace_still_renders_a_header() {
         workspaces: vec![],
         terminals: vec![],
     });
-    let scopes: std::collections::BTreeSet<String> =
-        ["github:fresh-org/new-repo".to_string()].into_iter().collect();
+    let scopes: std::collections::BTreeSet<String> = ["github:fresh-org/new-repo".to_string()]
+        .into_iter()
+        .collect();
     s.apply_subscribed_scopes(&scopes);
 
     // The visible list should contain a RepoHeader for the new
@@ -984,7 +985,10 @@ fn w_on_ready_pr_is_noop() {
     s.handle_key(key_code(KeyCode::Char('w')), &mut cmds);
     // READY = nothing to "work on" — the user should be merging,
     // not spawning a fix-CI agent.
-    assert!(cmds.is_empty(), "w on a READY PR must not spawn anything: {cmds:?}");
+    assert!(
+        cmds.is_empty(),
+        "w on a READY PR must not spawn anything: {cmds:?}"
+    );
 }
 
 #[test]
@@ -1007,7 +1011,10 @@ fn shift_m_on_non_ready_pr_is_noop() {
     let mut cmds: Vec<Command> = Vec::new();
     s.handle_key(shift_char('M'), &mut cmds);
     s.handle_key(shift_char('M'), &mut cmds);
-    assert!(cmds.is_empty(), "Shift-M on a CI-failing PR must not fire: {cmds:?}");
+    assert!(
+        cmds.is_empty(),
+        "Shift-M on a CI-failing PR must not fire: {cmds:?}"
+    );
 }
 
 #[test]
@@ -1135,11 +1142,7 @@ fn contextual_bindings_surface_merge_on_ready_pr() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
     });
-    let labels: Vec<&str> = s
-        .contextual_bindings()
-        .iter()
-        .map(|b| b.label)
-        .collect();
+    let labels: Vec<&str> = s.contextual_bindings().iter().map(|b| b.label).collect();
     assert!(
         labels.contains(&"merge"),
         "READY PR must surface the merge binding, got {labels:?}",
@@ -1155,11 +1158,7 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
     });
-    let labels: Vec<&str> = s
-        .contextual_bindings()
-        .iter()
-        .map(|b| b.label)
-        .collect();
+    let labels: Vec<&str> = s.contextual_bindings().iter().map(|b| b.label).collect();
     assert!(
         labels.contains(&"fix CI"),
         "CI-failing PR must surface fix CI, got {labels:?}",
@@ -1540,11 +1539,7 @@ fn workspace_upserted_does_not_clobber_asking_state() {
     s.on_event(&Event::WorkspaceUpserted(Box::new(w)));
 
     // 3. The asking-set must STILL hold the entry.
-    s.focus_workspace_key(&ws_key(&make_workspace(
-        "owner/repo",
-        "o/r#1",
-        now,
-    ))); // re-anchor cursor
+    s.focus_workspace_key(&ws_key(&make_workspace("owner/repo", "o/r#1", now))); // re-anchor cursor
     // focus_next_asking_workspace walks from after-current; reset
     // to None by re-snapshotting the cursor.
     assert!(

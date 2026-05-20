@@ -122,9 +122,10 @@ impl ProviderConfig {
             }
         }
         if to_add.is_empty()
-            && !self.enabled_keys.iter().any(|k| k.starts_with("role.")
-                || k == "type.prs"
-                || k == "type.issues")
+            && !self
+                .enabled_keys
+                .iter()
+                .any(|k| k.starts_with("role.") || k == "type.prs" || k == "type.issues")
         {
             return; // No legacy keys to migrate.
         }

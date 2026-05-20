@@ -3,7 +3,6 @@
 //! the Subscribe → Snapshot contract works end-to-end — just like
 //! the in-process `channel::pair` path, but over a real Unix socket.
 
-
 use pilot_ipc::{Command, Event, socket};
 use pilot_server::ServerConfig;
 use pilot_server::lifecycle;

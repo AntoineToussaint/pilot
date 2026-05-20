@@ -172,9 +172,7 @@ impl Workspace {
     /// scoped action without picking a specific session. Today: the
     /// most recently created. None when the workspace has no sessions.
     pub fn default_session(&self) -> Option<&Session> {
-        self.sessions
-            .iter()
-            .max_by_key(|s| s.created_at)
+        self.sessions.iter().max_by_key(|s| s.created_at)
     }
 
     /// Build a workspace from a single task as the seed. PRs become
@@ -588,7 +586,12 @@ impl TileTree {
     fn find_path(&self, terminal_id: u64, path: &mut Vec<u8>) -> bool {
         match self {
             TileTree::Leaf { terminal_id: id } => *id == terminal_id,
-            TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
+            TileTree::HSplit { left, right, .. }
+            | TileTree::VSplit {
+                top: left,
+                bottom: right,
+                ..
+            } => {
                 path.push(0);
                 if left.find_path(terminal_id, path) {
                     return true;
@@ -614,8 +617,17 @@ impl TileTree {
         let head = path[0];
         let rest = &path[1..];
         let next = match self {
-            TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
-                if head == 0 { left.as_mut() } else { right.as_mut() }
+            TileTree::HSplit { left, right, .. }
+            | TileTree::VSplit {
+                top: left,
+                bottom: right,
+                ..
+            } => {
+                if head == 0 {
+                    left.as_mut()
+                } else {
+                    right.as_mut()
+                }
             }
             TileTree::Leaf { .. } => return None,
         };
@@ -636,7 +648,12 @@ impl TileTree {
             // Collapse the parent (which is `self`) into the sibling.
             let head = path[0];
             let new_root = match self {
-                TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
+                TileTree::HSplit { left, right, .. }
+                | TileTree::VSplit {
+                    top: left,
+                    bottom: right,
+                    ..
+                } => {
                     if head == 0 {
                         std::mem::replace(right.as_mut(), TileTree::Leaf { terminal_id: 0 })
                     } else {
@@ -652,8 +669,17 @@ impl TileTree {
         let head = path[0];
         let rest = &path[1..];
         let next = match self {
-            TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
-                if head == 0 { left.as_mut() } else { right.as_mut() }
+            TileTree::HSplit { left, right, .. }
+            | TileTree::VSplit {
+                top: left,
+                bottom: right,
+                ..
+            } => {
+                if head == 0 {
+                    left.as_mut()
+                } else {
+                    right.as_mut()
+                }
             }
             TileTree::Leaf { .. } => return Err(RemoveAtError::PathNotFound),
         };
@@ -703,8 +729,17 @@ impl TileTree {
         let mut node = self;
         for &step in path {
             node = match node {
-                TileTree::HSplit { left, right, .. } | TileTree::VSplit { top: left, bottom: right, .. } => {
-                    if step == 0 { left.as_ref() } else { right.as_ref() }
+                TileTree::HSplit { left, right, .. }
+                | TileTree::VSplit {
+                    top: left,
+                    bottom: right,
+                    ..
+                } => {
+                    if step == 0 {
+                        left.as_ref()
+                    } else {
+                        right.as_ref()
+                    }
                 }
                 TileTree::Leaf { .. } => return None,
             };
@@ -1000,7 +1035,10 @@ mod tests {
         t.id.source = "bitbucket".into();
         t.url = "https://bitbucket.org/team/project/pull-requests/1".into();
         let ws = Workspace::from_task(t, now());
-        assert!(ws.pr.is_some(), "Bitbucket pull-request URL must land in PR slot");
+        assert!(
+            ws.pr.is_some(),
+            "Bitbucket pull-request URL must land in PR slot"
+        );
     }
 
     #[test]
@@ -1093,10 +1131,7 @@ mod tests {
 
         // The read mark must follow "second" (now at index 2), not
         // stay on index 1 (which would falsely mark "third" read).
-        assert!(
-            !ws.read_indices.contains(&0),
-            "fresh inherited a read mark"
-        );
+        assert!(!ws.read_indices.contains(&0), "fresh inherited a read mark");
         assert!(
             !ws.read_indices.contains(&1),
             "third inherited second's read mark"
@@ -1174,7 +1209,9 @@ mod tests {
             id,
             workspace_key: key.clone(),
             name: "claude".into(),
-            kind: SessionKind::Agent { agent_id: "claude".into() },
+            kind: SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
             state: SessionRunState::Idle,
             worktree_path: "/tmp/wt".into(),
             created_at: chrono::Utc::now(),
@@ -1273,11 +1310,7 @@ mod tests {
         // A pre-PR workspace (user pressed `n` to create a fresh
         // branch) has no `pr` slot. The slug comes from the
         // workspace's name instead, lowercased + dashed.
-        let mut w = Workspace::empty(
-            crate::WorkspaceKey::new("github:owner/repo"),
-            "main",
-            now(),
-        );
+        let mut w = Workspace::empty(crate::WorkspaceKey::new("github:owner/repo"), "main", now());
         w.name = "Hotfix Auth".into();
         assert_eq!(w.worktree_slug(), "hotfix-auth");
     }
@@ -1314,20 +1347,14 @@ mod tests {
             ws_with_pr(1, "Has title"),
             ws_with_pr(2, "🚀"),
             {
-                let mut w = Workspace::empty(
-                    crate::WorkspaceKey::new("github:a/b#1"),
-                    "main",
-                    now(),
-                );
+                let mut w =
+                    Workspace::empty(crate::WorkspaceKey::new("github:a/b#1"), "main", now());
                 w.name = "Named workspace".into();
                 w
             },
             {
-                let mut w = Workspace::empty(
-                    crate::WorkspaceKey::new("github:a/b#xyz"),
-                    "main",
-                    now(),
-                );
+                let mut w =
+                    Workspace::empty(crate::WorkspaceKey::new("github:a/b#xyz"), "main", now());
                 w.name = "🚀".into();
                 w
             },

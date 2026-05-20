@@ -4,9 +4,9 @@
 //! by `tempfile::TempDir` cleanup at end of scope.
 
 use pilot_git_ops::{Script, ScriptBody, Worktree, WorktreeManager};
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 async fn make_worktree(base: &TempDir) -> Worktree {
@@ -93,7 +93,9 @@ async fn linked_script_creates_symlink_to_source() {
     let base = TempDir::new().unwrap();
     let ext = TempDir::new().unwrap();
     let source = ext.path().join("cleanup.sh");
-    tokio::fs::write(&source, "#!/bin/sh\necho v1").await.unwrap();
+    tokio::fs::write(&source, "#!/bin/sh\necho v1")
+        .await
+        .unwrap();
     let wt = make_worktree(&base).await;
     wm(&base)
         .apply_scripts(
@@ -109,7 +111,9 @@ async fn linked_script_creates_symlink_to_source() {
     let resolved = tokio::fs::read_link(&target).await.unwrap();
     assert_eq!(resolved, source);
     // Edits to source flow through.
-    tokio::fs::write(&source, "#!/bin/sh\necho v2").await.unwrap();
+    tokio::fs::write(&source, "#!/bin/sh\necho v2")
+        .await
+        .unwrap();
     let read_through = tokio::fs::read_to_string(&target).await.unwrap();
     assert_eq!(read_through, "#!/bin/sh\necho v2");
 }

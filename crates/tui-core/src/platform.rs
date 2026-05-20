@@ -133,9 +133,7 @@ pub fn notify_user(title: &str, body: &str) {
         // out of the AppleScript string literal.
         let safe_title = title.replace('"', "\\\"");
         let safe_body = body.replace('"', "\\\"");
-        let script = format!(
-            "display notification \"{safe_body}\" with title \"{safe_title}\""
-        );
+        let script = format!("display notification \"{safe_body}\" with title \"{safe_title}\"");
         // Detached + ignored — we don't care about exit status and
         // don't want to block. `spawn()` returns immediately;
         // dropping the child handle on a non-waited child is fine
@@ -171,8 +169,7 @@ pub async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::select! {
             _ = sigterm.recv() => {},

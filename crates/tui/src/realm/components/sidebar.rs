@@ -15,10 +15,10 @@
 //! mechanical edit we can do once the kit is deleted. Until then,
 //! UFCS keeps both code paths alive.
 
+use crate::PaneId;
 use crate::components::sidebar::Sidebar as PilotSidebar;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
-use crate::PaneId;
 use pilot_ipc::Command as IpcCommand;
 use pilot_ipc::Event as IpcEvent;
 use tuirealm::command::{Cmd, CmdResult};
@@ -116,10 +116,7 @@ impl Sidebar {
     /// Render directly into a rect — orchestrator-friendly entry
     /// point that bypasses tuirealm's mount/active dance for panes.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
-        self.inner.render(area,
-            frame,
-            self.focused,
-        );
+        self.inner.render(area, frame, self.focused);
     }
 
     /// Direct (non-tuirealm) key dispatch. The orchestrator calls
@@ -129,9 +126,7 @@ impl Sidebar {
         key: crossterm::event::KeyEvent,
         cmds: &mut Vec<IpcCommand>,
     ) {
-        let _ = self.inner.handle_key(key,
-            cmds,
-        );
+        let _ = self.inner.handle_key(key, cmds);
     }
 
     /// Update the focused-flag (drives border / cursor styling).
@@ -151,10 +146,7 @@ impl Sidebar {
     }
 
     /// Look up a workspace by key (independent of cursor).
-    pub fn workspace_by_key(
-        &self,
-        key: &pilot_core::SessionKey,
-    ) -> Option<&pilot_core::Workspace> {
+    pub fn workspace_by_key(&self, key: &pilot_core::SessionKey) -> Option<&pilot_core::Workspace> {
         self.inner.workspace_by_key(key)
     }
 
@@ -190,10 +182,7 @@ impl Sidebar {
     /// Replace the set of subscribed-repo names that should show up
     /// as headers even before polling finds anything under them.
     /// See `Sidebar::apply_subscribed_scopes`.
-    pub fn apply_subscribed_scopes(
-        &mut self,
-        scopes: &std::collections::BTreeSet<String>,
-    ) {
+    pub fn apply_subscribed_scopes(&mut self, scopes: &std::collections::BTreeSet<String>) {
         self.inner.apply_subscribed_scopes(scopes);
     }
 
@@ -240,10 +229,7 @@ impl Sidebar {
 
 impl Component for Sidebar {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        self.inner.render(area,
-            frame,
-            self.focused,
-        );
+        self.inner.render(area, frame, self.focused);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -283,9 +269,7 @@ impl AppComponent<Msg, UserEvent> for Sidebar {
                 // we can delegate to the existing `handle_key`.
                 let ct_key = realm_key_to_crossterm(key);
                 let mut cmds: Vec<IpcCommand> = Vec::new();
-                let outcome = self.inner.handle_key(ct_key,
-                    &mut cmds,
-                );
+                let outcome = self.inner.handle_key(ct_key, &mut cmds);
                 if !cmds.is_empty() {
                     self.pending_cmds.extend(cmds);
                     return Some(Msg::SidebarCmds);
@@ -297,4 +281,3 @@ impl AppComponent<Msg, UserEvent> for Sidebar {
         }
     }
 }
-

@@ -5,11 +5,11 @@
 //! `Msg::ModalDismissed`.
 
 use crate::realm::Msg;
+use crate::realm::UserEvent;
 use ratatui::style::Color;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
-use crate::realm::UserEvent;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -62,11 +62,7 @@ pub struct ErrorModal {
 impl ErrorModal {
     /// Build a modal showing `detail` from `source` with severity
     /// `accent`. Title defaults to "Error".
-    pub fn new(
-        source: impl Into<String>,
-        accent: Accent,
-        detail: impl Into<String>,
-    ) -> Self {
+    pub fn new(source: impl Into<String>, accent: Accent, detail: impl Into<String>) -> Self {
         Self {
             title: "Error".to_string(),
             source: source.into(),
@@ -130,10 +126,7 @@ impl Component for ErrorModal {
             "Press any key to dismiss",
             theme.hint(),
         )]));
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {

@@ -90,8 +90,8 @@ pub async fn handle_start_agent_run(
             let _ = config.bus.send(Event::ProviderError {
                 source: format!("agent_run:{agent}"),
                 message: format!("{e}"),
-            detail: String::new(),
-            kind: String::new(),
+                detail: String::new(),
+                kind: String::new(),
             });
             return;
         }

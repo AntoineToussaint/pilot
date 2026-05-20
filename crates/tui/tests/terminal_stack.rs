@@ -589,7 +589,10 @@ fn ctrl_w_armed_then_pipe_emits_shell_spawn() {
     assert!(
         cmds.iter().any(|c| matches!(
             c,
-            Command::Spawn { kind: TerminalKind::Shell, .. }
+            Command::Spawn {
+                kind: TerminalKind::Shell,
+                ..
+            }
         )),
         "split commits a Shell spawn so the new tile has a runner"
     );
@@ -643,11 +646,16 @@ fn ctrl_w_right_moves_focus_right() {
     t.handle_key(ctrl('w'), &mut cmds);
     t.handle_key(arrow_right(), &mut cmds);
     if let SessionLayout::Splits { focused, .. } = t.layout() {
-        assert_eq!(focused, &vec![1u8], "Ctrl-w Right moved focus to right tile");
+        assert_eq!(
+            focused,
+            &vec![1u8],
+            "Ctrl-w Right moved focus to right tile"
+        );
     }
     // Persist via SetSessionLayout.
     assert!(
-        cmds.iter().any(|c| matches!(c, Command::SetSessionLayout { .. })),
+        cmds.iter()
+            .any(|c| matches!(c, Command::SetSessionLayout { .. })),
         "focus moves persist"
     );
 }

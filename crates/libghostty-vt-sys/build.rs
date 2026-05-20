@@ -96,6 +96,16 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=System");
         println!("cargo:rustc-link-lib=c");
         println!("cargo:rustc-link-lib=c++");
+    } else if target.contains("linux") {
+        // The Zig-built static lib pulls in libcxx code that
+        // references libstdc++ runtime symbols
+        // (`__cxa_throw`, `std::length_error::~length_error`,
+        // `vtable for std::length_error`, …). Without `-lstdc++`
+        // the final link fails with `undefined symbol` for each.
+        // Same `-lc` for sanity even though rustc usually injects
+        // it on glibc.
+        println!("cargo:rustc-link-lib=stdc++");
+        println!("cargo:rustc-link-lib=c");
     }
     println!("cargo:include={}", include_dir.display());
 }
@@ -127,9 +137,7 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
                 .unwrap_or_else(|e| panic!("failed to remove {}: {e}", src_dir.display()));
         }
         if attempt > 1 {
-            eprintln!(
-                "Fetching ghostty {GHOSTTY_COMMIT} (attempt {attempt}/{MAX_ATTEMPTS}) ..."
-            );
+            eprintln!("Fetching ghostty {GHOSTTY_COMMIT} (attempt {attempt}/{MAX_ATTEMPTS}) ...");
         } else {
             eprintln!("Fetching ghostty {GHOSTTY_COMMIT} ...");
         }

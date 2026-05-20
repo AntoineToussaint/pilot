@@ -257,11 +257,7 @@ pub fn render_table(
         .collect()
 }
 
-fn render_row(
-    row: &Row,
-    columns: &[Column],
-    widths: &[usize],
-) -> ratatui::text::Line<'static> {
+fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text::Line<'static> {
     let mut spans: Vec<ratatui::text::Span<'static>> = Vec::new();
     for (i, target_w) in widths.iter().enumerate() {
         // A zero-width column emits NOTHING — not even a `…`. This
@@ -277,10 +273,7 @@ fn render_row(
         let cell = row.cells.get(i).unwrap_or(&empty);
         let align = columns.get(i).map(|c| c.align).unwrap_or(Align::Left);
         // Fill resolution: cell override > row default > unstyled.
-        let fill_style = cell
-            .fill_style
-            .or(row.fill_style)
-            .unwrap_or_default();
+        let fill_style = cell.fill_style.or(row.fill_style).unwrap_or_default();
         let cell_w = cell.width();
         if cell_w <= *target_w {
             let pad = *target_w - cell_w;
@@ -378,7 +371,12 @@ mod tests {
     #[test]
     fn multiple_flex_columns_split_evenly_with_remainder_on_left() {
         // 100 - 10 = 90 remaining across 3 flexes → 30 each, no remainder.
-        let cols = [Column::fixed(10), Column::flex(1), Column::flex(1), Column::flex(1)];
+        let cols = [
+            Column::fixed(10),
+            Column::flex(1),
+            Column::flex(1),
+            Column::flex(1),
+        ];
         let widths = compute_widths(&cols, &[], 100);
         assert_eq!(widths, vec![10, 30, 30, 30]);
     }
@@ -427,11 +425,7 @@ mod tests {
         ])];
         let lines = render_table(&rows, &cols, 20);
         // "a" + 4 spaces + "b" + 2 spaces = 8 cells across the two columns.
-        let joined: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "a    b  ");
     }
 
@@ -441,11 +435,7 @@ mod tests {
         let cols = [Column::fixed(5)];
         let rows = vec![Row::new(vec![Cell::from_span(Span::raw("hello world"))])];
         let lines = render_table(&rows, &cols, 5);
-        let joined: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         // "hell" + "…" = 5 cells.
         assert_eq!(joined, "hell…");
     }
@@ -456,11 +446,7 @@ mod tests {
         let cols = [Column::fixed(5).right()];
         let rows = vec![Row::new(vec![Cell::from_span(Span::raw("hi"))])];
         let lines = render_table(&rows, &cols, 5);
-        let joined: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         // 3 spaces of padding, then "hi" flush right.
         assert_eq!(joined, "   hi");
     }
@@ -490,11 +476,13 @@ mod tests {
         use ratatui::style::{Color, Style};
         let highlight = Style::default().bg(Color::Blue);
         let cols = [Column::fixed(3), Column::fixed(3)];
-        let rows = vec![Row::new(vec![
-            Cell::from_span(Span::raw("a")),
-            Cell::from_span(Span::raw("b")),
-        ])
-        .fill(highlight)];
+        let rows = vec![
+            Row::new(vec![
+                Cell::from_span(Span::raw("a")),
+                Cell::from_span(Span::raw("b")),
+            ])
+            .fill(highlight),
+        ];
         let lines = render_table(&rows, &cols, 6);
         // Both padding spans inherit the row's fill_style.
         let padding_spans: Vec<&ratatui::text::Span> = lines[0]
@@ -515,10 +503,8 @@ mod tests {
         let row_fill = Style::default().bg(Color::Blue);
         let cell_fill = Style::default().bg(Color::Red);
         let cols = [Column::fixed(3)];
-        let rows = vec![Row::new(vec![
-            Cell::from_span(Span::raw("a")).fill(cell_fill),
-        ])
-        .fill(row_fill)];
+        let rows =
+            vec![Row::new(vec![Cell::from_span(Span::raw("a")).fill(cell_fill)]).fill(row_fill)];
         let lines = render_table(&rows, &cols, 3);
         // Padding span uses the cell-level fill, not the row one.
         assert_eq!(lines[0].spans[1].style, cell_fill);
@@ -534,16 +520,8 @@ mod tests {
         ];
         let lines = render_table(&rows, &cols, 20);
         // Both rows pad to 5 cells (width of "#7204").
-        let row0: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        let row1: String = lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let row0: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let row1: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(row0, "#1   ");
         assert_eq!(row1, "#7204");
     }

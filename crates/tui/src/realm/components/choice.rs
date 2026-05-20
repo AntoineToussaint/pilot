@@ -17,10 +17,10 @@
 //! `with_refresh(true)` enables `r` → `Msg::ChoiceRefresh`.
 
 use crate::realm::Msg;
+use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyModifiers};
-use crate::realm::UserEvent;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -177,11 +177,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
     fn is_selectable(&self, idx: usize) -> bool {
         match self.items.get(idx) {
             None => false,
-            Some(item) => self
-                .selectable
-                .as_ref()
-                .map(|f| f(item))
-                .unwrap_or(true),
+            Some(item) => self.selectable.as_ref().map(|f| f(item)).unwrap_or(true),
         }
     }
 
@@ -305,9 +301,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                     };
                     lines.push(Line::from(Span::styled(
                         section_truncated,
-                        Style::default()
-                            .fg(theme.warn)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                     )));
                     last_section = Some(section);
                 }
@@ -418,10 +412,7 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
             ));
             help_spans.push(Span::raw(" back  "));
         }
-        help_spans.push(Span::styled(
-            "Esc",
-            Style::default().fg(theme.error).bold(),
-        ));
+        help_spans.push(Span::styled("Esc", Style::default().fg(theme.error).bold()));
         help_spans.push(Span::raw(" cancel"));
 
         // Layout: lines occupy inner.height-2 rows; help at bottom
@@ -462,10 +453,7 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         // No wrap — each Line is already truncated to `inner.width`
         // in `build_lines`, so line index === terminal row. That's
         // load-bearing for the scroll math above.
-        frame.render_widget(
-            Paragraph::new(lines).scroll((self.scroll, 0)),
-            body_area,
-        );
+        frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), body_area);
         frame.render_widget(Paragraph::new(Line::from(help_spans)), help_area);
     }
 
@@ -562,7 +550,9 @@ mod tests {
     struct Item(&'static str);
 
     fn ten() -> Choice<Item> {
-        let items: Vec<Item> = (0..10).map(|i| Item(Box::leak(format!("i{i}").into_boxed_str()))).collect();
+        let items: Vec<Item> = (0..10)
+            .map(|i| Item(Box::leak(format!("i{i}").into_boxed_str())))
+            .collect();
         Choice::single("pick", items)
     }
 
@@ -582,9 +572,7 @@ mod tests {
             .map(Item)
             .collect();
         // Mark indices 1 and 2 non-selectable.
-        let mut c = Choice::single("p", items).selectable(|i: &Item| {
-            !matches!(i.0, "b" | "c")
-        });
+        let mut c = Choice::single("p", items).selectable(|i: &Item| !matches!(i.0, "b" | "c"));
         c.cursor = 0;
         c.move_cursor(1);
         // Should hop past b/c and land on d (index 3).
@@ -597,9 +585,7 @@ mod tests {
             .into_iter()
             .map(Item)
             .collect();
-        let mut c = Choice::single("p", items).selectable(|i: &Item| {
-            !matches!(i.0, "b" | "c")
-        });
+        let mut c = Choice::single("p", items).selectable(|i: &Item| !matches!(i.0, "b" | "c"));
         c.cursor = 3;
         c.move_cursor(-1);
         // Should hop past c/b and land on a (index 0).
@@ -608,14 +594,9 @@ mod tests {
 
     #[test]
     fn cursor_to_first_and_last_respect_selectability() {
-        let items: Vec<Item> = vec!["a", "b", "c", "d"]
-            .into_iter()
-            .map(Item)
-            .collect();
+        let items: Vec<Item> = vec!["a", "b", "c", "d"].into_iter().map(Item).collect();
         // First selectable is 'b'; last selectable is 'c'.
-        let mut c = Choice::single("p", items).selectable(|i: &Item| {
-            matches!(i.0, "b" | "c")
-        });
+        let mut c = Choice::single("p", items).selectable(|i: &Item| matches!(i.0, "b" | "c"));
         c.cursor_to_last();
         assert_eq!(c.cursor, 2);
         c.cursor_to_first();
@@ -624,10 +605,7 @@ mod tests {
 
     #[test]
     fn multi_confirm_requires_a_tick_by_default() {
-        let mut c = Choice::multi(
-            "p",
-            vec![Item("a"), Item("b")],
-        );
+        let mut c = Choice::multi("p", vec![Item("a"), Item("b")]);
         // Mode::Multi + require_one (default true) → empty picks → Stay.
         match c.confirm_picks() {
             ConfirmResult::Stay => {}
@@ -638,14 +616,13 @@ mod tests {
 
     #[test]
     fn multi_with_allow_empty_returns_picked_on_empty() {
-        let mut c = Choice::multi(
-            "p",
-            vec![Item("a"), Item("b")],
-        )
-        .allow_empty(true);
+        let mut c = Choice::multi("p", vec![Item("a"), Item("b")]).allow_empty(true);
         match c.confirm_picks() {
             ConfirmResult::Picked(v) if v.is_empty() => {}
-            other => panic!("expected empty Picked, got {:?}", core::mem::discriminant(&other)),
+            other => panic!(
+                "expected empty Picked, got {:?}",
+                core::mem::discriminant(&other)
+            ),
         }
     }
 

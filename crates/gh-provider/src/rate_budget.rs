@@ -131,8 +131,7 @@ impl RateBudget {
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        self.available = (self.available + elapsed * self.refill_per_sec)
-            .min(self.capacity as f64);
+        self.available = (self.available + elapsed * self.refill_per_sec).min(self.capacity as f64);
         self.last_refill = now;
     }
 

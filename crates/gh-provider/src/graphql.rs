@@ -587,10 +587,7 @@ mutation($id: ID!, $userIds: [ID!]!) {
 }
 "#;
 
-pub fn add_assignees_body(
-    assignable_node_id: &str,
-    user_node_ids: &[String],
-) -> serde_json::Value {
+pub fn add_assignees_body(assignable_node_id: &str, user_node_ids: &[String]) -> serde_json::Value {
     serde_json::json!({
         "query": ADD_ASSIGNEES_MUTATION,
         "variables": {
@@ -1027,9 +1024,18 @@ fn extract_closes_issues(pr: &GqlPr, pr_repo: &str) -> Vec<TaskId> {
 /// keyword and `#N`.
 pub(crate) fn parse_closes_from_title(title: &str) -> Vec<u64> {
     const KEYWORDS: &[&str] = &[
-        "close", "closes", "closed", "closing",
-        "fix", "fixes", "fixed", "fixing",
-        "resolve", "resolves", "resolved", "resolving",
+        "close",
+        "closes",
+        "closed",
+        "closing",
+        "fix",
+        "fixes",
+        "fixed",
+        "fixing",
+        "resolve",
+        "resolves",
+        "resolved",
+        "resolving",
     ];
     let lower = title.to_ascii_lowercase();
     let bytes_lower = lower.as_bytes();
@@ -1048,8 +1054,8 @@ pub(crate) fn parse_closes_from_title(title: &str) -> Vec<u64> {
                     let after = i + kw_bytes.len();
                     // Right-bound: must be followed by non-letter so
                     // `closer` doesn't match `close`.
-                    let right_ok = after >= bytes_lower.len()
-                        || !bytes_lower[after].is_ascii_alphabetic();
+                    let right_ok =
+                        after >= bytes_lower.len() || !bytes_lower[after].is_ascii_alphabetic();
                     if !right_ok {
                         continue;
                     }
@@ -1920,12 +1926,10 @@ mod tests {
         // `make_pr` builds URL `https://github.com/o/r/pull/N` so the
         // repo extracted from URL is `o/r`.
         let mut pr = make_pr(100, "alice");
-        pr.title =
-            "Add dynamic credential source for per-request secrets (closes #31)".into();
+        pr.title = "Add dynamic credential source for per-request secrets (closes #31)".into();
         pr.closing_issues_references = None; // GitHub didn't link it
         let task = pr_to_task(&pr, "alice");
-        let keys: Vec<&str> =
-            task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
         assert_eq!(keys, vec!["o/r#31"]);
     }
 
@@ -1947,8 +1951,7 @@ mod tests {
             }],
         });
         let task = pr_to_task(&pr, "alice");
-        let keys: Vec<&str> =
-            task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
         // #1 from graphql (deduped against title's #1) + #2 from title.
         assert_eq!(keys, vec!["o/r#1", "o/r#2"]);
     }
@@ -2097,7 +2100,10 @@ mod tests {
             acts[1].body,
         );
         assert_eq!(acts[1].path.as_deref(), Some("src/lib.rs"));
-        assert!(acts[1].diff_hunk.is_none(), "replies don't carry diff hunks");
+        assert!(
+            acts[1].diff_hunk.is_none(),
+            "replies don't carry diff hunks"
+        );
         assert_eq!(acts[1].thread_id.as_deref(), Some("T_thread1"));
     }
 

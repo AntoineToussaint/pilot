@@ -69,10 +69,7 @@ pub fn render(
 
     // Background fill so the line stands out.
     let bg = Style::default().bg(theme.surface);
-    f.render_widget(
-        Paragraph::new(Line::raw("")).style(bg),
-        area,
-    );
+    f.render_widget(Paragraph::new(Line::raw("")).style(bg), area);
 
     // Reserve the right-most segment for the notice (or polling
     // status if no notice). Keymap fills the rest of the line.
@@ -102,17 +99,17 @@ pub fn render(
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(label.to_string(), Style::default().bg(theme.surface).fg(theme.text_dim)),
+            Span::styled(
+                label.to_string(),
+                Style::default().bg(theme.surface).fg(theme.text_dim),
+            ),
             Span::styled(" ", bg),
         ]))
     } else {
         None
     };
 
-    let right_width = right_text
-        .as_ref()
-        .map(|l| l.width() as u16)
-        .unwrap_or(0);
+    let right_width = right_text.as_ref().map(|l| l.width() as u16).unwrap_or(0);
     let right_rect = Rect {
         x: area.x + area.width.saturating_sub(right_width),
         y: area.y,
@@ -132,13 +129,22 @@ pub fn render(
     // the full alphabet, `q q` to quit. `,` (settings) used to be
     // here too but it isn't an emergency the way `?` / `q q` are.
     const GLOBALS: &[Binding] = &[
-        Binding { keys: "?", label: "help" },
-        Binding { keys: "q q", label: "quit" },
+        Binding {
+            keys: "?",
+            label: "help",
+        },
+        Binding {
+            keys: "q q",
+            label: "quit",
+        },
     ];
 
     let mut spans: Vec<Span> = Vec::with_capacity((keymap.len() + GLOBALS.len()) * 4 + 2);
     spans.push(Span::styled(" ", bg));
-    let key_style = Style::default().bg(theme.surface).fg(theme.accent).add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .bg(theme.surface)
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
     let label_style = Style::default().bg(theme.surface).fg(theme.text_dim);
     let sep_style = Style::default().bg(theme.surface).fg(theme.chrome);
     let global_key_style = Style::default()

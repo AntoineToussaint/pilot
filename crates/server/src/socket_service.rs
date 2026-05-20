@@ -66,20 +66,18 @@ impl SocketService {
         // Clear any stale socket left by a prior crashed daemon.
         let _ = lifecycle::cleanup_stale_socket(&self.socket);
 
-        let listener = transport::Listener::bind(&self.socket).await.map_err(|e| {
-            match e {
-                transport::TransportError::Bind { source, .. } => {
-                    SocketServiceError::Bind {
-                        path: self.socket.clone(),
-                        source,
-                    }
-                }
+        let listener = transport::Listener::bind(&self.socket)
+            .await
+            .map_err(|e| match e {
+                transport::TransportError::Bind { source, .. } => SocketServiceError::Bind {
+                    path: self.socket.clone(),
+                    source,
+                },
                 other => SocketServiceError::Bind {
                     path: self.socket.clone(),
                     source: std::io::Error::other(other.to_string()),
                 },
-            }
-        })?;
+            })?;
 
         lifecycle::write_pid_file(std::process::id(), &self.pid_file)
             .map_err(SocketServiceError::Pid)?;

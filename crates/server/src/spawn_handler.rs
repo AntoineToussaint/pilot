@@ -26,12 +26,12 @@
 
 use crate::ServerConfig;
 use chrono::Utc;
+use pilot_agents::SpawnCtx;
 use pilot_core::{
     SessionId, SessionKey, SessionKind, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
-use pilot_store::WorkspaceRecord;
-use pilot_agents::SpawnCtx;
 use pilot_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
+use pilot_store::WorkspaceRecord;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -153,8 +153,8 @@ pub async fn handle_spawn(
             let _ = config.bus.send(Event::ProviderError {
                 source: format!("spawn:{kind:?}"),
                 message: "no agent registered for this id".into(),
-            detail: String::new(),
-            kind: String::new(),
+                detail: String::new(),
+                kind: String::new(),
             });
             return;
         }
@@ -184,15 +184,19 @@ pub async fn handle_spawn(
         env_count = env.len(),
         "handle_spawn: calling backend.spawn"
     );
-    let backend_key = match config.backend.spawn(&argv, cwd_path.as_deref(), &env, &hint).await {
+    let backend_key = match config
+        .backend
+        .spawn(&argv, cwd_path.as_deref(), &env, &hint)
+        .await
+    {
         Ok(k) => k,
         Err(e) => {
             tracing::error!("handle_spawn: backend.spawn failed: {e}");
             let _ = config.bus.send(Event::ProviderError {
                 source: "spawn".into(),
                 message: format!("{e}"),
-            detail: String::new(),
-            kind: String::new(),
+                detail: String::new(),
+                kind: String::new(),
             });
             return;
         }
@@ -325,9 +329,7 @@ pub async fn handle_spawn(
             buf: &mut Vec<u8>,
             bytes: &[u8],
             states: &std::sync::Arc<
-                tokio::sync::Mutex<
-                    std::collections::HashMap<TerminalId, pilot_ipc::AgentState>,
-                >,
+                tokio::sync::Mutex<std::collections::HashMap<TerminalId, pilot_ipc::AgentState>>,
             >,
             bus: &tokio::sync::broadcast::Sender<Event>,
             id: TerminalId,
@@ -638,11 +640,9 @@ async fn resolve_or_create_session(
     };
 
     if let Some(id) = session_id {
-        let session = workspace
-            .find_session(id)
-            .ok_or_else(|| {
-                crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
-            })?;
+        let session = workspace.find_session(id).ok_or_else(|| {
+            crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
+        })?;
         ensure_worktree_present(config, &workspace, &session.worktree_path).await;
         return Ok((session.worktree_path.clone(), session.id));
     }
@@ -765,8 +765,8 @@ async fn provision_worktree(
         tracing::warn!("apply_scripts for {repo_key} failed: {e}");
     }
     let _ = worktree; // silence dead-binding warning from the
-                     // signature change; the worktree value is what
-                     // apply_mounts mutated and we're done with it.
+    // signature change; the worktree value is what
+    // apply_mounts mutated and we're done with it.
     Ok(())
 }
 
@@ -1108,8 +1108,8 @@ pub async fn handle_create_session(
             let _ = config.bus.send(Event::ProviderError {
                 source: "create_session".into(),
                 message: format!("{e}"),
-            detail: String::new(),
-            kind: String::new(),
+                detail: String::new(),
+                kind: String::new(),
             });
             return;
         }
@@ -1151,7 +1151,10 @@ fn session_kind_from_terminal(kind: &TerminalKind) -> SessionKind {
     }
 }
 
-fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Result<Workspace, crate::ServerError> {
+fn load_workspace(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+) -> Result<Workspace, crate::ServerError> {
     use crate::ServerError;
     let record = config
         .store
@@ -1202,11 +1205,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
 /// targeted at a live terminal instead of a fresh one. Quietly
 /// no-ops if the terminal isn't an agent (shell terminals don't
 /// have `inject_prompt`) or doesn't exist.
-pub async fn handle_inject_prompt(
-    config: &ServerConfig,
-    terminal_id: TerminalId,
-    prompt: &str,
-) {
+pub async fn handle_inject_prompt(config: &ServerConfig, terminal_id: TerminalId, prompt: &str) {
     let backend_key = match config.terminals.lock().await.get(&terminal_id).cloned() {
         Some(k) => k,
         None => {
@@ -1217,9 +1216,7 @@ pub async fn handle_inject_prompt(
     let kind = match config.terminal_meta.lock().await.get(&terminal_id).cloned() {
         Some((_session_key, kind)) => kind,
         None => {
-            tracing::debug!(
-                "inject_prompt: no terminal_meta for {terminal_id:?} — skipping"
-            );
+            tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
             return;
         }
     };
@@ -1234,9 +1231,7 @@ pub async fn handle_inject_prompt(
             }
         },
         _ => {
-            tracing::debug!(
-                "inject_prompt: terminal {terminal_id:?} is not an agent — skipping"
-            );
+            tracing::debug!("inject_prompt: terminal {terminal_id:?} is not an agent — skipping");
             return;
         }
     };
@@ -1527,9 +1522,18 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
             }
             tracing::info!(
                 "restoring session {:?} in workspace {}",
-                kind, workspace.key
+                kind,
+                workspace.key
             );
-            handle_spawn(config, session_key.clone(), Some(session.id), kind, None, None).await;
+            handle_spawn(
+                config,
+                session_key.clone(),
+                Some(session.id),
+                kind,
+                None,
+                None,
+            )
+            .await;
         }
     }
 }
@@ -1559,14 +1563,24 @@ mod tests {
         env.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
         cfg.repos.insert(
             "tensorzero/tensorzero".into(),
-            pilot_config::RepoConfig { env, mounts: vec![], scripts: vec![] },
+            pilot_config::RepoConfig {
+                env,
+                mounts: vec![],
+                scripts: vec![],
+            },
         );
 
         let out = env_for_repo(&cfg, "tensorzero/tensorzero");
         assert_eq!(out.len(), 2);
         let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
-        assert_eq!(map.get("DATABASE_URL").map(String::as_str), Some("postgres://x"));
-        assert_eq!(map.get("OPENAI_API_KEY").map(String::as_str), Some("sk-test"));
+        assert_eq!(
+            map.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://x")
+        );
+        assert_eq!(
+            map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
     }
 
     #[test]
@@ -1582,7 +1596,11 @@ mod tests {
         env.insert("X".into(), "1".into());
         cfg.repos.insert(
             "Owner/Repo".into(),
-            pilot_config::RepoConfig { env, mounts: vec![], scripts: vec![] },
+            pilot_config::RepoConfig {
+                env,
+                mounts: vec![],
+                scripts: vec![],
+            },
         );
         // Different case should miss.
         assert!(env_for_repo(&cfg, "owner/repo").is_empty());
@@ -1595,7 +1613,9 @@ mod tests {
         // We don't read HOME elsewhere in this test file, and we
         // restore it on exit.
         let prior = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", "/tmp/fake-home"); }
+        unsafe {
+            std::env::set_var("HOME", "/tmp/fake-home");
+        }
         let out = expand_tilde(std::path::Path::new("~/data"));
         assert_eq!(out, std::path::PathBuf::from("/tmp/fake-home/data"));
         // Non-tilde paths pass through unchanged.
@@ -1628,7 +1648,13 @@ mod tests {
         ];
         let mounts = config_mounts_to_git(&specs);
         assert_eq!(mounts.len(), 2);
-        assert!(matches!(mounts[0].placement, pilot_git_ops::Placement::Inside));
-        assert!(matches!(mounts[1].placement, pilot_git_ops::Placement::Above));
+        assert!(matches!(
+            mounts[0].placement,
+            pilot_git_ops::Placement::Inside
+        ));
+        assert!(matches!(
+            mounts[1].placement,
+            pilot_git_ops::Placement::Above
+        ));
     }
 }

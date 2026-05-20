@@ -69,8 +69,14 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // Ties broken by SessionKey for a stable order across renders.
     for rows in by_repo.values_mut() {
         rows.sort_by(|(ka, a), (kb, b)| {
-            let a_ts = a.primary_task().map(|t| t.updated_at).unwrap_or(a.created_at);
-            let b_ts = b.primary_task().map(|t| t.updated_at).unwrap_or(b.created_at);
+            let a_ts = a
+                .primary_task()
+                .map(|t| t.updated_at)
+                .unwrap_or(a.created_at);
+            let b_ts = b
+                .primary_task()
+                .map(|t| t.updated_at)
+                .unwrap_or(b.created_at);
             b_ts.cmp(&a_ts).then_with(|| ka.as_str().cmp(kb.as_str()))
         });
     }
@@ -86,8 +92,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     }
 
     // Step 5: emit headers + workspace rows + session sub-rows.
-    let mut visible: Vec<VisibleRow> =
-        Vec::with_capacity(filtered.len() + all_repos.len() + 4);
+    let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + all_repos.len() + 4);
     let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
     for repo in &all_repos {
         visible.push(VisibleRow::RepoHeader(repo.clone()));
