@@ -101,7 +101,7 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     vec![
         Column::fixed(4),                       // 0: prefix
         Column::fixed(5),                       // 1: type label (incl. trailing space)
-        Column::fixed(max_pr_num_width),        // 2: pr_num
+        Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
         Column::fixed(2),                       // 3: role (" R" or blank)
         Column::fixed(3),                       // 4: asking (" ? " reserved)
         Column::max(0),                         // 5: kind ("[feat] " or blank)

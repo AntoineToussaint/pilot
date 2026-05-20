@@ -149,7 +149,7 @@ pub fn render(
         if i > 0 {
             spans.push(Span::styled("  ·  ", sep_style));
         }
-        spans.push(Span::styled(b.keys, key_style));
+        spans.push(Span::styled(compact_key(b.keys), key_style));
         spans.push(Span::styled(" ", bg));
         spans.push(Span::styled(b.label, label_style));
     }
@@ -160,7 +160,7 @@ pub fn render(
         if i > 0 {
             spans.push(Span::styled("  ·  ", sep_style));
         }
-        spans.push(Span::styled(b.keys, global_key_style));
+        spans.push(Span::styled(compact_key(b.keys), global_key_style));
         spans.push(Span::styled(" ", bg));
         spans.push(Span::styled(b.label, label_style));
     }
@@ -168,5 +168,69 @@ pub fn render(
 
     if let Some(line) = right_text {
         f.render_widget(Paragraph::new(line).style(bg), right_rect);
+    }
+}
+
+/// Compact display for footer hints — `Shift-X` → `X`, `Ctrl-Q` →
+/// `^Q`, anything else (`q q`, `Tab`, `↑/↓`) as-is. Single source
+/// of truth for binding specs stays explicit (so the `?` help modal
+/// shows the full chord); the footer renderer just chooses a tighter
+/// display form so the line doesn't get jagged with `Shift-` prefixes.
+fn compact_key(keys: &'static str) -> std::borrow::Cow<'static, str> {
+    use std::borrow::Cow;
+    if let Some(rest) = keys.strip_prefix("Shift-") {
+        // `Shift-X` where X is one ASCII letter → uppercase letter
+        // alone (standard Unix convention: uppercase = shifted).
+        let chars: Vec<char> = rest.chars().collect();
+        if chars.len() == 1 && chars[0].is_ascii_alphabetic() {
+            return Cow::Owned(chars[0].to_ascii_uppercase().to_string());
+        }
+    }
+    if let Some(rest) = keys.strip_prefix("Ctrl-") {
+        let chars: Vec<char> = rest.chars().collect();
+        if chars.len() == 1 && chars[0].is_ascii_alphabetic() {
+            return Cow::Owned(format!("^{}", chars[0].to_ascii_uppercase()));
+        }
+    }
+    Cow::Borrowed(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_key;
+
+    #[test]
+    fn shift_letter_collapses_to_uppercase() {
+        assert_eq!(compact_key("Shift-X"), "X");
+        assert_eq!(compact_key("Shift-N"), "N");
+        assert_eq!(compact_key("Shift-m"), "M"); // lowercase rest still uppercased
+    }
+
+    #[test]
+    fn ctrl_letter_collapses_to_caret_form() {
+        assert_eq!(compact_key("Ctrl-Q"), "^Q");
+        assert_eq!(compact_key("Ctrl-c"), "^C");
+    }
+
+    #[test]
+    fn single_char_keys_pass_through() {
+        assert_eq!(compact_key("w"), "w");
+        assert_eq!(compact_key("?"), "?");
+    }
+
+    #[test]
+    fn multi_token_keys_pass_through() {
+        // `q q` is a chord — leave as-is so the user sees they need
+        // to double-tap.
+        assert_eq!(compact_key("q q"), "q q");
+        assert_eq!(compact_key("↑/↓"), "↑/↓");
+        assert_eq!(compact_key("Shift-PgUp/Dn"), "Shift-PgUp/Dn");
+    }
+
+    /// Non-letter shifted keys (e.g. `Shift-Tab`) keep the prefix —
+    /// just letters get the uppercase-alone treatment.
+    #[test]
+    fn shifted_non_letter_keeps_prefix() {
+        assert_eq!(compact_key("Shift-Tab"), "Shift-Tab");
     }
 }

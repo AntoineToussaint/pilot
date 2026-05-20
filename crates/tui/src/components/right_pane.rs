@@ -778,6 +778,44 @@ impl RightPane {
             Span::styled(branch, Style::default().fg(theme.accent)),
         ]));
 
+        // Reviewers + assignees — skip rendering when empty so the
+        // header doesn't add noise on tasks that don't have them
+        // (issues, draft PRs without reviewer requests, …).
+        if !task.reviewers.is_empty() {
+            let mut spans: Vec<Span> = Vec::with_capacity(task.reviewers.len() * 2 + 1);
+            spans.push(Span::styled(
+                "Reviewers: ",
+                Style::default().fg(theme.text_dim),
+            ));
+            for (i, login) in task.reviewers.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" ", Style::default()));
+                }
+                spans.push(Span::styled(
+                    format!("@{login}"),
+                    Style::default().fg(theme.hover),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        if !task.assignees.is_empty() {
+            let mut spans: Vec<Span> = Vec::with_capacity(task.assignees.len() * 2 + 1);
+            spans.push(Span::styled(
+                "Assignees: ",
+                Style::default().fg(theme.text_dim),
+            ));
+            for (i, login) in task.assignees.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" ", Style::default()));
+                }
+                spans.push(Span::styled(
+                    format!("@{login}"),
+                    Style::default().fg(theme.accent),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
@@ -1399,12 +1437,10 @@ impl RightPane {
                 self.comment_scroll = last;
             }
             // Activity is sorted newest-first; an inserted comment
-            // shifts every existing index. Drop expansion state when
-            // the count changes — preserving it would un-expand row N
-            // while expanding the row that took its place.
-            if prev_len != new_len {
-                self.feed.clear_expanded();
-            }
+            // shifts every existing index. Shift the cursor +
+            // expanded + selected sets in lockstep so an expanded
+            // card stays expanded across the 60s poll cycle.
+            self.feed.adjust_for_length_change(prev_len, new_len);
         }
     }
 

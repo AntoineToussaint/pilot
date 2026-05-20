@@ -128,13 +128,60 @@ impl ActivityFeed {
         self.selected.clear();
     }
 
-    /// Drop all expansion state. Called when the activity list
-    /// length changes — every index has shifted, so an "expanded
-    /// row 3" no longer points at the same comment. (Selection
-    /// state intentionally NOT cleared here, matching the
-    /// pre-refactor behavior; a future fix could reset both.)
+    /// Drop all expansion state.
     pub fn clear_expanded(&mut self) {
         self.expanded.clear();
+    }
+
+    /// Re-index expanded + selected sets after the activity list's
+    /// length changes (e.g. poll brought in N new comments). Activity
+    /// is sorted newest-first, so:
+    ///
+    /// - **Growth** (new items inserted at the front): every existing
+    ///   index shifts up by `delta = new_len - prev_len`. Indices that
+    ///   fall past `new_len` are dropped.
+    /// - **Shrinkage**: indices past `new_len` are dropped. Survivors
+    ///   keep their position (deletions from the middle would corrupt
+    ///   this, but pilot's poll doesn't delete from the middle —
+    ///   removals are only from the tail when activity gets truncated).
+    ///
+    /// Before this method existed the caller cleared both sets on any
+    /// length change, which collapsed every expanded card on every
+    /// 60s poll — users couldn't keep a long comment open. Now an
+    /// expanded card stays expanded across polls.
+    pub fn adjust_for_length_change(&mut self, prev_len: usize, new_len: usize) {
+        if prev_len == new_len {
+            return;
+        }
+        if new_len > prev_len {
+            let delta = new_len - prev_len;
+            self.expanded = self
+                .expanded
+                .iter()
+                .map(|i| i + delta)
+                .filter(|&i| i < new_len)
+                .collect();
+            self.selected = self
+                .selected
+                .iter()
+                .map(|i| i + delta)
+                .filter(|&i| i < new_len)
+                .collect();
+            // Cursor likewise shifts so the user's focused row keeps
+            // pointing at the same comment they were reading.
+            if self.cursor + delta < new_len {
+                self.cursor += delta;
+            } else {
+                self.cursor = new_len.saturating_sub(1);
+            }
+        } else {
+            // Shrinkage — just drop out-of-range indices.
+            self.expanded.retain(|&i| i < new_len);
+            self.selected.retain(|&i| i < new_len);
+            if self.cursor >= new_len {
+                self.cursor = new_len.saturating_sub(1);
+            }
+        }
     }
 
     /// Reset all per-workspace state. Activity indices are
@@ -255,6 +302,61 @@ mod tests {
         assert_eq!(f.cursor, 0);
         assert!(f.expanded().is_empty());
         assert!(f.selected().is_empty());
+    }
+
+    /// Adjusting for growth (new items at the front) shifts every
+    /// expanded index up by the delta. This is the "60s poll
+    /// shouldn't collapse my expanded card" contract.
+    #[test]
+    fn adjust_for_length_change_growth_shifts_expanded_indices() {
+        let mut f = ActivityFeed::new();
+        f.toggle_expand(0); // was at index 0
+        f.toggle_expand(2);
+        f.cursor = 0;
+        // Poll brings in 3 new items at the front.
+        f.adjust_for_length_change(5, 8);
+        // Original indices 0, 2 shift to 3, 5. Cursor follows.
+        assert!(f.is_expanded(3));
+        assert!(f.is_expanded(5));
+        assert!(!f.is_expanded(0));
+        assert_eq!(f.cursor, 3);
+    }
+
+    /// Shrinkage: indices past `new_len` get dropped; the rest
+    /// keep their position. Cursor clamps.
+    #[test]
+    fn adjust_for_length_change_shrinkage_drops_out_of_range() {
+        let mut f = ActivityFeed::new();
+        f.toggle_expand(0);
+        f.toggle_expand(4);
+        f.cursor = 4;
+        // Activity shrinks from 5 to 2 items.
+        f.adjust_for_length_change(5, 2);
+        assert!(f.is_expanded(0));
+        assert!(!f.is_expanded(4));
+        assert_eq!(f.cursor, 1); // clamped to last valid
+    }
+
+    /// No-op when length is unchanged.
+    #[test]
+    fn adjust_for_length_change_noop_when_unchanged() {
+        let mut f = ActivityFeed::new();
+        f.toggle_expand(2);
+        f.cursor = 2;
+        f.adjust_for_length_change(5, 5);
+        assert!(f.is_expanded(2));
+        assert_eq!(f.cursor, 2);
+    }
+
+    /// Selection participates in the shift too (it's keyed by
+    /// the same indices as expanded).
+    #[test]
+    fn adjust_for_length_change_growth_shifts_selected_indices() {
+        let mut f = ActivityFeed::new();
+        f.toggle_select(1);
+        f.adjust_for_length_change(3, 5);
+        assert!(f.is_selected(3));
+        assert!(!f.is_selected(1));
     }
 
     /// Expansion + selection are independent — toggling one
