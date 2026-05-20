@@ -47,11 +47,29 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
             .ok()
             .flatten()
             .filter(|_| self.snapshot.cursor_visible().unwrap_or(false));
+        let (cursor_x, cursor_y) = match cursor_pos {
+            Some(cp) => (cp.x, cp.y),
+            None => (u16::MAX, u16::MAX),
+        };
 
         let mut row_iter = match self.row_iter.update(self.snapshot) {
             Ok(r) => r,
             Err(_) => return,
         };
+
+        // Per-frame allocations hoisted to the top of the render —
+        // a 200×60 terminal walks ~12_000 cells per frame; allocating
+        // a `Vec` of graphemes + a `String` per cell was the
+        // dominant cost in debug builds (24_000 allocs / frame).
+        // We re-use two stack-ish buffers instead:
+        // - `grapheme_buf`: receives the raw char(s) for the cell
+        //   (most cells = 1 ASCII char; cap at 8 since libghostty's
+        //   grapheme cluster cap is small).
+        // - `text_buf`: the `&str` we hand to `Buffer::set_symbol`,
+        //   re-cleared per cell. ratatui itself still clones it
+        //   internally, but at least we don't double-allocate.
+        let mut grapheme_buf: [char; 8] = [' '; 8];
+        let mut text_buf = String::with_capacity(8);
 
         let mut y = 0u16;
         while let Some(row) = row_iter.next() {
@@ -67,17 +85,27 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
                 }
             };
 
+            let buf_y = area.y + y;
             let mut x = 0u16;
             while let Some(cell) = cell_iter.next() {
                 if x >= area.width {
                     break;
                 }
 
-                let graphemes = cell.graphemes().unwrap_or_default();
-                let text: String = if graphemes.is_empty() {
-                    " ".to_string()
+                // Grapheme text. The two-FFI dance (`graphemes_len`
+                // + `graphemes_buf`) is unavoidable per the libghostty
+                // surface, but we skip the `Vec` allocation by
+                // writing directly into the stack buffer.
+                let glen = cell.graphemes_len().unwrap_or(0).min(grapheme_buf.len());
+                let text: &str = if glen == 0 {
+                    " "
                 } else {
-                    graphemes.iter().collect()
+                    let _ = cell.graphemes_buf(&mut grapheme_buf[..glen]);
+                    text_buf.clear();
+                    for ch in &grapheme_buf[..glen] {
+                        text_buf.push(*ch);
+                    }
+                    &text_buf
                 };
 
                 // Resolve colors.
@@ -112,18 +140,15 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
                     }
                 }
 
-                // Cursor highlight.
-                if let Some(ref cp) = cursor_pos
-                    && cp.x == x
-                    && cp.y == y
-                {
+                // Cursor highlight — compare against pre-extracted
+                // x/y to avoid an `Option::as_ref` deref per cell.
+                if cursor_x == x && cursor_y == y {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
 
                 let buf_x = area.x + x;
-                let buf_y = area.y + y;
                 if buf_x < area.x + area.width && buf_y < area.y + area.height {
-                    buf[(buf_x, buf_y)].set_symbol(&text).set_style(style);
+                    buf[(buf_x, buf_y)].set_symbol(text).set_style(style);
                 }
 
                 x += 1;

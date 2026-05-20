@@ -63,6 +63,9 @@ ARGS ?=
 run: ## Build and run pilot. Pass extra args via ARGS=, e.g. ARGS="--fresh".
 	@PATH="$(PINNED_PATH)" cargo run -p pilot-tui -- $(ARGS)
 
+run-release: ## Same as `run` but optimized build. Use when debug feels sluggish (terminal scroll, large workspace lists). Build is ~10x slower but the binary is fast.
+	@PATH="$(PINNED_PATH)" cargo run -p pilot-tui --release -- $(ARGS)
+
 run-fresh: ## Run pilot with --fresh (wipe state.db + force the setup wizard).
 	@$(MAKE) run ARGS="--fresh"
 
