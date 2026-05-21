@@ -3289,105 +3289,137 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             model.redraw = false;
         }
 
-        // 5. Block briefly for input. ONE crossterm reader path: when
-        // a modal is up, route to the Application's active component
-        // via the ChannelPort. Otherwise drive panes directly.
-        if let Ok(true) = crossterm::event::poll(Duration::from_millis(40)) {
-            match crossterm::event::read() {
-                Ok(crossterm::event::Event::Key(key)) => {
-                    // With KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    // pushed at startup, the host terminal distinguishes
-                    // Press / Repeat / Release. We skip Release only —
-                    // Repeat must be honored so held keys autorepeat
-                    // (arrow keys in Claude code, holding j to scroll,
-                    // etc.). The previous filter skipped Repeat too,
-                    // which made every "held key" feel broken even
-                    // though Backspace worked (Backspace events arrive
-                    // as Press from the terminal's auto-repeat
-                    // emulation when extended keyboards aren't on).
-                    if matches!(key.kind, crossterm::event::KeyEventKind::Release) {
-                        continue;
-                    }
-                    let realm_key = crossterm_to_realm(key);
-                    if model.modal_stack.is_empty() {
-                        model.handle_pane_key(realm_key);
-                    } else {
-                        let _ = model.modal_event_tx.send(RealmEvent::Keyboard(realm_key));
-                        // ChannelPort is polled by the listener thread
-                        // every 10ms, so a tight 15ms window often
-                        // expires before the listener delivers the
-                        // event we just pushed — the keypress sits in
-                        // the channel and isn't acted on until the
-                        // user presses another key. The Confirm modal
-                        // showed this loudly: "Y not responsive; Esc
-                        // worked after a few tries".
-                        //
-                        // Poll in a short loop with a 150ms deadline
-                        // so we keep checking until messages arrive or
-                        // the user perceives latency. 150ms is well
-                        // under the human-noticeable threshold for
-                        // key feedback but long enough to absorb the
-                        // 10ms listener cadence + system jitter.
-                        let deadline = std::time::Instant::now() + Duration::from_millis(150);
-                        let mut handled = false;
-                        loop {
-                            match model.app.tick(PollStrategy::Once(Duration::ZERO)) {
-                                Ok(messages) if !messages.is_empty() => {
-                                    for msg in messages {
-                                        model.update(msg);
-                                    }
-                                    handled = true;
-                                    break;
-                                }
-                                Ok(_) => {}
-                                Err(_) => break,
-                            }
-                            if std::time::Instant::now() >= deadline {
-                                break;
-                            }
-                            std::thread::sleep(Duration::from_millis(2));
-                        }
-                        // After the first tick lands, drain anything
-                        // else the modal pushed in the same window —
-                        // a single tuirealm `Cmd` can fan out into
-                        // multiple `Msg`s and we don't want them to
-                        // straggle into the next keypress.
-                        if handled
-                            && let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO))
-                        {
-                            for msg in messages {
-                                model.update(msg);
-                            }
-                        }
-                        // Modals can mutate internal state without
-                        // producing a `Msg`, so force a redraw too.
-                        model.redraw = true;
-                    }
+        // 5. Block briefly for input, then drain ALL pending events
+        // before rendering. The previous implementation read one
+        // event per loop iteration; a fast trackpad gesture sends
+        // ~10-30 events in a burst and the per-event render made
+        // scroll feel "choppy, not fluid." Industry-standard TUIs
+        // (helix, zellij, ratatui async-template) decouple input
+        // from render — we approximate that with an inline drain.
+        //
+        // - First `poll(16ms)` is the idle bound: 60Hz target, matches
+        //   what production TUI guides recommend (the old 40ms = 25Hz
+        //   was the audible cause of the choppy feel).
+        // - After one event lands, drain up to `EVENT_BATCH_CAP` more
+        //   with `poll(ZERO)` so a 20-tick scroll burst becomes ONE
+        //   render with the final viewport state.
+        // - The cap (256) ensures a paste storm or runaway repeat
+        //   can't starve the next render indefinitely.
+        const POLL_IDLE: Duration = Duration::from_millis(16);
+        const EVENT_BATCH_CAP: u32 = 256;
+        if let Ok(true) = crossterm::event::poll(POLL_IDLE) {
+            let mut budget = EVENT_BATCH_CAP;
+            loop {
+                let Ok(event) = crossterm::event::read() else {
+                    break;
+                };
+                dispatch_event(model, event);
+                budget -= 1;
+                if budget == 0 {
+                    break;
                 }
-                Ok(crossterm::event::Event::Mouse(m)) => {
-                    if model.modal_stack.is_empty() {
-                        model.handle_mouse(m);
-                    }
+                match crossterm::event::poll(Duration::ZERO) {
+                    Ok(true) => {} // more events ready — drain
+                    _ => break,
                 }
-                Ok(crossterm::event::Event::Paste(text)) => {
-                    // Bracketed paste arrived. Two destinations
-                    // depending on where focus is — both go through
-                    // `handle_paste` which inspects pane state.
-                    if model.modal_stack.is_empty() {
-                        model.handle_paste(&text);
-                    } else {
-                        // Modal owns input — forward as raw text via
-                        // the modal event channel. The textarea
-                        // modal will see this as a multi-char paste
-                        // and insert at cursor.
-                        let _ = model.modal_event_tx.send(RealmEvent::Paste(text));
-                    }
-                }
-                _ => {}
             }
         }
     }
     Ok(())
+}
+
+/// Route one crossterm event to the right handler. Extracted from
+/// the run-loop body so the loop can `dispatch_event` once per
+/// poll, then poll(0) to drain the rest before rendering — the
+/// batching is what turns 20 scroll-wheel events into 1 frame.
+fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::event::Event) {
+    match event {
+        crossterm::event::Event::Key(key) => {
+            // With KeyboardEnhancementFlags::REPORT_EVENT_TYPES pushed
+            // at startup, the host terminal distinguishes Press /
+            // Repeat / Release. We skip Release only — Repeat must
+            // be honored so held keys autorepeat (arrow keys in
+            // Claude code, holding j to scroll, etc.). The previous
+            // filter skipped Repeat too, which made every "held key"
+            // feel broken even though Backspace worked (Backspace
+            // events arrive as Press from the terminal's auto-repeat
+            // emulation when extended keyboards aren't on).
+            if matches!(key.kind, crossterm::event::KeyEventKind::Release) {
+                return;
+            }
+            let realm_key = crossterm_to_realm(key);
+            if model.modal_stack.is_empty() {
+                model.handle_pane_key(realm_key);
+            } else {
+                let _ = model.modal_event_tx.send(RealmEvent::Keyboard(realm_key));
+                // ChannelPort is polled by the listener thread every
+                // 10ms, so a tight 15ms window often expires before
+                // the listener delivers the event we just pushed —
+                // the keypress sits in the channel and isn't acted on
+                // until the user presses another key. The Confirm
+                // modal showed this loudly: "Y not responsive; Esc
+                // worked after a few tries".
+                //
+                // Poll in a short loop with a 150ms deadline so we
+                // keep checking until messages arrive or the user
+                // perceives latency. 150ms is well under the human-
+                // noticeable threshold for key feedback but long
+                // enough to absorb the 10ms listener cadence + jitter.
+                let deadline = std::time::Instant::now() + Duration::from_millis(150);
+                let mut handled = false;
+                loop {
+                    match model.app.tick(PollStrategy::Once(Duration::ZERO)) {
+                        Ok(messages) if !messages.is_empty() => {
+                            for msg in messages {
+                                model.update(msg);
+                            }
+                            handled = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                // After the first tick lands, drain anything else the
+                // modal pushed in the same window — a single tuirealm
+                // `Cmd` can fan out into multiple `Msg`s and we don't
+                // want them to straggle into the next keypress.
+                if handled
+                    && let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO))
+                {
+                    for msg in messages {
+                        model.update(msg);
+                    }
+                }
+                // Modals can mutate internal state without producing a
+                // `Msg`, so force a redraw too.
+                model.redraw = true;
+            }
+        }
+        crossterm::event::Event::Mouse(m) => {
+            if model.modal_stack.is_empty() {
+                model.handle_mouse(m);
+            }
+        }
+        crossterm::event::Event::Paste(text) => {
+            // Bracketed paste arrived. Two destinations depending on
+            // where focus is — both go through `handle_paste` which
+            // inspects pane state.
+            if model.modal_stack.is_empty() {
+                model.handle_paste(&text);
+            } else {
+                // Modal owns input — forward as raw text via the
+                // modal event channel. The textarea modal will see
+                // this as a multi-char paste and insert at cursor.
+                let _ = model.modal_event_tx.send(RealmEvent::Paste(text));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Does this tuirealm `KeyEvent` match the config-supplied
