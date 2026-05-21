@@ -952,6 +952,18 @@ impl<T: TerminalAdapter> Model<T> {
             self.right.view_in(right_top, f);
             self.terminals.view_in(right_bottom, f);
 
+            // Selection highlight overlay. Painted AFTER the terminal
+            // widget so the reverse-video pass lands on the just-
+            // rendered cells. Bounded to `right_bottom` so a drag
+            // that strayed into the sidebar / activity panes doesn't
+            // leak the highlight across pilot's pane chrome —
+            // matches what the user expects from a per-pane
+            // selection (compare to the host terminal's native
+            // selection, which crosses panes).
+            if let Some((start, end)) = self.terminal_selection {
+                paint_selection(f.buffer_mut(), right_bottom, start, end);
+            }
+
             // Footer: keymap + polling status + notice.
             crate::realm::components::footer::render(
                 f,
@@ -2115,12 +2127,39 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
+                // Shift+click in the terminal pane is the
+                // pilot-selection escape hatch. It bypasses the
+                // "forward to inner program" path so the user can
+                // drag-select text inside a mouse-tracking app
+                // (Claude Code / vim / less) — without it the only
+                // way to copy from the terminal pane was the host
+                // terminal's native selection, which crosses pilot's
+                // pane boundaries and produces the "selection
+                // band spans the whole screen" symptom.
+                //
+                // The host terminal's modifier-bypass (Option on
+                // macOS) is *not* the right tool here because it
+                // disables pilot's mouse capture entirely — pilot
+                // can't render a bounded highlight, and the
+                // resulting selection drags across the sidebar /
+                // activity panes uselessly.
+                let shift_held = m
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::SHIFT);
+                let claim_for_selection = shift_held
+                    && rect_contains(right_bottom_rect, m.column, m.row)
+                    && self.focus == PaneFocus::Terminals
+                    && matches!(button, crossterm::event::MouseButton::Left);
+
                 // Click inside the terminal pane while the inner
                 // program tracks mouse → forward the click as an
                 // escape sequence so Claude Code et al. respond to
                 // their own UI. Splitter drag still wins on the
-                // splitter line.
-                if rect_contains(right_bottom_rect, m.column, m.row)
+                // splitter line. Shift+click is the explicit
+                // "actually no, give it to pilot for selection"
+                // override and skips the forward branch.
+                if !claim_for_selection
+                    && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
                     && self
@@ -2186,16 +2225,19 @@ impl<T: TerminalAdapter> Model<T> {
                     // double-click events so synthesize from timing:
                     // a second left-click on the same cell within
                     // 400ms = double.
-                    // Pilot-side selection start: a left-click that
-                    // landed in the terminal pane AND the inner
-                    // program isn't tracking mouse → record start
-                    // cell for the drag-to-select copy gesture.
-                    // Selection state lives on the orchestrator; the
-                    // Up handler extracts text + OSC 52s to the
-                    // host clipboard.
+                    // Pilot-side selection start. Two cases:
+                    // - Inner program ISN'T tracking mouse (shell at
+                    //   prompt etc.): plain left-click starts.
+                    // - Inner program IS tracking mouse (claude /
+                    //   vim / less): require Shift held (matches
+                    //   the `claim_for_selection` branch above).
+                    // Recording start = end means a click without
+                    // drag is still treated as a click (the Up
+                    // handler skips the copy if start == end).
                     if focus == PaneFocus::Terminals
                         && matches!(button, crossterm::event::MouseButton::Left)
-                        && !self.terminals.focused_terminal_tracks_mouse()
+                        && (claim_for_selection
+                            || !self.terminals.focused_terminal_tracks_mouse())
                     {
                         self.terminal_selection = Some(((m.column, m.row), (m.column, m.row)));
                     } else {
@@ -3205,6 +3247,72 @@ impl<T: TerminalAdapter> Model<T> {
 /// True if `(col, row)` lies within `rect`'s half-open bounds.
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+}
+
+/// Paint a drag-selection range as reverse-video over `rect`. `start`
+/// and `end` are screen coordinates from the mouse events; we
+/// normalize so the lower-row end is the start and the higher-row end
+/// is the end, then highlight cells in the visual range:
+///
+/// - Single-row selection: cells from `min_col` to `max_col`.
+/// - Multi-row selection: from `start_col` to end-of-row on the start
+///   row, full rows between, and start-of-row to `end_col` on the
+///   final row.
+///
+/// All writes are clipped to `rect` so a drag that strayed outside
+/// the terminal pane can't recolor pilot's sidebar or activity feed.
+fn paint_selection(buf: &mut ratatui::buffer::Buffer, rect: Rect, start: (u16, u16), end: (u16, u16)) {
+    use ratatui::style::Modifier;
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let max_x = rect.x.saturating_add(rect.width.saturating_sub(1));
+    let max_y = rect.y.saturating_add(rect.height.saturating_sub(1));
+    // Normalize so `a` is row-earlier or equal to `b`.
+    let (a, b) = if (start.1, start.0) <= (end.1, end.0) {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    // Clamp endpoints to the terminal rect.
+    let clamp = |p: (u16, u16)| {
+        (
+            p.0.clamp(rect.x, max_x),
+            p.1.clamp(rect.y, max_y),
+        )
+    };
+    let a = clamp(a);
+    let b = clamp(b);
+    // No-op for a degenerate "click without drag" — Up handler
+    // already skips the copy in that case; the highlight pass would
+    // just reverse-video one cell, which is more confusing than
+    // helpful.
+    if a == b {
+        return;
+    }
+    let mut y = a.1;
+    while y <= b.1 {
+        let row_start = if y == a.1 { a.0 } else { rect.x };
+        let row_end = if y == b.1 { b.0 } else { max_x };
+        let (lo, hi) = if row_start <= row_end {
+            (row_start, row_end)
+        } else {
+            (row_end, row_start)
+        };
+        let mut x = lo;
+        while x <= hi {
+            // `buf[(x, y)]` is bounds-checked but our clamp already
+            // guarantees in-range; this just sets the modifier
+            // without touching the underlying char.
+            let cell = &mut buf[(x, y)];
+            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+            x = x.saturating_add(1);
+        }
+        if y == max_y {
+            break;
+        }
+        y = y.saturating_add(1);
+    }
 }
 
 /// Spawn a new `pilot` process pinned to the focused pane's
