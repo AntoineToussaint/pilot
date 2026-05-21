@@ -363,19 +363,49 @@ impl Server {
             tokio::select! {
                 cmd = conn.rx.recv() => {
                     let Some(cmd) = cmd else { break };
-                    // INFO for the loud commands that change session
-                    // shape (spawn/close/create); debug for everything
-                    // else so the log doesn't drown in Write chunks.
-                    match &cmd {
-                        pilot_ipc::Command::Spawn { .. }
-                        | pilot_ipc::Command::Close { .. }
-                        | pilot_ipc::Command::CreateSession { .. }
-                        | pilot_ipc::Command::Subscribe
-                        | pilot_ipc::Command::Refresh => {
-                            tracing::info!("daemon ← {cmd:?}");
-                        }
-                        _ => tracing::debug!("daemon ← {cmd:?}"),
-                    }
+                    // Per-command name at INFO so a stalled IPC channel is
+                    // visible at a glance — historically we'd see `daemon
+                    // ← Subscribe` and then nothing, with no way to tell
+                    // whether subsequent commands were arriving at all.
+                    // `Write` floods on every keystroke; trim its payload
+                    // but still emit one line per command so the cadence
+                    // is observable.
+                    let label = match &cmd {
+                        pilot_ipc::Command::Spawn { .. } => "Spawn",
+                        pilot_ipc::Command::Close { .. } => "Close",
+                        pilot_ipc::Command::CreateSession { .. } => "CreateSession",
+                        pilot_ipc::Command::Subscribe => "Subscribe",
+                        pilot_ipc::Command::Refresh => "Refresh",
+                        pilot_ipc::Command::Write { .. } => "Write",
+                        pilot_ipc::Command::Resize { .. } => "Resize",
+                        pilot_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
+                        pilot_ipc::Command::MarkRead { .. } => "MarkRead",
+                        pilot_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
+                        pilot_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
+                        pilot_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
+                        pilot_ipc::Command::PostReply { .. } => "PostReply",
+                        pilot_ipc::Command::MergePr { .. } => "MergePr",
+                        pilot_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
+                        pilot_ipc::Command::Snooze { .. } => "Snooze",
+                        pilot_ipc::Command::Unsnooze { .. } => "Unsnooze",
+                        pilot_ipc::Command::Kill { .. } => "Kill",
+                        pilot_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
+                        pilot_ipc::Command::CreateSandbox { .. } => "CreateSandbox",
+                        pilot_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
+                        pilot_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
+                        pilot_ipc::Command::AddAssignees { .. } => "AddAssignees",
+                        pilot_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
+                        pilot_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
+                        pilot_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
+                        pilot_ipc::Command::InterruptAgentRun { .. } => "InterruptAgentRun",
+                        pilot_ipc::Command::DecideAgentApproval { .. } => "DecideAgentApproval",
+                        pilot_ipc::Command::AnswerAgentQuestion { .. } => "AnswerAgentQuestion",
+                        pilot_ipc::Command::UpsertProviderCredential { .. } => "UpsertProviderCredential",
+                        pilot_ipc::Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
+                        pilot_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
+                        pilot_ipc::Command::Shutdown => "Shutdown",
+                    };
+                    tracing::info!("daemon ← {label}");
                     match cmd {
                         pilot_ipc::Command::Subscribe => {
                             let workspaces = load_workspaces(&*self.config.store);

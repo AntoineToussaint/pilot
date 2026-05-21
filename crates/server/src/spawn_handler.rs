@@ -34,6 +34,19 @@ use pilot_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
 use pilot_store::WorkspaceRecord;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Hard ceiling on `backend.snapshot(key)` calls inside `snapshot_terminals`.
+///
+/// One wedged tmux session must not block the daemon's Subscribe handler.
+/// Subscribe is the first thing every TUI sends after connecting, so if it
+/// hangs the whole IPC channel stalls — no Spawn, no Write, nothing —
+/// because subsequent commands queue behind the unfinished arm of
+/// `tokio::select!`. 500ms is generous: a healthy mock/real backend
+/// snapshots in microseconds; anything past that is a sign the per-PTY
+/// ring mutex is being held by a hung pump and we'd rather degrade
+/// (empty replay for that one terminal) than freeze the daemon.
+const SNAPSHOT_PER_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Monotonic terminal-id allocator. Module-local so ids are unique
 /// across the process even if the terminals map is wiped (tests, or
@@ -1444,14 +1457,35 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         // it they see a blank terminal until the next chunk arrives.
         // Failure here is non-fatal: the snapshot is best-effort,
         // missing replay just degrades to the legacy behavior.
-        let (replay, last_seq) = match config.backend.snapshot(&key).await {
-            Ok(snap) => snap,
-            Err(e) => {
+        //
+        // The `timeout` is the load-bearing safety net: see
+        // `SNAPSHOT_PER_SESSION_TIMEOUT`. Without it, one wedged tmux
+        // pump can stall the daemon's Subscribe handler indefinitely,
+        // and `tokio::select!` cannot poll the next command until this
+        // arm returns. Stalling here = the entire IPC channel freezes.
+        let (replay, last_seq) = match tokio::time::timeout(
+            SNAPSHOT_PER_SESSION_TIMEOUT,
+            config.backend.snapshot(&key),
+        )
+        .await
+        {
+            Ok(Ok(snap)) => snap,
+            Ok(Err(e)) => {
                 tracing::warn!(
                     terminal_id = ?id,
                     key = %key,
                     error = %e,
                     "snapshot_terminals: backend.snapshot failed — replay will be empty"
+                );
+                (Vec::new(), 0)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    key = %key,
+                    timeout_ms = SNAPSHOT_PER_SESSION_TIMEOUT.as_millis() as u64,
+                    "snapshot_terminals: backend.snapshot timed out (wedged session?) \
+                     — replay will be empty, daemon not blocked"
                 );
                 (Vec::new(), 0)
             }

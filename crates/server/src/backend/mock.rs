@@ -34,6 +34,9 @@ pub struct MockBackend {
 struct MockInner {
     sessions: Mutex<HashMap<String, MockSession>>,
     counter: AtomicU64,
+    /// Keys whose `snapshot()` should hang forever. Used by tests
+    /// asserting the daemon's snapshot-timeout safety net works.
+    wedged_snapshot_keys: Mutex<std::collections::HashSet<String>>,
 }
 
 struct MockSession {
@@ -146,6 +149,17 @@ impl MockBackend {
     pub async fn is_frozen(&self, key: &str) -> bool {
         let map = self.inner.sessions.lock().await;
         map.get(key).map(|s| s.frozen).unwrap_or(false)
+    }
+
+    /// Make `snapshot(key)` hang forever — used to test that the
+    /// daemon's per-session snapshot timeout keeps the IPC channel
+    /// flowing even when a backend gets stuck.
+    pub async fn wedge_snapshot(&self, key: &str) {
+        self.inner
+            .wedged_snapshot_keys
+            .lock()
+            .await
+            .insert(key.into());
     }
 }
 
@@ -290,6 +304,17 @@ impl SessionBackend for MockBackend {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(Vec<u8>, u64), BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            // `wedge_snapshot(key)` makes this future never resolve —
+            // simulating a wedged tmux pump holding the ring mutex.
+            if self
+                .inner
+                .wedged_snapshot_keys
+                .lock()
+                .await
+                .contains(key)
+            {
+                std::future::pending::<()>().await;
+            }
             let map = self.inner.sessions.lock().await;
             let session = map
                 .get(key)

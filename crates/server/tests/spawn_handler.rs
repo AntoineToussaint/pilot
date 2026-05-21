@@ -301,3 +301,78 @@ async fn recover_sessions_reattaches_survivors() {
     .await
     .expect("deadline");
 }
+
+/// Regression: a single wedged backend session must not block the
+/// daemon's Subscribe handler. Pre-fix, `snapshot_terminals` would
+/// `.await` `backend.snapshot(key)` with no timeout — one stuck tmux
+/// pump holding the ring mutex froze every subsequent IPC command
+/// (Spawn / Write / MarkRead) because `tokio::select!` cannot pick
+/// the next branch until the current arm returns.
+///
+/// The fix: per-session `tokio::time::timeout` in `snapshot_terminals`.
+/// This test wedges one session's snapshot, then asserts that
+/// Subscribe completes (under the wedge would otherwise be infinite)
+/// and a follow-up Spawn still gets a TerminalSpawned event back.
+#[tokio::test]
+async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        // Spawn one terminal so there's something to snapshot.
+        let mut producer = subscribed(config.clone()).await;
+        let _ = spawn_and_wait(&mut producer, TerminalKind::Shell).await;
+
+        // Wedge its snapshot — simulates a tmux pump that holds the
+        // ring mutex forever.
+        let wedged_key = mock.list().await.unwrap().into_iter().next().unwrap();
+        mock.wedge_snapshot(&wedged_key).await;
+
+        // A second client subscribes. Without the timeout fix, this
+        // hangs in snapshot_terminals → backend.snapshot → forever.
+        let mut consumer = run_daemon(config).await;
+        consumer.send(Command::Subscribe).unwrap();
+
+        // Subscribe MUST come back within roughly the per-session
+        // timeout (500ms) — a 2s budget here gives generous slack
+        // for CI without masking a regression to seconds-long stalls.
+        let snapshot_evt = timeout(Duration::from_secs(2), consumer.recv())
+            .await
+            .expect("subscribe completed past timeout — wedge bug returned")
+            .expect("not closed");
+        let terminals = match snapshot_evt {
+            Event::Snapshot { terminals, .. } => terminals,
+            other => panic!("expected Snapshot, got {other:?}"),
+        };
+        // The wedged terminal still shows up — just with empty replay.
+        assert_eq!(terminals.len(), 1, "snapshot lists the wedged terminal");
+        assert!(
+            terminals[0].replay.is_empty(),
+            "wedged session degraded to empty replay, not a real one"
+        );
+
+        // The real bug symptom: subsequent Spawn never reaches the
+        // daemon. Issue one and confirm the daemon processes it end
+        // to end — this is what the user pressed `s` for.
+        consumer
+            .send(Command::Spawn {
+                session_key: "test:wedge-followup".into(),
+                session_id: None,
+                kind: TerminalKind::Shell,
+                cwd: None,
+                initial_prompt: None,
+            })
+            .unwrap();
+        let spawned = wait_for(
+            &mut consumer,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            spawned.is_some(),
+            "post-wedge Spawn must reach the daemon and emit TerminalSpawned"
+        );
+    })
+    .await
+    .expect("deadline");
+}
