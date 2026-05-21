@@ -39,6 +39,14 @@ if [ -x "${zig_bin}" ]; then
   echo "zig ${ZIG_VERSION}: already at ${zig_bin}"
 else
   echo "downloading zig ${ZIG_VERSION} for ${host}..."
+  # Clear any partial / corrupt prior install. Without this, a
+  # previous half-extract leaves `${zig_dir}` as a non-empty dir,
+  # and the `mv` below NESTS the new extract inside it instead of
+  # replacing — yielding `${zig_dir}/zig-${host}-${ZIG_VERSION}/zig`
+  # with no binary at the expected `${zig_bin}` path. The Makefile's
+  # `$(PINNED_PATH)` then falls through to system zig, which on
+  # macOS Homebrew is 0.16 and rejects ghostty's `requireZig(0.15.2)`.
+  rm -rf "${zig_dir}"
   mkdir -p "${VENDOR}/zig"
   url="https://ziglang.org/download/${ZIG_VERSION}/zig-${arch}-${os}-${ZIG_VERSION}.tar.xz"
   tmp="$(mktemp -d)"
@@ -52,6 +60,16 @@ else
     extracted="$(find "${tmp}" -maxdepth 1 -type d -name 'zig-*' | head -1)"
   fi
   mv "${extracted}" "${zig_dir}"
+  # Verify the binary landed at the expected path. Past bug: the
+  # tarball layout changed between releases (sometimes nested
+  # double-deep), so a silent failure here cost a user 10+ minutes
+  # of debugging "why does my build pick up system zig 0.16?"
+  if [ ! -x "${zig_bin}" ]; then
+    echo "ERROR: zig binary not at ${zig_bin} after install" >&2
+    echo "Extract layout was:" >&2
+    ls -la "${zig_dir}" >&2 || true
+    exit 1
+  fi
   echo "zig ${ZIG_VERSION}: installed to ${zig_bin}"
 fi
 
