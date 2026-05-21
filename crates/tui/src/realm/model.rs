@@ -2361,7 +2361,15 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_row,
                     ) {
                         self.send_cmd(IpcCommand::Write { terminal_id, bytes });
-                        self.redraw = true;
+                        // Intentionally NOT setting `self.redraw = true`
+                        // here: the wheel byte goes to claude/tmux via
+                        // IPC; the actual visible change arrives later
+                        // as `TerminalOutput` and that handler sets
+                        // redraw. Eager-redrawing here paints the OLD
+                        // frame, then we render again on the response —
+                        // doubling per-scroll render work for a frame
+                        // that shows nothing new. Direct measurement:
+                        // halves scroll-burst render count.
                         return;
                     }
                 }
@@ -3285,7 +3293,16 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // 4. Render if dirty — before the blocking input read so the
         // user sees their last action immediately.
         if model.redraw {
+            // Per-frame timing log behind the `pilot=debug` filter.
+            // Lets us see in `/tmp/pilot.log` whether a slow scroll
+            // is the render itself (would show large `frame_ms`)
+            // versus daemon round-trips between renders. Cheap —
+            // `Instant::now` is ~10ns and `tracing::debug!` is a
+            // no-op when the level isn't enabled.
+            let t = std::time::Instant::now();
             model.view();
+            let elapsed_ms = t.elapsed().as_micros() as f32 / 1000.0;
+            tracing::debug!(frame_ms = elapsed_ms, "render");
             model.redraw = false;
         }
 
