@@ -95,6 +95,14 @@ pub enum Id {
     /// → `Command::AddAssignees { workspace_key, logins }`. Works
     /// on issues too (both PRs and issues are `Assignable`).
     AddAssignees,
+    /// Right-click context menu over a sidebar workspace row.
+    /// Single-pick `Choice` modal whose items are the workspace's
+    /// available actions (spawn claude / shell / mark read /
+    /// archive / merge / …). Source row + action list live in
+    /// `pending_sidebar_context`; `Msg::ChoicePicked` resolves the
+    /// index back to an action and dispatches the same IPC the
+    /// keyboard shortcut would.
+    SidebarContext,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -159,6 +167,47 @@ impl PaneFocus {
             PaneFocus::Sidebar => PaneFocus::Right,
             PaneFocus::Right => PaneFocus::Terminals,
             PaneFocus::Terminals => PaneFocus::Sidebar,
+        }
+    }
+}
+
+/// Actions offered by the sidebar right-click context menu.
+///
+/// Each variant is a thin alias for "the IpcCommand a particular
+/// keyboard shortcut would have dispatched." The menu is a parallel
+/// surface for discoverability — the actions themselves go through
+/// the same code paths the keybindings hit, so no separate
+/// behavior shows up here.
+///
+/// New actions should resolve to an existing `intent` or a single
+/// `IpcCommand`; if you find yourself adding a branch with bespoke
+/// state mutation, route through `intent::resolve_*` first so the
+/// keyboard path and the menu path stay in lockstep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarCtxAction {
+    SpawnClaude,
+    SpawnShell,
+    OpenEditor,
+    MarkAllRead,
+    /// Shift+M equivalent — only offered for PR workspaces in a
+    /// merge-ready state.
+    MergePr,
+    /// Shift+X equivalent — kills sessions + drops the workspace.
+    Archive,
+}
+
+impl SidebarCtxAction {
+    /// Footer-friendly label shown in the picker. Includes the
+    /// matching keystroke so the menu trains the user on the
+    /// keyboard equivalent for next time.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::SpawnClaude => "spawn claude  (c)",
+            Self::SpawnShell => "spawn shell  (s)",
+            Self::OpenEditor => "open editor  (e)",
+            Self::MarkAllRead => "mark all read  (m)",
+            Self::MergePr => "merge PR  (Shift+M)",
+            Self::Archive => "archive  (Shift+X)",
         }
     }
 }
@@ -314,6 +363,12 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
     /// so a re-added workspace gets a fresh fetch.
     pr_details_fetched: std::collections::HashSet<pilot_core::WorkspaceKey>,
+    /// Active sidebar right-click context menu state: the workspace
+    /// row the menu was raised over plus the ordered list of actions
+    /// the picker is offering. `Msg::ChoicePicked` indexes back into
+    /// `1` and dispatches the same IpcCommand the matching keyboard
+    /// shortcut would have. None when no menu is open.
+    pending_sidebar_context: Option<(pilot_core::SessionKey, Vec<SidebarCtxAction>)>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -425,6 +480,7 @@ impl<T: TerminalAdapter> Model<T> {
             status: StatusCtx::new(),
             ui_defaults: pilot_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
+            pending_sidebar_context: None,
             keybindings: pilot_config::Keybindings::default(),
         }
     }
@@ -1182,6 +1238,61 @@ impl<T: TerminalAdapter> Model<T> {
     /// the directly-visible IPC commands land in the Vec.
     pub fn handle_choice_picked(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
+        // Sidebar right-click context menu. Pick → dispatch the
+        // same IpcCommand the matching keyboard shortcut would.
+        // Empty pick (Esc) clears the stash silently.
+        if matches!(self.modal_stack.last(), Some(Id::SidebarContext)) {
+            let stash = self.pending_sidebar_context.take();
+            self.pop_modal();
+            if let (Some((session_key, actions)), Some(&idx)) =
+                (stash.as_ref(), picks.first())
+                && let Some(action) = actions.get(idx)
+            {
+                let workspace_key = pilot_core::WorkspaceKey::new(session_key.as_str().to_string());
+                match action {
+                    SidebarCtxAction::SpawnClaude => {
+                        cmds.push(IpcCommand::Spawn {
+                            session_key: session_key.clone(),
+                            session_id: None,
+                            kind: pilot_ipc::TerminalKind::Agent("claude".into()),
+                            cwd: None,
+                            initial_prompt: None,
+                        });
+                    }
+                    SidebarCtxAction::SpawnShell => {
+                        cmds.push(IpcCommand::Spawn {
+                            session_key: session_key.clone(),
+                            session_id: None,
+                            kind: pilot_ipc::TerminalKind::Shell,
+                            cwd: None,
+                            initial_prompt: None,
+                        });
+                    }
+                    SidebarCtxAction::OpenEditor => {
+                        // Same path as the `e` keyboard shortcut.
+                        // Selection already moved on to this row
+                        // via the right-click hit-test; `open_editor`
+                        // operates on whatever's selected.
+                        self.open_editor();
+                    }
+                    SidebarCtxAction::MarkAllRead => {
+                        cmds.push(IpcCommand::MarkRead {
+                            session_key: session_key.clone(),
+                        });
+                    }
+                    SidebarCtxAction::MergePr => {
+                        cmds.push(IpcCommand::MergePr { workspace_key });
+                    }
+                    SidebarCtxAction::Archive => {
+                        cmds.push(IpcCommand::Kill {
+                            session_key: session_key.clone(),
+                        });
+                    }
+                }
+                self.redraw = true;
+            }
+            return cmds;
+        }
         // Adopt picker (Id::AdoptTarget) — pick → send the
         // `Command::AdoptSessions` mapping source→target. Empty
         // pick (Esc → no Msg, but cover the defensive case) drops
@@ -2165,6 +2276,25 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
+                // Right-click in the sidebar → open the workspace
+                // context menu. Move the cursor to the clicked row
+                // first (same as left-click) so the menu acts on
+                // the visible selection. The menu is mounted as a
+                // standard `Choice` modal; pick → dispatch.
+                if matches!(button, crossterm::event::MouseButton::Right)
+                    && rect_contains(sidebar_rect, m.column, m.row)
+                {
+                    self.focus = PaneFocus::Sidebar;
+                    self.set_focus_attr();
+                    if self.sidebar.click_to_select(sidebar_rect, m.row) {
+                        self.sync_panes();
+                    }
+                    if let Some(ws) = self.sidebar.selected_workspace() {
+                        let session_key: pilot_core::SessionKey = (&ws.key).into();
+                        self.mount_sidebar_context_menu(session_key);
+                    }
+                    return;
+                }
                 // A left-click in the terminal pane ALWAYS starts a
                 // potential pilot selection — we commit to that
                 // even when the inner program is mouse-tracking
@@ -2825,6 +2955,61 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspace the user could move sessions into. No-op when there
     /// are no other workspaces — show a hint instead since there's
     /// nothing to pick.
+    /// Build the action list for a right-click on a sidebar
+    /// workspace row, then mount a Choice modal to pick one. The
+    /// menu only offers actions that *make sense* for this row —
+    /// e.g. `MergePr` only when the PR is in a merge-ready state —
+    /// so the user never sees a no-op entry.
+    fn mount_sidebar_context_menu(&mut self, session_key: pilot_core::SessionKey) {
+        use crate::realm::components::choice::Choice;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+
+        // Snapshot the workspace state so we can vary the action
+        // list per-row. Default to a baseline list if we can't find
+        // the workspace (rare — the click hit-test already had to
+        // resolve to a row to call this).
+        let workspace = self
+            .sidebar
+            .workspace_by_key(&session_key)
+            .cloned();
+
+        let mut actions: Vec<SidebarCtxAction> = Vec::with_capacity(6);
+        actions.push(SidebarCtxAction::SpawnClaude);
+        actions.push(SidebarCtxAction::SpawnShell);
+        // OpenEditor only when at least one editor was detected at
+        // startup — otherwise the menu offers an action that
+        // immediately falls through to a "no editor found" notice.
+        if !self.setup.editors.is_empty() {
+            actions.push(SidebarCtxAction::OpenEditor);
+        }
+        actions.push(SidebarCtxAction::MarkAllRead);
+        // Merge PR only when the workspace has a PR in a merge-ready
+        // state — mirrors the resolver used by `Shift+M`.
+        if let Some(ws) = workspace.as_ref()
+            && matches!(
+                crate::intent::resolve_merge(Some(ws)),
+                crate::intent::Intent::MergePr { .. }
+            )
+        {
+            actions.push(SidebarCtxAction::MergePr);
+        }
+        actions.push(SidebarCtxAction::Archive);
+
+        let labels: Vec<String> = actions.iter().map(|a| a.label().to_string()).collect();
+        self.pending_sidebar_context = Some((session_key, actions));
+        let modal = Choice::single("Actions", labels)
+            .title("Workspace actions")
+            .label(|s: &String| s.clone());
+        let _ = self.app.mount(
+            Id::SidebarContext,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::SidebarContext);
+        let _ = self.app.active(&Id::SidebarContext);
+        self.redraw = true;
+    }
+
     fn mount_adopt_picker(&mut self, source_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
         use crate::realm::components::footer::{Notice, NoticeSeverity};
