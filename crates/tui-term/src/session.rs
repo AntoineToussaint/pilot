@@ -37,6 +37,9 @@ pub struct TermSession {
     render_state: libghostty_vt::RenderState<'static>,
     row_iter: libghostty_vt::render::RowIterator<'static>,
     cell_iter: libghostty_vt::render::CellIterator<'static>,
+    /// Per-session render cache — see `GhosttyTerminal` for the
+    /// dirty-tracking flow that uses it.
+    shadow: Option<ratatui::buffer::Buffer>,
     /// When the PTY last produced output.
     last_output_at: Instant,
     /// Rolling buffer of recent PTY output (last ~4KB) for callers to inspect.
@@ -149,6 +152,7 @@ impl TermSession {
             render_state,
             row_iter,
             cell_iter,
+            shadow: None,
             last_output_at: Instant::now(),
             recent_output: Vec::with_capacity(4096),
             scrolled_back: false,
@@ -224,12 +228,14 @@ impl TermSession {
         &mut libghostty_vt::RenderState<'static>,
         &mut libghostty_vt::render::RowIterator<'static>,
         &mut libghostty_vt::render::CellIterator<'static>,
+        &mut Option<ratatui::buffer::Buffer>,
     ) {
         (
             &mut self.terminal,
             &mut self.render_state,
             &mut self.row_iter,
             &mut self.cell_iter,
+            &mut self.shadow,
         )
     }
 

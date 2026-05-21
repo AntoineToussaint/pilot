@@ -269,6 +269,11 @@ struct TerminalVt {
     cell_iter: vt::render::CellIterator<'static>,
     cols: u16,
     rows: u16,
+    /// Per-terminal render cache. `GhosttyTerminal::render` writes
+    /// every dirty cell to BOTH `buf` and this shadow, then on the
+    /// next frame copies clean rows straight from here — skipping
+    /// the per-cell FFI walk for unchanged rows.
+    shadow: Option<ratatui::buffer::Buffer>,
     _not_send: std::marker::PhantomData<*mut ()>,
 }
 
@@ -290,6 +295,7 @@ impl TerminalVt {
             cell_iter,
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
+            shadow: None,
             _not_send: std::marker::PhantomData,
         }))
     }
@@ -1476,8 +1482,12 @@ impl TerminalStack {
                 self.pending_resizes.push((id, rect.width, rect.height));
             }
             if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
-                let widget =
-                    GhosttyTerminal::new(&snapshot, &mut slot.vt.row_iter, &mut slot.vt.cell_iter);
+                let widget = GhosttyTerminal::new(
+                    &snapshot,
+                    &mut slot.vt.row_iter,
+                    &mut slot.vt.cell_iter,
+                    &mut slot.vt.shadow,
+                );
                 frame.render_widget(widget, rect);
             }
         }

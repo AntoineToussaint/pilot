@@ -341,8 +341,21 @@ impl Snapshot<'_, '_> {
     }
 
     fn set<T>(&self, tag: ffi::RenderStateOption::Type, value: &T) -> Result<()> {
+        // **Bug fix**: the previous form was
+        //     `std::ptr::from_ref(&value).cast()`
+        // which takes the address of the `&T` reference parameter
+        // (i.e. a stack slot holding a pointer), not the address of
+        // the value being set. The C side then read 4 bytes from a
+        // random stack pointer, producing garbage like `0x16ed1a4c`
+        // when callers tried `set_dirty(Dirty::Clean)` — the dirty
+        // flag never actually cleared and the shadow widget's fast
+        // path never fired.
         let result = unsafe {
-            ffi::ghostty_render_state_set(self.0.0.as_raw(), tag, std::ptr::from_ref(&value).cast())
+            ffi::ghostty_render_state_set(
+                self.0.0.as_raw(),
+                tag,
+                (value as *const T).cast(),
+            )
         };
         // Since we manually model every possible query, this should never fail.
         from_result(result)
@@ -520,11 +533,14 @@ impl RowIteration<'_, '_> {
     }
 
     fn set<T>(&self, tag: ffi::RenderStateRowOption::Type, value: &T) -> Result<()> {
+        // Same bug as `Snapshot::set` — see the comment there for
+        // the full story. Pass the address of the *value*, not the
+        // address of the `&T` reference parameter.
         let result = unsafe {
             ffi::ghostty_render_state_row_set(
                 self.iter.0.as_raw(),
                 tag,
-                std::ptr::from_ref(&value).cast(),
+                (value as *const T).cast(),
             )
         };
         from_result(result)
