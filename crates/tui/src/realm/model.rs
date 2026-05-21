@@ -924,11 +924,22 @@ impl<T: TerminalAdapter> Model<T> {
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let sidebar_user_resized = self.layout.sidebar_user_resized;
-        let polling_status: Option<(&'static str, String)> = self
-            .status
-            .polling
-            .as_ref()
-            .map(|p| (p.spinner_glyph(), p.status_label()));
+        // Pick the polling indicator for the footer:
+        // - During the initial blocking modal, surface the rich
+        //   first-poll spinner.
+        // - Otherwise, surface the lightweight background indicator
+        //   that fires on every subsequent cycle (so the user always
+        //   knows whether pilot is currently talking to GitHub).
+        let polling_status: Option<(&'static str, String)> = if let Some(p) =
+            self.status.polling.as_ref()
+        {
+            Some((p.spinner_glyph(), p.status_label()))
+        } else {
+            self.status
+                .bg_poll
+                .as_ref()
+                .map(|bg| (bg.spinner_glyph(), bg.label()))
+        };
         // Resolve the focused pane's CONTEXTUAL bindings for the
         // footer hint bar. Contextual = state-aware short list
         // ("Shift-M merge" when the row is READY, "w fix CI" when
@@ -1757,6 +1768,33 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.q_latch.disarm();
                 self.open_settings();
+                return;
+            }
+            // Shift-R from any non-Terminal pane: force a fresh
+            // poll cycle. Same `Command::Refresh` the sidebar's `g`
+            // fires, but global so the user can hit it from the
+            // activity / settings views too. Discoverable because
+            // it's just "R" — and we already use `r` (lowercase)
+            // for Reply, so the modifier disambiguates.
+            //
+            // Disabled inside a terminal so shells can still bind
+            // Shift-R (e.g. `R` in vim's command mode).
+            _ if self.focus != PaneFocus::Terminals
+                && key.code == Key::Char('R')
+                && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.q_latch.disarm();
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                self.send_cmd(IpcCommand::Refresh);
+                // Don't wait for the daemon's first PollProgress to
+                // surface feedback — pre-arm the footer so the user
+                // sees something happen on the keystroke itself.
+                self.status.note_poll_progress("github", "manual refresh requested");
+                self.status.notice = Some(Notice::new(
+                    "refreshing…".to_string(),
+                    NoticeSeverity::Hint,
+                ));
+                self.redraw = true;
                 return;
             }
             // Shift-A from the sidebar: open the "adopt sessions"
@@ -3099,6 +3137,24 @@ impl<T: TerminalAdapter> Model<T> {
         self.terminals.on_daemon_event(&event);
         if let Some(p) = self.status.polling.as_mut() {
             p.feed_daemon_event(&event);
+        }
+        // Background-poll indicator. Lights up whenever the daemon
+        // emits PollProgress (any cycle, initial or not); clears on
+        // PollCompleted. Visible only after the initial Polling modal
+        // is gone — the modal already shows its own (richer) spinner
+        // and we don't want two indicators flashing at once.
+        if self.status.polling.is_none() {
+            match &event {
+                IpcEvent::PollProgress { source, message } => {
+                    self.status.note_poll_progress(source, message);
+                    self.redraw = true;
+                }
+                IpcEvent::PollCompleted { source, .. } => {
+                    self.status.note_poll_completed(source);
+                    self.redraw = true;
+                }
+                _ => {}
+            }
         }
         if is_snapshot && self.preselect.is_some() {
             self.apply_preselect();

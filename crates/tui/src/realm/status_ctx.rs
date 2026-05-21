@@ -22,6 +22,38 @@ const HINT_FADE: Duration = Duration::from_secs(3);
 /// the spinner glyph advancing at ~12 fps.
 const POLLING_TICK_INTERVAL: Duration = Duration::from_millis(80);
 
+/// Spinner frames shared with the initial-poll modal. Subset is fine
+/// — the background indicator only renders the current frame.
+const BG_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// How long a background poll keeps its footer indicator after the
+/// last progress event arrived. Acts as the "fall back to idle"
+/// timeout when a source finishes without an explicit PollCompleted
+/// — keeps the spinner from spinning forever if the daemon drops
+/// the completion event.
+const BG_POLL_IDLE_GUARD: Duration = Duration::from_secs(20);
+
+/// Lightweight footer indicator for poll cycles AFTER the initial
+/// blocking modal has been dismissed. Lit up on any `PollProgress`,
+/// cleared on `PollCompleted` or after the guard timeout.
+pub(crate) struct BackgroundPoll {
+    pub source: String,
+    pub message: String,
+    pub spinner_idx: usize,
+    pub last_event: Instant,
+}
+
+impl BackgroundPoll {
+    pub fn spinner_glyph(&self) -> &'static str {
+        BG_SPINNER_FRAMES[self.spinner_idx % BG_SPINNER_FRAMES.len()]
+    }
+    pub fn label(&self) -> String {
+        // Keep the footer line short — sidebar/right pane status
+        // share this row. Just "syncing <source>" suffices; the
+        // detailed progress lands in /tmp/pilot.log.
+        format!("syncing {}", self.source)
+    }
+}
+
 pub(crate) struct StatusCtx {
     /// Most recent footer notice — error, warning, or info. Replaces
     /// the modal-on-every-error UX. Retryable severities auto-fade
@@ -36,6 +68,12 @@ pub(crate) struct StatusCtx {
     /// Last `tick_direct` instant — drives spinner cadence + timeout
     /// checks at ~50ms granularity from the run loop.
     pub polling_last_tick: Instant,
+    /// Background-poll spinner shown in the footer for every poll
+    /// cycle after the initial one. Provides the "is pilot polling
+    /// right now?" feedback users were missing — pre-fix, the footer
+    /// went silent after the first cycle and an assignment made on
+    /// GitHub gave no signal until the row appeared (or didn't).
+    pub bg_poll: Option<BackgroundPoll>,
 }
 
 impl StatusCtx {
@@ -44,6 +82,59 @@ impl StatusCtx {
             notice: None,
             polling: None,
             polling_last_tick: Instant::now(),
+            bg_poll: None,
+        }
+    }
+
+    /// Record a poll-progress event from the daemon. Lights up the
+    /// background spinner if the initial modal is gone. Updates
+    /// `last_event` so the idle-guard timer resets — a slow poll
+    /// that takes 8s of progress still keeps the spinner lit.
+    pub fn note_poll_progress(&mut self, source: &str, message: &str) {
+        let now = Instant::now();
+        match &mut self.bg_poll {
+            Some(bg) if bg.source == source => {
+                bg.message = message.into();
+                bg.spinner_idx = bg.spinner_idx.wrapping_add(1);
+                bg.last_event = now;
+            }
+            _ => {
+                self.bg_poll = Some(BackgroundPoll {
+                    source: source.into(),
+                    message: message.into(),
+                    spinner_idx: 0,
+                    last_event: now,
+                });
+            }
+        }
+    }
+
+    /// Clear the background spinner. Called on `PollCompleted` /
+    /// `PollSucceeded` so the footer goes idle as soon as the
+    /// cycle finishes (instead of spinning until the guard timeout).
+    pub fn note_poll_completed(&mut self, source: &str) {
+        if let Some(bg) = &self.bg_poll
+            && bg.source == source
+        {
+            self.bg_poll = None;
+        }
+    }
+
+    /// Background-poll guard: if the last `note_poll_progress` is
+    /// older than `BG_POLL_IDLE_GUARD`, clear the spinner. Defends
+    /// against a dropped PollCompleted leaving the indicator
+    /// spinning forever.
+    pub fn tick_bg_poll(&mut self) -> bool {
+        let stale = self
+            .bg_poll
+            .as_ref()
+            .map(|bg| bg.last_event.elapsed() >= BG_POLL_IDLE_GUARD)
+            .unwrap_or(false);
+        if stale {
+            self.bg_poll = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -89,6 +180,16 @@ impl StatusCtx {
             return None;
         }
         self.polling_last_tick = Instant::now();
+        // Background-spinner cadence too — PollProgress events are
+        // bursty (zero between steps for several hundred ms), so a
+        // pure event-driven advance freezes the glyph between
+        // updates. Advancing here gives the smooth ~12 fps motion
+        // the initial-poll spinner already has.
+        if let Some(bg) = self.bg_poll.as_mut() {
+            bg.spinner_idx = bg.spinner_idx.wrapping_add(1);
+        }
+        // Also gc a stale bg_poll (dropped PollCompleted).
+        let _ = self.tick_bg_poll();
         let polling = self.polling.as_mut()?;
         polling.tick_direct()
     }
@@ -187,5 +288,49 @@ mod tests {
         assert!(s.polling.is_none());
         // Second dismiss is a no-op.
         assert!(!s.dismiss_polling());
+    }
+
+    #[test]
+    fn bg_poll_lights_up_on_progress_and_clears_on_completion() {
+        let mut s = StatusCtx::new();
+        assert!(s.bg_poll.is_none());
+
+        s.note_poll_progress("github", "PR query: …");
+        let bg = s.bg_poll.as_ref().expect("lit up");
+        assert_eq!(bg.source, "github");
+        assert_eq!(bg.message, "PR query: …");
+
+        s.note_poll_progress("github", "Got 5 PRs, fetching reviews");
+        // Same source updates in place, doesn't reset.
+        let bg = s.bg_poll.as_ref().unwrap();
+        assert_eq!(bg.message, "Got 5 PRs, fetching reviews");
+
+        s.note_poll_completed("github");
+        assert!(s.bg_poll.is_none(), "PollCompleted clears the indicator");
+    }
+
+    #[test]
+    fn bg_poll_ignores_completion_from_other_sources() {
+        // Two sources polling concurrently — one finishing must not
+        // wipe the other's indicator.
+        let mut s = StatusCtx::new();
+        s.note_poll_progress("linear", "Fetching issues…");
+        s.note_poll_completed("github");
+        assert!(
+            s.bg_poll.as_ref().map(|b| b.source.as_str()) == Some("linear"),
+            "linear's spinner survived github's PollCompleted",
+        );
+    }
+
+    #[test]
+    fn bg_poll_guard_clears_after_long_silence() {
+        let mut s = StatusCtx::new();
+        s.note_poll_progress("github", "Querying…");
+        // Backdate the last_event past the guard.
+        if let Some(bg) = s.bg_poll.as_mut() {
+            bg.last_event = Instant::now() - Duration::from_secs(30);
+        }
+        assert!(s.tick_bg_poll(), "stale bg_poll cleared by guard");
+        assert!(s.bg_poll.is_none());
     }
 }
