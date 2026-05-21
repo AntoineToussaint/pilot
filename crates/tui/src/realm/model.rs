@@ -3327,40 +3327,29 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             model.redraw = false;
         }
 
-        // 5. Block briefly for input, then drain ALL pending events
-        // before rendering. The previous implementation read one
-        // event per loop iteration; a fast trackpad gesture sends
-        // ~10-30 events in a burst and the per-event render made
-        // scroll feel "choppy, not fluid." Industry-standard TUIs
-        // (helix, zellij, ratatui async-template) decouple input
-        // from render — we approximate that with an inline drain.
+        // 5. Block briefly for input. One event per iteration,
+        // render between events — the "drain all then render once"
+        // pattern looked good on paper (fewer renders per second)
+        // but broke scroll fluidity: a 30-event trackpad gesture
+        // collapsed into a single jump-cut render, so the user saw
+        // the screen teleport from start to end with no
+        // intermediate frames ("not progressive, I don't even see
+        // which direction I'm going"). The render cost is 1-2ms
+        // (verified via the `render frame_ms` debug log) so per-
+        // event rendering at 50-100Hz easily keeps up.
         //
-        // - First `poll(16ms)` is the idle bound: 60Hz target, matches
-        //   what production TUI guides recommend (the old 40ms = 25Hz
-        //   was the audible cause of the choppy feel).
-        // - After one event lands, drain up to `EVENT_BATCH_CAP` more
-        //   with `poll(ZERO)` so a 20-tick scroll burst becomes ONE
-        //   render with the final viewport state.
-        // - The cap (256) ensures a paste storm or runaway repeat
-        //   can't starve the next render indefinitely.
+        // The 16ms poll is the IDLE-WAIT bound: when no events are
+        // queued, we block here up to one display refresh worth.
+        // With events queued, `poll` returns immediately — we don't
+        // pay the 16ms; the loop body runs again. So during an
+        // active scroll burst, this loop runs as fast as the
+        // render + daemon-roundtrip allows, which is what gives
+        // the progressive-scroll feel.
         const POLL_IDLE: Duration = Duration::from_millis(16);
-        const EVENT_BATCH_CAP: u32 = 256;
-        if let Ok(true) = crossterm::event::poll(POLL_IDLE) {
-            let mut budget = EVENT_BATCH_CAP;
-            loop {
-                let Ok(event) = crossterm::event::read() else {
-                    break;
-                };
-                dispatch_event(model, event);
-                budget -= 1;
-                if budget == 0 {
-                    break;
-                }
-                match crossterm::event::poll(Duration::ZERO) {
-                    Ok(true) => {} // more events ready — drain
-                    _ => break,
-                }
-            }
+        if let Ok(true) = crossterm::event::poll(POLL_IDLE)
+            && let Ok(event) = crossterm::event::read()
+        {
+            dispatch_event(model, event);
         }
     }
     Ok(())
