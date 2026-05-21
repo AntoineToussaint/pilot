@@ -2360,7 +2360,28 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                        // Multiply wheel ticks. Each macOS trackpad
+                        // wheel event scrolls ONE SGR mouse event,
+                        // which claude/vim/less interpret as ONE line.
+                        // A user wanting to scroll a screen (60 lines)
+                        // therefore has to send 60 wheels — each its
+                        // own round-trip through tmux → claude →
+                        // render. Native terminals (Ghostty/iTerm2)
+                        // multiply by ~3-5 lines per wheel, which is
+                        // why their scroll feels instant. We
+                        // concatenate N copies of the encoded event
+                        // into a single Write — claude reads its
+                        // stdin and scrolls N lines per user gesture
+                        // with one IPC round-trip instead of N.
+                        const WHEEL_LINES_PER_TICK: usize = 3;
+                        let mut payload = Vec::with_capacity(bytes.len() * WHEEL_LINES_PER_TICK);
+                        for _ in 0..WHEEL_LINES_PER_TICK {
+                            payload.extend_from_slice(&bytes);
+                        }
+                        self.send_cmd(IpcCommand::Write {
+                            terminal_id,
+                            bytes: payload,
+                        });
                         // Intentionally NOT setting `self.redraw = true`
                         // here: the wheel byte goes to claude/tmux via
                         // IPC; the actual visible change arrives later
