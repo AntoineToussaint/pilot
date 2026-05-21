@@ -2345,59 +2345,30 @@ impl<T: TerminalAdapter> Model<T> {
                 // like claude/vim/less). That's why scroll "used to
                 // work" — encode + forward is the only way to scroll
                 // anything pilot wraps.
-                // Alt-screen wheel handling. The naive xterm
-                // `alternateScroll` pattern (CSI A / CSI B per wheel)
-                // is what most terminal-in-terminal projects ship,
-                // but it breaks for any inner program that binds
-                // arrow keys to a non-scroll action — e.g. claude
-                // code, which uses arrows for prompt-history
-                // navigation when its input box is focused. Claude
-                // even self-documents this: it prints a hint
-                // "Scroll wheel is sending arrow keys · use
-                // PgUp/PgDn to scroll" the moment it sees arrows
-                // arrive on alt-screen.
+                // SGR mouse wheel is the only protocol every inner
+                // program agrees on for "scroll the viewport by ONE
+                // line":
+                // - shell (tmux mouse on → tmux's copy-mode line
+                //   scroll): one wheel = one line of scrollback
+                // - vim / less: one wheel = one line
+                // - claude code: one wheel = one message-list line
                 //
-                // PgUp / PgDn (`ESC [ 5 ~` / `ESC [ 6 ~`) is what
-                // every alt-screen TUI actually wants for "scroll
-                // the viewport":
-                // - vim / less: paginates the viewport
-                // - claude code: scrolls the message list (per its
-                //   own hint)
-                // - shell pagers: page-scroll
+                // The xterm `alternateScroll` pattern (synthesize
+                // arrow keys or PgUp/PgDn) saves work in the inner
+                // program but it ALSO changes the semantic unit
+                // (page instead of line, or worse, arrow = prompt-
+                // history navigation in claude). One-line-per-wheel
+                // is what gives the smooth native feel; any
+                // multiplier or page-jump breaks that.
                 //
-                // The "page" is coarser than per-line scroll, so we
-                // do NOT multiply by N here — sending 3 PgDn per
-                // wheel tick scrolls 3 pages, way past anything
-                // useful. One key per tick = one page of motion per
-                // trackpad tick, which matches native Ghostty.app
-                // pacing on the same content.
-                //
-                // SGR mouse forwarding is the wrong choice here even
-                // though it technically works in claude: each wheel
-                // makes claude re-render the full screen (~16ms),
-                // so a 30-event burst takes 500ms with only 1-2
-                // frames visible to the user — verified in
-                // /tmp/pilot.log. PgUp/PgDn is sub-ms inner-side.
-                if self.terminals.focused_terminal_in_alt_screen()
-                    && let Some(terminal_id) = self.terminals.focused_terminal_id()
-                {
-                    let key: &[u8] = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                        b"\x1b[5~"
-                    } else {
-                        b"\x1b[6~"
-                    };
-                    self.send_cmd(IpcCommand::Write {
-                        terminal_id,
-                        bytes: key.to_vec(),
-                    });
-                    return;
-                }
-
-                // Non-alt-screen path: the inner program may have
-                // enabled mouse tracking explicitly (e.g. a shell with
-                // mouse-enabled fzf). Honor the existing SGR encoding
-                // — the user's intent is "mouse interaction," not
-                // "scroll my pager."
+                // The earlier "horribly slow" complaint with SGR
+                // was actually about render batching, not the
+                // protocol — when many wheels arrived in a burst
+                // we drained them all then rendered once, so the
+                // user saw 1-2 frames per gesture. Per-event
+                // rendering (now restored) gives one frame per
+                // claude response, which is the progressive feel
+                // the user asked for.
                 if self.terminals.focused_terminal_tracks_mouse() {
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
@@ -2413,6 +2384,20 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_row,
                     ) {
                         self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                        // Eager redraw — paints whatever claude /
+                        // tmux has flushed so far. Without this,
+                        // pilot's `redraw` only flips when a daemon
+                        // `TerminalOutput` event lands, which means
+                        // a quick burst of wheels with no inner
+                        // re-render in between (rare but observable
+                        // in claude's "preserve last frame" mode)
+                        // produces zero pilot frames. The actual
+                        // visible change comes from claude's
+                        // response, but flagging redraw here means
+                        // the next loop iteration will pick up any
+                        // partial chunk the inner program just sent
+                        // and paint it.
+                        self.redraw = true;
                         return;
                     }
                 }
