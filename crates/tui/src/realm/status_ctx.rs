@@ -40,17 +40,24 @@ pub(crate) struct BackgroundPoll {
     pub message: String,
     pub spinner_idx: usize,
     pub last_event: Instant,
+    pub started_at: Instant,
 }
 
 impl BackgroundPoll {
     pub fn spinner_glyph(&self) -> &'static str {
         BG_SPINNER_FRAMES[self.spinner_idx % BG_SPINNER_FRAMES.len()]
     }
+    /// Footer label — `syncing github · 2s` once a cycle has been in
+    /// flight long enough to be worth surfacing the elapsed time.
+    /// Below ~1s we skip the suffix so the indicator doesn't flicker
+    /// `0s → 1s` on fast polls.
     pub fn label(&self) -> String {
-        // Keep the footer line short — sidebar/right pane status
-        // share this row. Just "syncing <source>" suffices; the
-        // detailed progress lands in /tmp/pilot.log.
-        format!("syncing {}", self.source)
+        let elapsed = self.started_at.elapsed().as_secs();
+        if elapsed >= 1 {
+            format!("syncing {} · {elapsed}s", self.source)
+        } else {
+            format!("syncing {}", self.source)
+        }
     }
 }
 
@@ -104,6 +111,7 @@ impl StatusCtx {
                     message: message.into(),
                     spinner_idx: 0,
                     last_event: now,
+                    started_at: now,
                 });
             }
         }

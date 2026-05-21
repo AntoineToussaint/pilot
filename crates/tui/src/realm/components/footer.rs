@@ -91,6 +91,13 @@ pub fn render(
             Span::styled(" ", bg),
         ]))
     } else if let Some((spinner, label)) = polling_status {
+        // Two-tone render: bright accent for the spinner glyph
+        // (drives the eye), dim text for the surrounding label so
+        // the indicator stays visible without dominating the bar.
+        // The source name itself ("github" / "linear") is the only
+        // word in the label the user cares about, so we don't try
+        // to highlight it separately — at 1-2 characters of width
+        // delta it would look like a typo.
         Some(Line::from(vec![
             Span::styled(
                 format!(" {spinner} "),
@@ -100,8 +107,10 @@ pub fn render(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                label.to_string(),
-                Style::default().bg(theme.surface).fg(theme.text_dim),
+                format!("{label} "),
+                Style::default()
+                    .bg(theme.surface)
+                    .fg(theme.text_strong),
             ),
             Span::styled(" ", bg),
         ]))

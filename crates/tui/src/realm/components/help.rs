@@ -103,7 +103,7 @@ impl Component for Help {
             }
 
             const KEY_PAD: usize = 14;
-            let mut key = b.keys.to_string();
+            let mut key = format_keys_for_display(b.keys);
             if key.chars().count() < KEY_PAD {
                 key.push_str(&" ".repeat(KEY_PAD - key.chars().count()));
             }
@@ -143,5 +143,74 @@ impl AppComponent<Msg, UserEvent> for Help {
         } else {
             None
         }
+    }
+}
+
+/// Normalize a `Binding`'s raw key string for the help panel.
+///
+/// Source bindings drifted to a mix of conventions over time —
+/// `Shift-M` (Title case after modifier) vs `Ctrl-c` (lowercase
+/// after modifier) vs bare `X` (no modifier syntax at all). The user
+/// flagged this as "the shortcuts are a mess." Instead of rewriting
+/// every site, we normalize at render time:
+///
+/// - `Modifier-letter`: emit `Modifier+LETTER` (always uppercase
+///   the letter, `+` separator so it doesn't visually collide with
+///   the `g/G` dual-binding form).
+/// - `Ctrl-Shift-letter`: emit `Ctrl+Shift+LETTER`.
+/// - Anything else (bare letters, `q q`, `↑/↓`, `Tab`, `?`): leaves
+///   it alone — those are already in a consistent shape.
+fn format_keys_for_display(raw: &str) -> String {
+    // Order matters: check the longest prefix first.
+    const PREFIXES: &[(&str, &str)] = &[
+        ("Ctrl-Shift-", "Ctrl+Shift"),
+        ("Ctrl-", "Ctrl"),
+        ("Shift-", "Shift"),
+        ("Alt-", "Alt"),
+        ("Cmd-", "Cmd"),
+    ];
+    for (prefix, normalized) in PREFIXES {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            // Uppercase the rest IF it's a single ASCII letter.
+            // Words like `Arrows`, `PgUp/Dn` keep their natural
+            // casing.
+            let rest_norm = if rest.chars().count() == 1
+                && rest.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            {
+                rest.to_ascii_uppercase()
+            } else {
+                rest.to_string()
+            };
+            return format!("{normalized}+{rest_norm}");
+        }
+    }
+    raw.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_keys_for_display;
+
+    #[test]
+    fn modifier_letter_normalized() {
+        assert_eq!(format_keys_for_display("Shift-M"), "Shift+M");
+        assert_eq!(format_keys_for_display("Ctrl-c"), "Ctrl+C");
+        assert_eq!(format_keys_for_display("Ctrl-Shift-D"), "Ctrl+Shift+D");
+    }
+
+    #[test]
+    fn modifier_named_key_preserves_casing() {
+        assert_eq!(format_keys_for_display("Shift-Arrows"), "Shift+Arrows");
+        assert_eq!(format_keys_for_display("Shift-PgUp/Dn"), "Shift+PgUp/Dn");
+    }
+
+    #[test]
+    fn unmodified_keys_pass_through() {
+        assert_eq!(format_keys_for_display("r"), "r");
+        assert_eq!(format_keys_for_display("?"), "?");
+        assert_eq!(format_keys_for_display("Tab"), "Tab");
+        assert_eq!(format_keys_for_display("q q"), "q q");
+        assert_eq!(format_keys_for_display("g/G"), "g/G");
+        assert_eq!(format_keys_for_display("↑/↓"), "↑/↓");
     }
 }

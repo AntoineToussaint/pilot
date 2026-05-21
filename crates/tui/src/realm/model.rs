@@ -2728,6 +2728,10 @@ impl<T: TerminalAdapter> Model<T> {
                 label: "settings",
             },
             Binding {
+                keys: "Shift-R",
+                label: "refresh from sources",
+            },
+            Binding {
                 keys: "?",
                 label: "this help",
             },
