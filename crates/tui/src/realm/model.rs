@@ -2345,10 +2345,63 @@ impl<T: TerminalAdapter> Model<T> {
                 // like claude/vim/less). That's why scroll "used to
                 // work" — encode + forward is the only way to scroll
                 // anything pilot wraps.
+                // xterm `alternateScroll` pattern (CSI ?1007). When the
+                // inner program is on the alternate screen (any full-
+                // screen TUI — tmux, vim, less, claude code), convert
+                // wheel ticks to ARROW-KEY presses instead of SGR mouse
+                // bytes.
+                //
+                // Why: SGR mouse wheel events make TUIs do a full-
+                // screen re-render per tick. claude code re-renders
+                // every visible cell on each wheel, which is ~16ms of
+                // work; a 30-event trackpad burst takes ~500ms and
+                // pilot sees only 1-2 render frames between the start
+                // and end of the gesture (verified in /tmp/pilot.log:
+                // 80 wheels → 2 renders, 645ms apart). Visually that's
+                // a teleport, not a scroll.
+                //
+                // Arrow keys (`ESC [ A` / `ESC [ B`) are what every
+                // alt-screen TUI treats as cheap line-scroll. tmux,
+                // wezterm, iTerm2, and Ghostty default to this pattern
+                // (`alternate_buffer_wheel_scroll_speed = 3` in
+                // wezterm; identical defaults elsewhere). Each arrow
+                // press is <1ms of work in the inner TUI, the
+                // round-trip stays the same, but the visible per-event
+                // cost drops by ~10x.
+                //
+                // Refs:
+                // - wezterm/term/src/terminalstate/mouse.rs
+                //   (`alternate_buffer_wheel_scroll_speed`)
+                // - tmux PR #4076 (wheel-in-alt-screen → CSI A/B)
+                // - https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Alternate-Scroll-Mode-Mouse-Events
+                if self.terminals.focused_terminal_in_alt_screen()
+                    && let Some(terminal_id) = self.terminals.focused_terminal_id()
+                {
+                    const SCROLL_LINES_PER_TICK: usize = 3;
+                    let key: &[u8] = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                        b"\x1b[A"
+                    } else {
+                        b"\x1b[B"
+                    };
+                    let mut payload = Vec::with_capacity(key.len() * SCROLL_LINES_PER_TICK);
+                    for _ in 0..SCROLL_LINES_PER_TICK {
+                        payload.extend_from_slice(key);
+                    }
+                    self.send_cmd(IpcCommand::Write {
+                        terminal_id,
+                        bytes: payload,
+                    });
+                    return;
+                }
+
+                // Non-alt-screen path: the inner program may have
+                // enabled mouse tracking explicitly (e.g. a shell with
+                // mouse-enabled fzf). Honor the existing SGR encoding
+                // — the user's intent is "mouse interaction," not
+                // "scroll my pager."
                 if self.terminals.focused_terminal_tracks_mouse() {
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
-                    // SGR wheel mapping: button 4 = up, button 5 = down.
                     let button = if matches!(m.kind, MouseEventKind::ScrollUp) {
                         libghostty_vt::mouse::Button::Four
                     } else {
@@ -2360,37 +2413,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        // Multiply wheel ticks. Each macOS trackpad
-                        // wheel event scrolls ONE SGR mouse event,
-                        // which claude/vim/less interpret as ONE line.
-                        // A user wanting to scroll a screen (60 lines)
-                        // therefore has to send 60 wheels — each its
-                        // own round-trip through tmux → claude →
-                        // render. Native terminals (Ghostty/iTerm2)
-                        // multiply by ~3-5 lines per wheel, which is
-                        // why their scroll feels instant. We
-                        // concatenate N copies of the encoded event
-                        // into a single Write — claude reads its
-                        // stdin and scrolls N lines per user gesture
-                        // with one IPC round-trip instead of N.
-                        const WHEEL_LINES_PER_TICK: usize = 3;
-                        let mut payload = Vec::with_capacity(bytes.len() * WHEEL_LINES_PER_TICK);
-                        for _ in 0..WHEEL_LINES_PER_TICK {
-                            payload.extend_from_slice(&bytes);
-                        }
-                        self.send_cmd(IpcCommand::Write {
-                            terminal_id,
-                            bytes: payload,
-                        });
-                        // Intentionally NOT setting `self.redraw = true`
-                        // here: the wheel byte goes to claude/tmux via
-                        // IPC; the actual visible change arrives later
-                        // as `TerminalOutput` and that handler sets
-                        // redraw. Eager-redrawing here paints the OLD
-                        // frame, then we render again on the response —
-                        // doubling per-scroll render work for a frame
-                        // that shows nothing new. Direct measurement:
-                        // halves scroll-burst render count.
+                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
                         return;
                     }
                 }

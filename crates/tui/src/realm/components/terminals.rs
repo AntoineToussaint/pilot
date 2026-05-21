@@ -172,6 +172,20 @@ impl Terminals {
         self.inner.focused_terminal_tracks_mouse()
     }
 
+    /// True if the focused terminal's inner process is on the
+    /// alternate screen. Drives the "wheel → arrow keys" fast
+    /// path in `Model::handle_mouse`.
+    pub fn focused_terminal_in_alt_screen(&self) -> bool {
+        self.inner.focused_terminal_in_alt_screen()
+    }
+
+    /// Wire id of the currently focused terminal, if any. Needed by
+    /// the wheel handler so it can address its synthetic arrow-key
+    /// `Write` at the right pane.
+    pub fn focused_terminal_id(&self) -> Option<pilot_ipc::TerminalId> {
+        self.inner.focused_terminal_id()
+    }
+
     /// Encode a mouse event for the focused terminal. Returns the
     /// bytes to `Write` to the PTY (paired with the target terminal
     /// id), or None when the terminal isn't tracking mouse or the

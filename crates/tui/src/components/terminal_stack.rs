@@ -504,6 +504,36 @@ impl TerminalStack {
             .unwrap_or(false)
     }
 
+    /// True if the focused terminal's inner process is on the
+    /// alternate screen (tmux, vim, less, claude code, etc. — i.e.
+    /// any full-screen TUI). Used by the wheel handler to decide
+    /// between SGR mouse encoding (slow: forces a full inner-app
+    /// re-render per tick) and the xterm "alternateScroll" pattern
+    /// (fast: synthesize arrow-key presses, which alt-screen TUIs
+    /// scroll cheaply).
+    pub fn focused_terminal_in_alt_screen(&self) -> bool {
+        let Some(id) = self.focused_terminal_id() else {
+            return false;
+        };
+        let Some(slot) = self.terminals.get(&id) else {
+            return false;
+        };
+        slot.vt
+            .terminal
+            .mode(vt::terminal::Mode::ALT_SCREEN)
+            .unwrap_or(false)
+            || slot
+                .vt
+                .terminal
+                .mode(vt::terminal::Mode::ALT_SCREEN_SAVE)
+                .unwrap_or(false)
+            || slot
+                .vt
+                .terminal
+                .mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
+                .unwrap_or(false)
+    }
+
     /// Encode a mouse event for the focused terminal using its
     /// active mouse-tracking mode + format. Returns the bytes to
     /// `Write` to the PTY plus the terminal id. Returns `None` when
