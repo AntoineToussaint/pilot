@@ -2345,51 +2345,50 @@ impl<T: TerminalAdapter> Model<T> {
                 // like claude/vim/less). That's why scroll "used to
                 // work" — encode + forward is the only way to scroll
                 // anything pilot wraps.
-                // xterm `alternateScroll` pattern (CSI ?1007). When the
-                // inner program is on the alternate screen (any full-
-                // screen TUI — tmux, vim, less, claude code), convert
-                // wheel ticks to ARROW-KEY presses instead of SGR mouse
-                // bytes.
+                // Alt-screen wheel handling. The naive xterm
+                // `alternateScroll` pattern (CSI A / CSI B per wheel)
+                // is what most terminal-in-terminal projects ship,
+                // but it breaks for any inner program that binds
+                // arrow keys to a non-scroll action — e.g. claude
+                // code, which uses arrows for prompt-history
+                // navigation when its input box is focused. Claude
+                // even self-documents this: it prints a hint
+                // "Scroll wheel is sending arrow keys · use
+                // PgUp/PgDn to scroll" the moment it sees arrows
+                // arrive on alt-screen.
                 //
-                // Why: SGR mouse wheel events make TUIs do a full-
-                // screen re-render per tick. claude code re-renders
-                // every visible cell on each wheel, which is ~16ms of
-                // work; a 30-event trackpad burst takes ~500ms and
-                // pilot sees only 1-2 render frames between the start
-                // and end of the gesture (verified in /tmp/pilot.log:
-                // 80 wheels → 2 renders, 645ms apart). Visually that's
-                // a teleport, not a scroll.
+                // PgUp / PgDn (`ESC [ 5 ~` / `ESC [ 6 ~`) is what
+                // every alt-screen TUI actually wants for "scroll
+                // the viewport":
+                // - vim / less: paginates the viewport
+                // - claude code: scrolls the message list (per its
+                //   own hint)
+                // - shell pagers: page-scroll
                 //
-                // Arrow keys (`ESC [ A` / `ESC [ B`) are what every
-                // alt-screen TUI treats as cheap line-scroll. tmux,
-                // wezterm, iTerm2, and Ghostty default to this pattern
-                // (`alternate_buffer_wheel_scroll_speed = 3` in
-                // wezterm; identical defaults elsewhere). Each arrow
-                // press is <1ms of work in the inner TUI, the
-                // round-trip stays the same, but the visible per-event
-                // cost drops by ~10x.
+                // The "page" is coarser than per-line scroll, so we
+                // do NOT multiply by N here — sending 3 PgDn per
+                // wheel tick scrolls 3 pages, way past anything
+                // useful. One key per tick = one page of motion per
+                // trackpad tick, which matches native Ghostty.app
+                // pacing on the same content.
                 //
-                // Refs:
-                // - wezterm/term/src/terminalstate/mouse.rs
-                //   (`alternate_buffer_wheel_scroll_speed`)
-                // - tmux PR #4076 (wheel-in-alt-screen → CSI A/B)
-                // - https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Alternate-Scroll-Mode-Mouse-Events
+                // SGR mouse forwarding is the wrong choice here even
+                // though it technically works in claude: each wheel
+                // makes claude re-render the full screen (~16ms),
+                // so a 30-event burst takes 500ms with only 1-2
+                // frames visible to the user — verified in
+                // /tmp/pilot.log. PgUp/PgDn is sub-ms inner-side.
                 if self.terminals.focused_terminal_in_alt_screen()
                     && let Some(terminal_id) = self.terminals.focused_terminal_id()
                 {
-                    const SCROLL_LINES_PER_TICK: usize = 3;
                     let key: &[u8] = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                        b"\x1b[A"
+                        b"\x1b[5~"
                     } else {
-                        b"\x1b[B"
+                        b"\x1b[6~"
                     };
-                    let mut payload = Vec::with_capacity(key.len() * SCROLL_LINES_PER_TICK);
-                    for _ in 0..SCROLL_LINES_PER_TICK {
-                        payload.extend_from_slice(key);
-                    }
                     self.send_cmd(IpcCommand::Write {
                         terminal_id,
-                        bytes: payload,
+                        bytes: key.to_vec(),
                     });
                     return;
                 }
