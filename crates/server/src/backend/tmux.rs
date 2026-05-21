@@ -78,15 +78,17 @@ set -g escape-time 0
 set -g mode-style \"fg=default,bg=default\"
 set -g message-style \"fg=default,bg=default\"
 unbind-key -a
-# Wheel scrolls 10 lines per notch (default 5) — pilot's wrapper
-# already produces fast wheel events, but tmux's per-event step
-# is what governs perceived speed inside copy-mode. Bumped after
-# the user reported scrolling felt molasses-slow compared to
-# native terminals.
-bind-key -T copy-mode-vi WheelUpPane send-keys -X -N 10 scroll-up
-bind-key -T copy-mode-vi WheelDownPane send-keys -X -N 10 scroll-down
-bind-key -T copy-mode WheelUpPane send-keys -X -N 10 scroll-up
-bind-key -T copy-mode WheelDownPane send-keys -X -N 10 scroll-down
+# Wheel scrolls ONE line per notch. macOS trackpad already fires
+# ~30 events per gesture, so 30 × 1 = ~30 lines per swipe — about
+# what a native terminal feels like. The earlier `-N 10` bump
+# (intended to compensate for slow-feeling scroll) compounded with
+# the per-gesture event count to give ~300 lines per swipe, which
+# the user described as \"moving 10 lines at a time\" — each
+# trackpad tick teleported.
+bind-key -T copy-mode-vi WheelUpPane send-keys -X scroll-up
+bind-key -T copy-mode-vi WheelDownPane send-keys -X scroll-down
+bind-key -T copy-mode WheelUpPane send-keys -X scroll-up
+bind-key -T copy-mode WheelDownPane send-keys -X scroll-down
 ";
 
 const DEFAULT_COLS: u16 = 120;
