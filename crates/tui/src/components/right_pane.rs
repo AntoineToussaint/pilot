@@ -1276,7 +1276,7 @@ impl RightPane {
         }
         if has_body {
             out.push(Binding {
-                keys: "b",
+                keys: "d",
                 label: "description",
             });
         }
@@ -1310,15 +1310,15 @@ impl RightPane {
                 label: "work on selected",
             },
             Binding {
-                keys: "b",
-                label: "toggle description",
+                keys: "d",
+                label: "PR description",
             },
             Binding {
                 keys: "g/G",
                 label: "top/bottom",
             },
             Binding {
-                keys: "Enter/o",
+                keys: "Enter",
                 label: "toggle section",
             },
         ]
@@ -1342,9 +1342,12 @@ impl RightPane {
         // Toggle keys work without a workspace too — collapse state is
         // owned by the pane, not the workspace.
         match (key.code, key.modifiers) {
-            (KeyCode::Enter, _)
-            | (KeyCode::Char(' '), KeyModifiers::NONE)
-            | (KeyCode::Char('o'), KeyModifiers::NONE) => {
+            // `Enter` / `Space` toggle the activity section. The
+            // earlier `o` binding was a third synonym that the user
+            // flagged as clutter — `Enter` is universal, `Space` is
+            // a useful one-handed alternative; a third lowercase
+            // letter for the same action is just noise.
+            (KeyCode::Enter, _) | (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 self.set_activity_collapsed(!self.activity_collapsed);
                 return PaneOutcome::Consumed;
             }
@@ -1438,12 +1441,12 @@ impl RightPane {
                 }
                 PaneOutcome::Consumed
             }
-            // `b` toggles the description / task-body section
-            // between collapsed (1-row header only) and expanded
-            // (ratatui-sized body content). Bound here so the user
-            // can pop open a PR's body without leaving the activity
-            // pane.
-            (KeyCode::Char('b'), KeyModifiers::NONE) => {
+            // `d` (description) toggles the PR / issue body section
+            // between collapsed (1-row header only) and expanded.
+            // Renamed from `b` after the user flagged it as opaque
+            // ("b for what — body, brief?") — `d` matches the label
+            // shown in the help panel.
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 self.toggle_task_body();
                 PaneOutcome::Consumed
             }

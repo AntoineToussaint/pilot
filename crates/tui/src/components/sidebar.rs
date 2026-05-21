@@ -1277,10 +1277,11 @@ impl Sidebar {
                 }
                 PaneOutcome::Consumed
             }
-            (KeyCode::Char('g'), KeyModifiers::NONE) => {
-                cmds.push(Command::Refresh);
-                PaneOutcome::Consumed
-            }
+            // `g` used to be sidebar-local refresh. Removed: it
+            // duplicated `Shift+R` (global, discoverable from `?`
+            // help) and collided with the vim `g`/`G` "go to
+            // top/bottom" convention the right pane already uses.
+            // One refresh binding, accessible from every pane.
             (KeyCode::Char('z'), KeyModifiers::NONE) => {
                 // Toggle: snooze if not snoozed, otherwise unsnooze.
                 // The resolver makes the decision based on
