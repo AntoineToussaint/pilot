@@ -659,7 +659,13 @@ impl Server {
                             });
                         }
                         pilot_ipc::Command::PostReply { session_key, body } => {
-                            polling::post_reply(&self.config, session_key, body).await;
+                            // GraphQL post — detach to keep the serve
+                            // loop responsive while the network call
+                            // is in flight.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::post_reply(&cfg, session_key, body).await;
+                            });
                         }
                         pilot_ipc::Command::SetSessionLayout {
                             session_key,
@@ -689,13 +695,22 @@ impl Server {
                             pr_workspace_key,
                             accept,
                         } => {
-                            polling::handle_confirm_merge(
-                                &self.config,
-                                issue_workspace_key,
-                                pr_workspace_key,
-                                accept,
-                            )
-                            .await;
+                            // GraphQL merge → detach so a slow network
+                            // can't freeze the serve loop. See the
+                            // `FetchPrDetails` comment below for the
+                            // full reasoning; the bug originally
+                            // surfaced there but every GraphQL-touching
+                            // handler has the same exposure.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_confirm_merge(
+                                    &cfg,
+                                    issue_workspace_key,
+                                    pr_workspace_key,
+                                    accept,
+                                )
+                                .await;
+                            });
                         }
                         pilot_ipc::Command::AdoptSessions {
                             source_workspace_key,
@@ -709,31 +724,48 @@ impl Server {
                             .await;
                         }
                         pilot_ipc::Command::MergePr { workspace_key } => {
-                            polling::handle_merge_pr(&self.config, workspace_key)
-                                .await;
+                            // Detach for the same reason as
+                            // `FetchPrDetails` — `gh pr merge` shells
+                            // out and can stall for seconds.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_merge_pr(&cfg, workspace_key).await;
+                            });
                         }
                         pilot_ipc::Command::FetchPrDetails { workspace_key } => {
-                            polling::handle_fetch_pr_details(
-                                &self.config,
-                                workspace_key,
-                            )
-                            .await;
+                            // **Bug fix**: `handle_fetch_pr_details`
+                            // runs a GraphQL HTTP call. If the network
+                            // stalls (octocrab, dropped connection,
+                            // silent rate-limit), `.await`-ing it
+                            // inline freezes the entire serve loop —
+                            // `tokio::select!` cannot pick the next
+                            // arm until the current one returns. The
+                            // user perceives this as "Spawn key does
+                            // nothing": Spawn/Write/MarkRead all
+                            // queue behind the wedged fetch.
+                            //
+                            // Spawning detaches the handler so the
+                            // serve loop is back in `select!` within
+                            // microseconds. Order doesn't matter for
+                            // this handler — it just merges activity
+                            // and broadcasts via the bus.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_fetch_pr_details(&cfg, workspace_key).await;
+                            });
                         }
                         pilot_ipc::Command::RequestReviewers { workspace_key, logins } => {
-                            polling::handle_request_reviewers(
-                                &self.config,
-                                workspace_key,
-                                logins,
-                            )
-                            .await;
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_request_reviewers(&cfg, workspace_key, logins)
+                                    .await;
+                            });
                         }
                         pilot_ipc::Command::AddAssignees { workspace_key, logins } => {
-                            polling::handle_add_assignees(
-                                &self.config,
-                                workspace_key,
-                                logins,
-                            )
-                            .await;
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_add_assignees(&cfg, workspace_key, logins).await;
+                            });
                         }
                     }
                 }
