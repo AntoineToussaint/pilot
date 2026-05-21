@@ -2127,37 +2127,34 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
-                // Shift+click in the terminal pane is the
-                // pilot-selection escape hatch. It bypasses the
-                // "forward to inner program" path so the user can
-                // drag-select text inside a mouse-tracking app
-                // (Claude Code / vim / less) — without it the only
-                // way to copy from the terminal pane was the host
-                // terminal's native selection, which crosses pilot's
-                // pane boundaries and produces the "selection
-                // band spans the whole screen" symptom.
-                //
-                // The host terminal's modifier-bypass (Option on
-                // macOS) is *not* the right tool here because it
-                // disables pilot's mouse capture entirely — pilot
-                // can't render a bounded highlight, and the
-                // resulting selection drags across the sidebar /
-                // activity panes uselessly.
-                let shift_held = m
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::SHIFT);
-                let claim_for_selection = shift_held
-                    && rect_contains(right_bottom_rect, m.column, m.row)
+                // A left-click in the terminal pane ALWAYS starts a
+                // potential pilot selection — we commit to that
+                // even when the inner program is mouse-tracking
+                // (claude / vim / less). Why: macOS's "Option /
+                // Shift to bypass app mouse" convention sends the
+                // bypassed drag straight to the host terminal,
+                // whose native selection happily extends across
+                // pilot's sidebar + activity panes (the screenshot
+                // the user kept seeing). The host can't draw a
+                // pane-bounded highlight; only pilot can. Trade-
+                // off: drag-as-mouse-tracking-input to claude is
+                // disabled, but plain Down/Up (click) still
+                // forwards on release if start == end — so single
+                // clicks the inner app cares about still work.
+                let claim_for_selection = rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
-                    && matches!(button, crossterm::event::MouseButton::Left);
+                    && matches!(button, crossterm::event::MouseButton::Left)
+                    && self
+                        .layout
+                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
+                        .is_none();
 
-                // Click inside the terminal pane while the inner
-                // program tracks mouse → forward the click as an
-                // escape sequence so Claude Code et al. respond to
-                // their own UI. Splitter drag still wins on the
-                // splitter line. Shift+click is the explicit
-                // "actually no, give it to pilot for selection"
-                // override and skips the forward branch.
+                // Forward CLICK-down to mouse-tracking inner programs
+                // only when we're NOT claiming for selection — i.e.,
+                // non-left buttons. Left clicks are deferred: we set
+                // up a pilot selection on Down and decide on Up
+                // whether to forward (start == end → click) or copy
+                // (start != end → drag-selection).
                 if !claim_for_selection
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
@@ -2225,19 +2222,15 @@ impl<T: TerminalAdapter> Model<T> {
                     // double-click events so synthesize from timing:
                     // a second left-click on the same cell within
                     // 400ms = double.
-                    // Pilot-side selection start. Two cases:
-                    // - Inner program ISN'T tracking mouse (shell at
-                    //   prompt etc.): plain left-click starts.
-                    // - Inner program IS tracking mouse (claude /
-                    //   vim / less): require Shift held (matches
-                    //   the `claim_for_selection` branch above).
-                    // Recording start = end means a click without
-                    // drag is still treated as a click (the Up
-                    // handler skips the copy if start == end).
+                    // Pilot-side selection start: any left-click that
+                    // landed in the terminal pane. Recording start ==
+                    // end means a click-without-drag is treated as a
+                    // click in the Up handler — it'll then forward
+                    // press+release to the inner program if it's
+                    // mouse-tracking.
                     if focus == PaneFocus::Terminals
                         && matches!(button, crossterm::event::MouseButton::Left)
-                        && (claim_for_selection
-                            || !self.terminals.focused_terminal_tracks_mouse())
+                        && claim_for_selection
                     {
                         self.terminal_selection = Some(((m.column, m.row), (m.column, m.row)));
                     } else {
@@ -2298,13 +2291,14 @@ impl<T: TerminalAdapter> Model<T> {
                     // the write until release.
                     self.layout.persist();
                 }
-                // Pilot-side selection release: extract text from
-                // libghostty's grid between start and end cells,
-                // OSC 52 it to the host clipboard. The footer
-                // confirms how many lines made it across.
+                // Pilot-side selection release: classify Up as a
+                // drag-copy (different start vs end → reverse-video
+                // range matters → OSC 52 the extracted text) or as
+                // a plain click that we deferred from Down (start ==
+                // end → forward press+release to the inner program
+                // so its click handlers fire).
+                let mut click_no_drag_at: Option<(u16, u16)> = None;
                 if let Some((start, end)) = self.terminal_selection.take() {
-                    // Single-click-with-no-drag is a normal click;
-                    // skip the copy gesture for it.
                     let was_drag = start != end;
                     if was_drag {
                         let text = self.terminals.extract_text(right_bottom_rect, start, end);
@@ -2321,16 +2315,26 @@ impl<T: TerminalAdapter> Model<T> {
                                 NoticeSeverity::Hint,
                             ));
                         }
+                    } else {
+                        // Up at the same cell as Down → this was a
+                        // click, not a drag. Replay press+release to
+                        // the inner program if it's mouse-tracking.
+                        click_no_drag_at = Some(start);
                     }
                     self.redraw = true;
                 }
-                if !was_drag
-                    && rect_contains(right_bottom_rect, m.column, m.row)
+                if let Some((col, row)) = click_no_drag_at
+                    && rect_contains(right_bottom_rect, col, row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
                 {
-                    let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
+                    // Forward the press FIRST, then the release —
+                    // claude/vim/etc. need both to register a click.
+                    // The Down handler skipped the press because it
+                    // was claiming the input for selection; here we
+                    // know the user didn't drag, so we replay it.
+                    let cell_col = col.saturating_sub(right_bottom_rect.x) as u32;
+                    let cell_row = row.saturating_sub(right_bottom_rect.y) as u32;
                     let vt_button = match button {
                         crossterm::event::MouseButton::Left => libghostty_vt::mouse::Button::Left,
                         crossterm::event::MouseButton::Middle => {
@@ -2338,15 +2342,20 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                         crossterm::event::MouseButton::Right => libghostty_vt::mouse::Button::Right,
                     };
-                    if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
+                    for action in [
+                        libghostty_vt::mouse::Action::Press,
                         libghostty_vt::mouse::Action::Release,
-                        Some(vt_button),
-                        cell_col,
-                        cell_row,
-                    ) {
-                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
-                        self.redraw = true;
+                    ] {
+                        if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
+                            action,
+                            Some(vt_button),
+                            cell_col,
+                            cell_row,
+                        ) {
+                            self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                        }
                     }
+                    self.redraw = true;
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
